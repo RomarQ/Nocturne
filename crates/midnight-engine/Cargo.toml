@@ -1,0 +1,10 @@
+[package]
+name = "midnight-engine"
+description = "Off-chain testing engine for midnight-edsl contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+midnight-types = { workspace = true }
+midnight-storage = { workspace = true }

@@ -1,0 +1,7 @@
+[package]
+name = "counter-contract"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+midnight = { path = "../../crates/midnight" }

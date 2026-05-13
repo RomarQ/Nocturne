@@ -1,0 +1,29 @@
+[package]
+name = "midnight"
+description = "Rust eDSL for writing Midnight smart contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+midnight-macro = { workspace = true }
+midnight-types = { workspace = true }
+midnight-storage = { workspace = true }
+# Future: midnight-env, midnight-primitives, midnight-engine
+
+# Re-exported midnight-ledger crates for runtime transcript construction
+midnight-onchain-vm = { workspace = true }
+midnight-onchain-state = { workspace = true }
+midnight-transient-crypto = { workspace = true }
+midnight-base-crypto = { workspace = true }
+midnight-zkir = { workspace = true }
+
+[dev-dependencies]
+midnight-codegen = { workspace = true }
+midnight-ir = { workspace = true }
+midnight-metadata = { workspace = true }
+midnight-base-crypto = { workspace = true }
+syn = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+rand = "0.8"

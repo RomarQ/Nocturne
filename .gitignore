@@ -1,0 +1,9 @@
+/target
+Cargo.lock
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Reference repos are not part of this project's source
+/reference-repos

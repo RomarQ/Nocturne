@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/midnight",
+    "crates/midnight-macro",
+    "crates/midnight-ir",
+    "crates/midnight-codegen",
+    "crates/midnight-types",
+    "crates/midnight-storage",
+    "crates/midnight-env",
+    "crates/midnight-metadata",
+    "crates/midnight-engine",
+    "crates/midnight-e2e",
+    "crates/midnight-primitives",
+    "tools/cargo-midnight",
+    "examples/counter-contract",
+]
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/user/midnight-edsl"
+version = "0.1.0"
+
+[workspace.dependencies]
+# Internal crates
+midnight = { path = "crates/midnight", version = "0.1.0" }
+midnight-macro = { path = "crates/midnight-macro", version = "0.1.0" }
+midnight-ir = { path = "crates/midnight-ir", version = "0.1.0" }
+midnight-codegen = { path = "crates/midnight-codegen", version = "0.1.0" }
+midnight-types = { path = "crates/midnight-types", version = "0.1.0" }
+midnight-storage = { path = "crates/midnight-storage", version = "0.1.0" }
+midnight-env = { path = "crates/midnight-env", version = "0.1.0" }
+midnight-metadata = { path = "crates/midnight-metadata", version = "0.1.0" }
+midnight-engine = { path = "crates/midnight-engine", version = "0.1.0" }
+midnight-e2e = { path = "crates/midnight-e2e", version = "0.1.0" }
+midnight-primitives = { path = "crates/midnight-primitives", version = "0.1.0" }
+
+# Midnight ledger crates (from crates.io)
+midnight-zkir = "2.1.0"
+midnight-onchain-vm = "3.0.0"
+midnight-onchain-state = "3.0.0"
+midnight-transient-crypto = "2.0.1"
+midnight-base-crypto = "1.0.0"
+midnight-serialize = "1.0.0"
+
+# Proc macro tooling
+syn = { version = "2", features = ["full", "extra-traits", "visit", "visit-mut"] }
+quote = "1"
+proc-macro2 = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Misc
+thiserror = "2"

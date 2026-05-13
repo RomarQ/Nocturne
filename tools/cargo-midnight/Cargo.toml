@@ -1,0 +1,19 @@
+[package]
+name = "cargo-midnight"
+description = "Cargo subcommand for building, testing, and deploying midnight-edsl contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[[bin]]
+name = "cargo-midnight"
+path = "src/main.rs"
+
+[dependencies]
+midnight-zkir = { workspace = true }
+midnight-transient-crypto = { workspace = true }
+midnight-base-crypto = { workspace = true }
+midnight-serialize = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+anyhow = "1"

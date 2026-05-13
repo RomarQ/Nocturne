@@ -1,0 +1,9 @@
+[package]
+name = "midnight-env"
+description = "Environment trait and runtime context for midnight-edsl contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+midnight-types = { workspace = true }
