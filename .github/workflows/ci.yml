@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  ci:
+    name: build, test, validate example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: cargo-midnight build (counter example)
+        run: ./target/debug/cargo-midnight build
+
+      - name: Verify build artifacts
+        run: |
+          test -f target/midnight/counter/zkir/increment.zkir
+          test -f target/midnight/counter/compiler/contract-info.json
+
+      - name: cargo-midnight keygen
+        run: ./target/debug/cargo-midnight keygen
+
+      - name: Verify keygen outputs
+        run: |
+          test -f target/midnight/counter/zkir/increment.prover
+          test -f target/midnight/counter/zkir/increment.verifier
