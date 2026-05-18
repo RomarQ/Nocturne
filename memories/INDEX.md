@@ -11,3 +11,4 @@ Durable findings about Nocturne's interaction with midnight-ledger. Read before 
 | [compactc-vs-nocturne-divergences.md](compactc-vs-nocturne-divergences.md) | Storage and branching encoding differences between compactc and Nocturne that limit cross-compiler VK equivalence beyond the counter contract. |
 | [where-to-find-things-in-midnight-ledger.md](where-to-find-things-in-midnight-ledger.md) | Reference map: which crate/file/function implements which part of the protocol. |
 | [witness-type-support.md](witness-type-support.md) | Boolean/Field/Uint<N> witnesses supported. Bytes<N> rejected at parse time pending multi-Fr witness emission. |
+| [map-ledger-field-encoding.md](map-ledger-field-encoding.md) | Empirical compactc emission for `Map<K, V>` insert/lookup/member, opcode reference, and staged implementation plan. |
