@@ -25,6 +25,19 @@ impl<K: Eq + Hash + Clone, V: Clone> Map<K, V> {
         self.inner.insert(key, value);
     }
 
+    /// HashMap-style alias for `set`. Returns the previous value, if any.
+    /// The eDSL exposes this name because the on-chain VM verb is `Ins`
+    /// (insert) and compact's surface API uses `insert(k, v)`.
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        self.inner.insert(key, value)
+    }
+
+    /// Remove a key, returning the value that was stored (if any). Mirrors
+    /// the on-chain `Rem` opcode.
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        self.inner.remove(key)
+    }
+
     pub fn contains(&self, key: &K) -> bool {
         self.inner.contains_key(key)
     }

@@ -283,42 +283,22 @@ fn generate_op_stmt(
                         }
                     }
                 }
+                "insert" => {
+                    // `insert` on a Map field — see the Map::insert arm below.
+                    // If the field happens to be a Cell, fall through to set.
+                    if field_ty.and_then(extract_map_kv_types).is_some() {
+                        generate_map_insert(field_idx, args, field_ty)
+                    } else {
+                        generate_cell_set(field_idx, args, field_ty)
+                    }
+                }
                 "set" => {
-                    // On-chain pattern (matches compactc 0.30.0 emission for
-                    // `Cell<T>::set(v)` where the contract state is a top-of-stack
-                    // `StateValue::Array`):
-                    //
-                    //   Op::Push { storage: false, value: StateValue::Cell(AlignedValue::from(field_idx)) }  // key
-                    //   Op::Push { storage: true,  value: StateValue::Cell(AlignedValue::from(v)) }          // value
-                    //   Op::Ins  { cached: false, n: 1 }                                                     // arr[key] = value
-                    //
-                    // The two `Push` ops differ in `storage` (Weak vs Strong)
-                    // and `Ins { cached: false }` pops `[value, key, container]`.
-                    // No `Idx` needed because the array `Ins` indexes by the key.
-                    let value_expr = args
-                        .first()
-                        .map(arg_to_runtime_expr)
-                        .unwrap_or_else(|| quote! { () });
-                    // Same alignment-matching cast as `contains`: extract T
-                    // from Cell<T> and cast the value to the primitive width
-                    // the IR expects (Uint<64> → u64, not the u128 that
-                    // `.value()` returns).
-                    let t_ty = field_ty.and_then(extract_cell_inner_type);
-                    let value_cast = t_ty
-                        .as_ref()
-                        .and_then(primitive_cast_for_type)
-                        .map(|cast| quote! { (#value_expr) #cast })
-                        .unwrap_or_else(|| quote! { #value_expr });
-                    quote! {
-                        ops.push(Op::Push {
-                            storage: false,
-                            value: StateValue::Cell(Sp::new(AlignedValue::from(#field_idx))),
-                        });
-                        ops.push(Op::Push {
-                            storage: true,
-                            value: StateValue::Cell(Sp::new(AlignedValue::from(#value_cast))),
-                        });
-                        ops.push(Op::Ins { cached: false, n: 1 });
+                    // `set` is also used as an alias for Map::insert. Route
+                    // based on the field type.
+                    if field_ty.and_then(extract_map_kv_types).is_some() {
+                        generate_map_insert(field_idx, args, field_ty)
+                    } else {
+                        generate_cell_set(field_idx, args, field_ty)
                     }
                 }
                 _ => quote! {},
@@ -490,6 +470,88 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
     }
 }
 
+/// Emit the runtime ops for `Cell<T>::set(v)` — see comment in the
+/// `set`/`insert` arm above for the on-chain pattern.
+fn generate_cell_set(field_idx: u8, args: &[ExprIR], field_ty: Option<&syn::Type>) -> TokenStream {
+    let value_expr = args
+        .first()
+        .map(arg_to_runtime_expr)
+        .unwrap_or_else(|| quote! { () });
+    let t_ty = field_ty.and_then(extract_cell_inner_type);
+    let value_cast = t_ty
+        .as_ref()
+        .and_then(primitive_cast_for_type)
+        .map(|cast| quote! { (#value_expr) #cast })
+        .unwrap_or_else(|| quote! { #value_expr });
+    quote! {
+        ops.push(Op::Push {
+            storage: false,
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#field_idx))),
+        });
+        ops.push(Op::Push {
+            storage: true,
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#value_cast))),
+        });
+        ops.push(Op::Ins { cached: false, n: 1 });
+    }
+}
+
+/// Emit the runtime ops for `Map<K, V>::insert(k, v)`. The on-chain pattern
+/// (matches compactc 0.30.0):
+///
+///   Idx{cached:false, push_path:true, [Bytes<1>(field_idx)]}  // navigate into Map
+///   Push{storage:false, Cell(key)}
+///   Push{storage:true,  Cell(value)}
+///   Ins{cached:false, n:1}   // insert (k, v) into the Map
+///   Ins{cached:true,  n:1}   // write modified Map back to the Array
+fn generate_map_insert(
+    field_idx: u8,
+    args: &[ExprIR],
+    field_ty: Option<&syn::Type>,
+) -> TokenStream {
+    let key_expr = args
+        .first()
+        .map(arg_to_runtime_expr)
+        .unwrap_or_else(|| quote! { () });
+    let val_expr = args
+        .get(1)
+        .map(arg_to_runtime_expr)
+        .unwrap_or_else(|| quote! { () });
+
+    // Primitive casts for K and V so the runtime AlignedValue alignment
+    // matches the IR's `aligned_value_encoding` (Uint<64> → Bytes{8}, not
+    // the Bytes{16} that `u128` would produce).
+    let kv = field_ty.and_then(extract_map_kv_types);
+    let key_cast = kv
+        .as_ref()
+        .and_then(|(k, _)| primitive_cast_for_type(k))
+        .map(|c| quote! { (#key_expr) #c })
+        .unwrap_or_else(|| quote! { #key_expr });
+    let val_cast = kv
+        .as_ref()
+        .and_then(|(_, v)| primitive_cast_for_type(v))
+        .map(|c| quote! { (#val_expr) #c })
+        .unwrap_or_else(|| quote! { #val_expr });
+
+    quote! {
+        ops.push(Op::Idx {
+            cached: false,
+            push_path: true,
+            path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+        });
+        ops.push(Op::Push {
+            storage: false,
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_cast))),
+        });
+        ops.push(Op::Push {
+            storage: true,
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#val_cast))),
+        });
+        ops.push(Op::Ins { cached: false, n: 1 });
+        ops.push(Op::Ins { cached: true, n: 1 });
+    }
+}
+
 /// Map a Rust type that flows into `AlignedValue::from(_)` to the primitive
 /// cast suffix the runtime needs to match the IR's alignment table.
 ///
@@ -576,6 +638,27 @@ fn extract_map_key_type(ty: &syn::Type) -> Option<syn::Type> {
                 return Some(t.clone());
             }
         }
+    }
+    None
+}
+
+/// If `ty` is `Map<K, V>`, return `(K, V)`.
+fn extract_map_kv_types(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Map"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+    {
+        let mut type_args = args.args.iter().filter_map(|a| {
+            if let syn::GenericArgument::Type(t) = a {
+                Some(t.clone())
+            } else {
+                None
+            }
+        });
+        let k = type_args.next()?;
+        let v = type_args.next()?;
+        return Some((k, v));
     }
     None
 }

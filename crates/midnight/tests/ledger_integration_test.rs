@@ -53,6 +53,36 @@ mod counter {
 }
 
 #[midnight::contract]
+mod records {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct RecordsState {
+        pub records: Map<Uint<64>, Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct RecordsWitnesses {
+        pub user_id: Uint<64>,
+        pub amount: Uint<64>,
+    }
+
+    impl RecordsState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn record(&mut self, witnesses: &RecordsWitnesses) {
+            self.records.insert(witnesses.user_id, witnesses.amount);
+        }
+    }
+}
+
+#[midnight::contract]
 mod membership {
     use super::*;
 
@@ -157,6 +187,34 @@ fn build_counter_ir() -> midnight_zkir::IrSource {
     let contract = midnight_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output.circuits.into_iter().next().unwrap().ir_source
+}
+
+fn build_record_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod records {
+            #[midnight(ledger)]
+            pub struct RecordsState { records: Map<Uint<64>, Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct RecordsWitnesses { pub user_id: Uint<64>, pub amount: Uint<64> }
+            impl RecordsState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn record(&mut self, witnesses: &RecordsWitnesses) {
+                    self.records.insert(witnesses.user_id, witnesses.amount);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "record")
+        .unwrap()
+        .ir_source
 }
 
 fn build_check_member_ir() -> midnight_zkir::IrSource {
@@ -512,4 +570,58 @@ async fn map_contains_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map::contains");
+}
+
+/// Confirms `Map<Uint<64>, Uint<64>>::insert(k, v)` produces an on-chain
+/// compatible transcript: the IR Idx+Push+Push+Ins+Ins sequence and the
+/// runtime ops match exactly, the proof constructs through
+/// `ContractCallExt::construct_proof`, and the verifier accepts
+/// ledger-shape PIs. Inserts return no value, so there's no Popeq.
+#[tokio::test]
+async fn map_insert_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_record_ir();
+    let mut state = records::RecordsState::new();
+    let witnesses = records::RecordsWitnesses {
+        user_id: Uint::<64>::from(7u64),
+        amount: Uint::<64>::from(42u64),
+    };
+    // record(&mut self, ...) requires &mut state — but the transcript
+    // builder for circuits without reads doesn't take state, so we
+    // construct the transcript first and then can mutate state if we
+    // want (we don't need to here).
+    let nocturne_transcript = records::transcript::build_record_transcript(&witnesses);
+    let _ = &mut state; // silence unused warning
+
+    // PrivateInput reads in IR order: user_id, then amount.
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> = vec![
+        midnight::runtime::base_crypto::fab::AlignedValue::from(7u64),
+        midnight::runtime::base_crypto::fab::AlignedValue::from(42u64),
+    ];
+    let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Map::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map::insert");
 }

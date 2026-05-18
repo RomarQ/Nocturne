@@ -226,8 +226,8 @@ impl ZkirEmitter {
                 let field_ty = self.field_types.get(field_idx as usize).cloned();
                 let map_kv = field_ty.as_ref().and_then(extract_map_kv_types);
 
-                if let Some((k_ty, _v_ty)) = map_kv {
-                    return self.emit_map_method(field_idx, &method_name, args, &k_ty);
+                if let Some((k_ty, v_ty)) = map_kv {
+                    return self.emit_map_method(field_idx, &method_name, args, &k_ty, &v_ty);
                 }
 
                 match method_name.as_str() {
@@ -611,6 +611,7 @@ impl ZkirEmitter {
         method_name: &str,
         args: &[midnight_ir::ExprIR],
         k_ty: &syn::Type,
+        v_ty: &syn::Type,
     ) -> Option<Index> {
         // Compute the key encoding once. Map<K, V> with K that doesn't fit
         // in a single Fr (e.g. Bytes<32>) is rejected here — see
@@ -625,8 +626,18 @@ impl ZkirEmitter {
                 let key_var = args.first().and_then(|a| self.emit_expr(a))?;
                 self.emit_map_member(field_idx, key_var, &key_enc)
             }
-            // `get`, `set`/`insert`, `remove` are upcoming stages. Leave
-            // them to fall through to the unsupported path until then.
+            "insert" | "set" => {
+                // Value encoding requires V to fit in a single Fr too.
+                let val_enc = aligned_value_encoding(v_ty)?;
+                if val_enc.value_field_count != 1 {
+                    return None;
+                }
+                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
+                let val_var = args.get(1).and_then(|a| self.emit_expr(a))?;
+                self.emit_map_insert(field_idx, key_var, &key_enc, val_var, &val_enc)
+            }
+            // `get`, `remove` are upcoming stages. Leave them to fall through
+            // to the unsupported path until then.
             _ => {
                 for arg in args {
                     self.emit_expr(arg);
@@ -634,6 +645,68 @@ impl ZkirEmitter {
                 None
             }
         }
+    }
+
+    /// Emit ZKIR for `Map::insert(k, v)` at `field_idx`.
+    ///
+    /// On-chain encoding (matches compactc 0.30.0 for `m.insert(k, v)`):
+    ///
+    /// ```text
+    /// Idx  { cached: false, push_path: true, path: [field_idx] }  // [0x70, align(2), field_idx(1)]
+    /// Push { storage: false, value: Cell(key) }                    // [0x10, Cell disc(1), K-align, K-value]
+    /// Push { storage: true,  value: Cell(value) }                  // [0x11, Cell disc(1), V-align, V-value]
+    /// Ins  { cached: false, n: 1 }                                 // [0x91]  insert (k, v) into Map
+    /// Ins  { cached: true,  n: 1 }                                 // [0xa1]  write modified Map back to Array
+    /// ```
+    ///
+    /// `Idx { push_path: true }` navigates into the Map field while keeping
+    /// the parent Array on the stack (so the second `Ins` can put the
+    /// modified Map back). The first `Ins` pops `[value, key, map]` and
+    /// inserts. The second `Ins` pops `[modified_map, path, array]` and
+    /// restores the field. See `memories/map-ledger-field-encoding.md`.
+    fn emit_map_insert(
+        &mut self,
+        field_idx: u8,
+        key_var: Index,
+        key_encoding: &AlignedValueEncoding,
+        val_var: Index,
+        val_encoding: &AlignedValueEncoding,
+    ) -> Option<Index> {
+        let g = self.guard;
+
+        // Idx { cached: false, push_path: true, path: [Bytes<1>(field_idx)] } → 0x70.
+        let idx_op = self.emit_load_imm(Fr::from(0x70u64));
+        self.push_declare_pub_input(idx_op);
+        self.emit_key_field_repr(field_idx);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Push { storage: false, value: Cell(key) } — the K side.
+        self.emit_push_cell(key_var, Some(key_encoding), /* storage = */ false);
+
+        // Push { storage: true, value: Cell(value) } — the V side.
+        self.emit_push_cell(val_var, Some(val_encoding), /* storage = */ true);
+
+        // Ins { cached: false, n: 1 } → 0x91 — first Ins: (k, v) into Map.
+        let ins1_op = self.emit_load_imm(Fr::from(0x91u64));
+        self.push_declare_pub_input(ins1_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Ins { cached: true, n: 1 } → 0xa1 — second Ins: write Map back to Array.
+        let ins2_op = self.emit_load_imm(Fr::from(0xa1u64));
+        self.push_declare_pub_input(ins2_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Insert returns no value to the circuit.
+        None
     }
 
     /// Emit ZKIR for `Map::contains(k) -> Boolean` at `field_idx`.

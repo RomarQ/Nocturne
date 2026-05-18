@@ -297,6 +297,90 @@ mod tests {
     }
 
     #[test]
+    fn map_insert_is_satisfiable() {
+        // Verifies the IR shape for `Map<K, V>::insert(k, v)`.
+        // On-chain encoding (matches compactc 0.30.0):
+        //   Idx{cached:false, push_path:true, [Bytes<1>(field_idx)]}  → [0x70, 1, 1, field_idx]
+        //   Push{storage:false, Cell(key)}                             → [0x10, 1, K-align, K-value]
+        //   Push{storage:true,  Cell(value)}                           → [0x11, 1, V-align, V-value]
+        //   Ins{cached:false, n:1}                                      → [0x91]
+        //   Ins{cached:true,  n:1}                                      → [0xa1]
+        let (name, ir) = compile_first_circuit(quote::quote! {
+            mod records {
+                #[midnight(ledger)]
+                pub struct State {
+                    records: Map<Uint<64>, Uint<64>>,
+                }
+                #[midnight(witnesses)]
+                pub struct W {
+                    user_id: Uint<64>,
+                    amount: Uint<64>,
+                }
+                impl State {
+                    #[midnight(constructor)]
+                    pub fn new() -> Self { Self { records: Map::empty() } }
+                    #[midnight(circuit)]
+                    pub fn record(&mut self, witnesses: &W) {
+                        self.records.insert(witnesses.user_id, witnesses.amount);
+                    }
+                }
+            }
+        });
+        print_zkir(&name, &ir);
+
+        let key_val = Fr::from(0xAAAAu64);
+        let amt_val = Fr::from(0xBBBBu64);
+
+        let public_transcript_inputs: Vec<Fr> = vec![
+            // Idx{cached:false, push_path:true, [Bytes<1>(0)]}
+            Fr::from(0x70u64),
+            Fr::from(0x01u64), // alignment segment_count
+            Fr::from(0x01u64), // alignment Bytes{1} atom
+            Fr::from(0x00u64), // field_idx
+            // Push{storage:false, Cell(Uint<64>)} — KEY
+            Fr::from(0x10u64),
+            Fr::from(0x01u64), // Cell discriminant
+            Fr::from(0x01u64), // alignment segment_count
+            Fr::from(0x08u64), // alignment Bytes{8} atom
+            key_val,
+            // Push{storage:true,  Cell(Uint<64>)} — VALUE
+            Fr::from(0x11u64),
+            Fr::from(0x01u64),
+            Fr::from(0x01u64),
+            Fr::from(0x08u64),
+            amt_val,
+            // Ins{cached:false, n:1} → 0x91
+            Fr::from(0x91u64),
+            // Ins{cached:true,  n:1} → 0xa1
+            Fr::from(0xa1u64),
+        ];
+
+        let preimage = ProofPreimage {
+            inputs: vec![],
+            private_transcript: vec![key_val, amt_val],
+            public_transcript_inputs,
+            public_transcript_outputs: vec![],
+            binding_input: Fr::from(42u64),
+            communications_commitment: if ir.do_communications_commitment {
+                Some(comm_for(&[], &[]))
+            } else {
+                None
+            },
+            key_location: KeyLocation(std::borrow::Cow::Borrowed("test")),
+        };
+
+        match ir.check(&preimage) {
+            Ok(pi_skips) => {
+                println!("✓ Circuit '{name}' satisfiable! pi_skips: {pi_skips:?}");
+            }
+            Err(e) => {
+                let json = serde_json::to_string_pretty(&ir).unwrap_or_default();
+                panic!("Circuit '{name}' check failed: {e}\n\nZKIR:\n{json}");
+            }
+        }
+    }
+
+    #[test]
     fn map_contains_is_satisfiable() {
         // Verifies the IR shape for `Map<K, V>::contains(k) -> bool`.
         // Encoding (matches compactc 0.30.0 emission for member):

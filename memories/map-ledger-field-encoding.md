@@ -85,7 +85,7 @@ Beyond per-operation emission, Map needs:
 | Stage 0 | Generic key encoding (`emit_key_field_repr` for any `K`) + StateValue construction helpers | landed (alongside Cell::set) |
 | Stage 1 | `Map::contains(&k) -> bool` end-to-end with ledger integration test | **landed** |
 | Stage 2 | `Map::get(&k) -> Option<V>` end-to-end | pending |
-| Stage 3 | `Map::insert(k, v)` end-to-end | pending |
+| Stage 3 | `Map::insert(k, v)` end-to-end with ledger integration test | **landed** |
 | Stage 4 | `Map::remove(&k)` end-to-end | pending |
 
 ### Stage 1 status
@@ -112,11 +112,38 @@ Beyond per-operation emission, Map needs:
   proves+verifies a `Map<Uint<64>, Boolean>::contains` circuit through
   `ContractCallExt::construct_proof`.
 
-Stage 2 onward: `Map::get` returns `Option<V>` which needs Option
-alignment encoding (`Alignment::concat([bool, V])`); Stage 3 (`insert`)
-is the larger one, reusing the Cell::set Push+Push+Ins pattern with K
-and V types instead of `Bytes<1>` and `Cell<T>`. Stage 4 (`remove`)
-uses the `Rem` opcode (0x19/0x1a).
+### Stage 3 status
+
+`Map<K, V>::insert(k, v)` is on-chain compatible for single-Fr K and V
+(same constraints as `contains` — Boolean, integers, Uint<N≤253>):
+
+- IR: `emit_map_insert` in `zkir_emitter.rs` emits the
+  Idx{push_path:true} + Push(key) + Push(value) + Ins{cached:false} +
+  Ins{cached:true} sequence. The first `Ins` inserts (k, v) into the
+  Map; the second `Ins` writes the modified Map back to the contract
+  Array (which the `Idx{push_path:true}` kept on the stack underneath).
+  Same `emit_push_cell` helper used by Cell::set.
+- Transcript: `generate_map_insert` in `transcript_codegen.rs` emits
+  matching runtime ops with `primitive_cast_for_type` applied to both
+  K and V. Both `"set"` and `"insert"` method names route here when
+  the field is a Map (a Cell field still goes to `generate_cell_set`).
+- Runtime API: `Map::insert(key: K, value: V) -> Option<V>` added next
+  to `set` (HashMap-style). `Map::remove(&K) -> Option<V>` also added
+  in anticipation of Stage 4.
+- E2E test: `ledger_integration_test::map_insert_proves_and_verifies`
+  proves+verifies a `Map<Uint<64>, Uint<64>>::insert(k, v)` circuit
+  through `ContractCallExt::construct_proof`. Insert returns no value
+  so the test has no Popeq — purely the 5-op sequence.
+
+### Remaining stages
+
+- **Stage 2 (`Map::get`)**: returns `Option<V>` which needs Option
+  alignment encoding (`Alignment::concat([bool, V])`). Likely needs a
+  new `aligned_value_encoding_option(v_ty)` variant and matching IR
+  emission for the Option discriminant + V slot.
+- **Stage 4 (`Map::remove`)**: uses the `Rem` opcode (0x19/0x1a).
+  Should be the smallest of the remaining stages — same Idx + Push key
+  pattern as contains, then `Rem` instead of `Member`, no Popeq.
 
 ## References
 
