@@ -144,15 +144,29 @@ async fn prove_and_verify_voting_with_witness() {
     println!("Proof generated: {} bytes, {} public inputs", proof.0.len(), pis.len());
     println!("Skips: {skips:?}");
 
-    // TODO: assert pis matches the ledger's public_inputs() layout, as
-    // proof_generation_test does for counter. For conditional circuits, prove
-    // returns `[binding_input, comm, ..pis for BOTH branches]` (DeclarePubInput
-    // always pushes; PiSkip only records skip ranges). The ledger's
-    // public_inputs() iterates the on-chain transcript program — which only
-    // holds the active branch — so it builds a shorter vector. Reconciling
-    // these requires either the ledger feeding placeholder slots for inactive
-    // branches, or the verifier consuming pi_skips. Investigate before adding
-    // the assertion here.
+    // KNOWN: prove+verify pass locally, but this circuit is NOT on-chain
+    // verifiable in its current form. Investigation 2026-05-18:
+    //
+    // - ledger::prove::ContractCall::prove (ledger/src/prove.rs:263-289)
+    //   rewrites the submitted active-only transcript by interleaving
+    //   Op::Noop { n: count } per pi_skips. Op::Noop's field_repr is
+    //   `vec![0u8.into(); n]` (onchain-vm/src/ops.rs:403) — pure zeros.
+    //
+    // - midnight-zkir's preprocess (zkir/src/ir_vm.rs:339-342) pushes
+    //   `memory[var]` to pis for every DeclarePubInput, with no
+    //   zero-out-on-inactive-guard logic. With Nocturne's per-branch
+    //   DeclarePubInput layout, the inactive branch's DeclarePubInputs end
+    //   up holding LoadImm values (non-zero), not zeros.
+    //
+    // - Compactc avoids this by emitting ONE set of DeclarePubInputs and
+    //   multiplexing branch values with cond_select. The on-chain
+    //   active-only transcript exactly fills those slots, and the Noop
+    //   path is never exercised because guard=1 PiSkips don't fire on the
+    //   active path.
+    //
+    // Fix: refactor the conditional-branch ZKIR emitter to use compactc's
+    // cond_select-multiplexing approach (single set of DeclarePubInputs
+    // with cond_select bridging branch values). Tracked separately.
 
     // Verify.
     vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
