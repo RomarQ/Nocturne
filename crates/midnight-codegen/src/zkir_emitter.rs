@@ -90,6 +90,14 @@ struct ZkirEmitter {
     variables: HashMap<String, Index>,
     num_inputs: u32,
     guard: Index,
+    /// True when emitting inside a conditional branch. `DeclarePubInput`
+    /// values must be multiplexed against zero via `CondSelect(guard, value, 0)`
+    /// so the inactive-branch slot is zero — matching `Op::Noop`'s zero
+    /// `field_repr` that the ledger interleaves at verify time. See
+    /// `memories/conditional-branch-cond-select-zeroing.md`.
+    in_conditional: bool,
+    /// Cached `LoadImm 0` to avoid re-emitting for every guarded declare.
+    zero_var: Option<Index>,
     field_names: Vec<String>,
     /// Witness field name → type, for emitting type constraints on PrivateInput.
     witness_types: HashMap<String, syn::Type>,
@@ -103,9 +111,38 @@ impl ZkirEmitter {
             variables: HashMap::new(),
             num_inputs: 0,
             guard: 0,
+            in_conditional: false,
+            zero_var: None,
             field_names: field_names.to_vec(),
             witness_types: witness_types.clone(),
         }
+    }
+
+    /// Emit (or reuse a cached) `LoadImm 0`.
+    fn emit_load_zero(&mut self) -> Index {
+        if let Some(z) = self.zero_var {
+            return z;
+        }
+        let z = self.emit_load_imm(Fr::from(0u64));
+        self.zero_var = Some(z);
+        z
+    }
+
+    /// Emit a `DeclarePubInput`, wrapping the value in `CondSelect(guard, value, 0)`
+    /// when inside a conditional branch. See memory file referenced above for the
+    /// on-chain protocol invariant this enforces.
+    fn push_declare_pub_input(&mut self, value: Index) {
+        let final_var = if self.in_conditional {
+            let zero = self.emit_load_zero();
+            self.emit_instruction(Instruction::CondSelect {
+                bit: self.guard,
+                a: value,
+                b: zero,
+            })
+        } else {
+            value
+        };
+        self.instructions.push(Instruction::DeclarePubInput { var: final_var });
     }
 
     fn emit_circuit(&mut self, circuit: &CircuitIR) -> ZkirOutput {
@@ -284,28 +321,52 @@ impl ZkirEmitter {
 
             ExprIR::If { cond, then_branch, else_branch, .. } => {
                 let cond_idx = self.emit_expr(cond)?;
-
-                // Save the outer guard and use the condition as the guard for
-                // the then-branch. This makes pi_skip conditional on the cond.
                 let outer_guard = self.guard;
-                self.guard = cond_idx;
+                let outer_in_conditional = self.in_conditional;
+
+                // For nested conditionals, the effective guard is `outer AND cond`,
+                // computed as `cond_select(cond, outer_guard, 0)` (returns outer_guard
+                // when cond=true, 0 when cond=false). At top level, the outer guard is
+                // the always-true constant, so we can just use cond directly.
+                let then_guard = if outer_in_conditional {
+                    let zero = self.emit_load_zero();
+                    self.emit_instruction(Instruction::CondSelect {
+                        bit: cond_idx,
+                        a: outer_guard,
+                        b: zero,
+                    })
+                } else {
+                    cond_idx
+                };
+                self.guard = then_guard;
+                self.in_conditional = true;
 
                 for expr in then_branch {
                     self.emit_expr(expr);
                 }
 
                 if let Some(else_stmts) = else_branch {
-                    // Else branch: guard = !cond
-                    let not_cond = self.emit_instruction(Instruction::Not { a: cond_idx });
-                    self.guard = not_cond;
+                    // Else branch: `outer AND NOT cond`, computed as
+                    // `cond_select(cond, 0, outer_guard)`. At top level, just `!cond`.
+                    let else_guard = if outer_in_conditional {
+                        let zero = self.emit_load_zero();
+                        self.emit_instruction(Instruction::CondSelect {
+                            bit: cond_idx,
+                            a: zero,
+                            b: outer_guard,
+                        })
+                    } else {
+                        self.emit_instruction(Instruction::Not { a: cond_idx })
+                    };
+                    self.guard = else_guard;
 
                     for expr in else_stmts {
                         self.emit_expr(expr);
                     }
                 }
 
-                // Restore outer guard.
                 self.guard = outer_guard;
+                self.in_conditional = outer_in_conditional;
                 Some(cond_idx)
             }
 
@@ -340,7 +401,7 @@ impl ZkirEmitter {
 
             ExprIR::Disclose { value, .. } => {
                 let idx = self.emit_expr(value)?;
-                self.instructions.push(Instruction::DeclarePubInput { var: idx });
+                self.push_declare_pub_input(idx);
                 self.instructions.push(Instruction::PiSkip {
                     guard: Some(self.guard),
                     count: 1,
@@ -409,10 +470,10 @@ impl ZkirEmitter {
         let key_val = self.emit_load_imm(Fr::from(field_idx as u64));
 
         // alignment.field_repr: [segment_count=1, atom(Bytes{1})=1]
-        self.instructions.push(Instruction::DeclarePubInput { var: g });
-        self.instructions.push(Instruction::DeclarePubInput { var: g });
+        self.push_declare_pub_input(g);
+        self.push_declare_pub_input(g);
         // value: [field_idx]
-        self.instructions.push(Instruction::DeclarePubInput { var: key_val });
+        self.push_declare_pub_input(key_val);
     }
 
     // -----------------------------------------------------------------------
@@ -431,20 +492,20 @@ impl ZkirEmitter {
         // Idx { cached: false, push_path: true, path: [Value(field_idx)] }
         // Opcode: 0x70 | (path.len() - 1) = 0x70
         let idx_op = self.emit_load_imm(Fr::from(0x70u64));
-        self.instructions.push(Instruction::DeclarePubInput { var: idx_op });
+        self.push_declare_pub_input(idx_op);
         self.emit_key_field_repr(field_idx);
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 4 });
 
         // Addi { immediate: 1 } → field repr: [0x0e, 1]
         let addi_op = self.emit_load_imm(Fr::from(0x0eu64));
         let one = self.emit_load_imm(Fr::from(1u64));
-        self.instructions.push(Instruction::DeclarePubInput { var: addi_op });
-        self.instructions.push(Instruction::DeclarePubInput { var: one });
+        self.push_declare_pub_input(addi_op);
+        self.push_declare_pub_input(one);
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 2 });
 
         // Ins { cached: true, n: 1 } → field repr: [0xa1]
         let ins_op = self.emit_load_imm(Fr::from(0xa1u64));
-        self.instructions.push(Instruction::DeclarePubInput { var: ins_op });
+        self.push_declare_pub_input(ins_op);
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
 
         Some(one)
@@ -461,20 +522,20 @@ impl ZkirEmitter {
 
         // Dup { n: 0 } → field repr: [0x30]
         let dup_op = self.emit_load_imm(Fr::from(0x30u64));
-        self.instructions.push(Instruction::DeclarePubInput { var: dup_op });
+        self.push_declare_pub_input(dup_op);
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
 
         // Idx { cached: false, push_path: false, path: [Value(field_idx)] }
         // Opcode: 0x50 | 0 = 0x50
         let idx_op = self.emit_load_imm(Fr::from(0x50u64));
-        self.instructions.push(Instruction::DeclarePubInput { var: idx_op });
+        self.push_declare_pub_input(idx_op);
         self.emit_key_field_repr(field_idx);
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 4 });
 
         // Popeq { cached: false } → field repr: [0x0c, result_fields...]
         // The read result comes from the transcript as public_input.
         let popeq_op = self.emit_load_imm(Fr::from(0x0cu64));
-        self.instructions.push(Instruction::DeclarePubInput { var: popeq_op });
+        self.push_declare_pub_input(popeq_op);
         let read_value = self.emit_instruction(Instruction::PublicInput { guard: None });
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
 
@@ -487,21 +548,21 @@ impl ZkirEmitter {
 
         // Idx { cached: false, push_path: true, path: [Value(field_idx)] }
         let idx_op = self.emit_load_imm(Fr::from(0x70u64));
-        self.instructions.push(Instruction::DeclarePubInput { var: idx_op });
+        self.push_declare_pub_input(idx_op);
         self.emit_key_field_repr(field_idx);
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 4 });
 
         // Push { storage: false, value } → [0x10, value_fields...]
         if let Some(val_idx) = value {
             let push_op = self.emit_load_imm(Fr::from(0x10u64));
-            self.instructions.push(Instruction::DeclarePubInput { var: push_op });
-            self.instructions.push(Instruction::DeclarePubInput { var: val_idx });
+            self.push_declare_pub_input(push_op);
+            self.push_declare_pub_input(val_idx);
             self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 2 });
         }
 
         // Ins { cached: true, n: 1 } → [0xa1]
         let ins_op = self.emit_load_imm(Fr::from(0xa1u64));
-        self.instructions.push(Instruction::DeclarePubInput { var: ins_op });
+        self.push_declare_pub_input(ins_op);
         self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
 
         value

@@ -224,14 +224,23 @@ async fn counter_ledger_constructed_preimage_proves_and_verifies() {
         .expect("ledger-constructed preimage must verify end-to-end");
 }
 
-/// Demonstrates the conditional-branch on-chain incompatibility through the
-/// canonical ledger code path. The active-branch-only transcript is what
-/// every on-chain submission carries; for a conditional circuit, prove
-/// returns more PIs than would result from `[binding, comm, ..field_repr(active)]`
-/// alone, because Nocturne's emitter has DeclarePubInputs for both branches.
+/// Confirms on-chain compatibility for a conditional circuit (voting cast_vote).
+///
+/// Reproduces what the ledger does in `ContractCall::prove`
+/// (ledger/src/prove.rs:263-289): walk `pi_skips`, splice `Op::Noop { n }`
+/// into the transcript at each inactive segment. Then build the verifier
+/// PIs the way `ContractCall::public_inputs` does
+/// (`[binding_input, comm, ..field_repr(rewritten_transcript)]`) and verify
+/// the proof with them.
+///
+/// For the fix to be correct, the IR must arrange for `DeclarePubInput`
+/// values inside an inactive branch to be zero — matching `Op::Noop`'s
+/// zero-padding `field_repr`. See
+/// `memories/conditional-branch-cond-select-zeroing.md`.
 #[tokio::test]
-async fn voting_pi_count_diverges_from_active_transcript() {
+async fn voting_verifies_with_ledger_shape_pis() {
     use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
     use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use midnight::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
@@ -247,38 +256,46 @@ async fn voting_pi_count_diverges_from_active_transcript() {
         .expect("data provider");
     let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
     let rng = rand::thread_rng();
-    let (proof, prove_pis, skips) = ir
-        .prove(rng, &pp, pk, &preimage)
-        .await
-        .expect("prove");
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
 
-    let mut ledger_pis: Vec<Fr> = vec![
-        preimage.binding_input,
-        preimage
-            .communications_commitment
-            .expect("commitment must be set")
-            .0,
-    ];
+    // Rebuild the on-chain transcript program: interleave Op::Noop { n } per pi_skips.
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
     for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for skip in skips_iter {
+        if let Some(n) = skip {
+            on_chain_program.push(VmOp::Noop { n: *n as u32 });
+        }
+    }
+
+    // Build the ledger-shape PIs.
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
         op.field_repr(&mut ledger_pis);
     }
 
-    assert!(
-        prove_pis.len() > ledger_pis.len(),
-        "prove returned {} PIs; ledger-shape would feed {} — \
-         on-chain verify will fail with PI count mismatch",
-        prove_pis.len(),
-        ledger_pis.len(),
-    );
-    let total_skipped: usize = skips.iter().filter_map(|s| *s).sum();
+    // The two vectors should match exactly: prove returns the values for
+    // every DeclarePubInput, and with the cond_select-zeroing fix, inactive
+    // slots are zero — exactly what Noop's field_repr produces.
     assert_eq!(
-        prove_pis.len(),
-        ledger_pis.len() + total_skipped,
-        "prove pis = ledger active pis + sum(skip counts)"
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs \
+         (binding_input + comm + Noop-interleaved transcript field_repr); \
+         a mismatch means inactive-branch DeclarePubInputs aren't being zeroed"
     );
 
-    // Local verify with prove's PIs still passes — this is the gap between
-    // local prove+verify success and on-chain verify failure.
-    vk.verify(&PARAMS_VERIFIER, &proof, prove_pis.iter().copied())
-        .expect("local verify with prove's PIs passes");
+    // And verify must accept the ledger-shape PIs.
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed with ledger-shape PIs");
 }

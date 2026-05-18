@@ -1,6 +1,7 @@
 # Conditional-branch DeclarePubInput zeroing
 
 **Discovered**: 2026-05-18 (after empirical sweep of compactc behavior)
+**Status**: Implemented 2026-05-18 in `crates/midnight-codegen/src/zkir_emitter.rs`. Regression test: `voting_verifies_with_ledger_shape_pis` in `crates/midnight/tests/ledger_integration_test.rs`.
 
 Inside a conditional branch, every value passed to `DeclarePubInput` must be zero when the branch is inactive. The fix is to route the value through `cond_select(branch_guard, active_value, ZERO)` before declaring it.
 
@@ -24,31 +25,22 @@ PiSkip { count, guard: bit }
 
 Compactc optimizes by reusing values that happen to be zero in the inactive case (e.g., a witness's value of 1 happens to match Counter alignment count). That's optional; the minimum-correct fix is unconditional `cond_select` wrapping.
 
-## How Nocturne should do it
+## How Nocturne does it
 
 In `crates/midnight-codegen/src/zkir_emitter.rs`:
 
-- Wrap every conditional-branch `DeclarePubInput` emission in a helper:
+- `ZkirEmitter` tracks `in_conditional: bool` and a cached `zero_var: Option<Index>`.
+- `push_declare_pub_input(value)` is the single chokepoint. When `in_conditional == true`, it wraps the value in `CondSelect { bit: self.guard, a: value, b: zero }` before pushing the `DeclarePubInput`. Outside conditionals (top-level circuit body), it emits the `DeclarePubInput` directly.
+- All 13 prior `self.instructions.push(Instruction::DeclarePubInput { var: X })` sites were converted to `self.push_declare_pub_input(X)`.
+- The `ExprIR::If` handler composes nested guards: the then-branch's effective guard is `cond_select(cond, outer_guard, 0)` (== `outer AND cond`) and the else-branch's is `cond_select(cond, 0, outer_guard)` (== `outer AND NOT cond`). At top level, just `cond` and `!cond`. `in_conditional` is set true for the duration of the branches and restored on exit.
 
-  ```rust
-  fn declare_pub_input_guarded(&mut self, value: Index, guard: Index) {
-      let zero = self.emit_load_imm(Fr::from(0));
-      let muxed = self.emit_cond_select(guard, value, zero);
-      self.instructions.push(Instruction::DeclarePubInput { var: muxed });
-  }
-  ```
+## Side effects realized
 
-- Use it for every `DeclarePubInput` emitted inside the then/else branches of a conditional.
-- Keep direct `DeclarePubInput { var }` for unconditional declares (outside any conditional).
-- Keep `PiSkip { guard, count }` with the same branch guard.
+- IR is slightly larger inside conditional branches (extra `LoadImm 0` and `CondSelect` per declared value). Verifier keys for conditional circuits grow accordingly. **On-chain compatible**: voting `cast_vote` now verifies via the canonical ledger PI shape.
+- Voting VK does NOT byte-match compactc — compactc applies value-reuse optimizations we don't. Don't pursue VK equality with compactc for conditional circuits.
+- Counter (no conditionals) is unchanged: the counter golden in `tests/golden/counter-increment.verifier` still byte-matches compactc.
 
-## Side effects
+## Empirical confirmations from compactc
 
-- The IR will have more `LoadImm`/`CondSelect` ops, growing the circuit slightly. Verifier keys will be larger than the no-cond_select baseline but **on-chain compatible** (which the current emission is not).
-- Voting VK will not byte-match compactc unless we also implement compactc's value-reuse optimizations. Don't aim for VK equality with compactc for conditional circuits — aim for on-chain verify success.
-- `voting_pi_count_diverges_from_active_transcript` in `tests/ledger_integration_test.rs` will need its assertion flipped after the fix: prove's pis length will equal ledger's active-shape pis length (each inactive slot contributes zero, matching the Noop interleave).
-
-## Open before implementing
-
-1. **Nested guards**: for `if outer { if inner { … } }`, the inner branch's effective guard is `outer AND inner`. Check whether compactc emits an explicit `And` instruction or threads a precomputed combined guard. Look at case 5 (`/tmp/cond-experiments/05_nested.compact`).
-2. **No-else case**: the empty else branch has no DeclarePubInputs to zero. Confirm compactc emits only the then-branch's wrapping (case 4).
+- **Nested guards** (`/tmp/cond-experiments/05_nested.compact`): compactc composes guards via `cond_select` — no explicit `And` instruction. We mirror this exactly.
+- **No-else case** (`/tmp/cond-experiments/04_no_else.compact`): only the then-branch's declares get cond_select-zeroed; the absent else branch needs no handling. Our `ExprIR::If` arm skips else-branch emission when `else_branch` is None.

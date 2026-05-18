@@ -144,12 +144,9 @@ async fn prove_and_verify_voting_with_witness() {
     println!("Proof generated: {} bytes, {} public inputs", proof.0.len(), pis.len());
     println!("Skips: {skips:?}");
 
-    // NOTE: prove+verify pass locally, but this circuit is NOT on-chain
-    // verifiable. The PI count divergence is asserted directly against the
-    // canonical ledger code path in `tests/ledger_integration_test.rs ::
-    // voting_pi_count_diverges_from_active_transcript`. Root cause: Nocturne
-    // emits per-branch DeclarePubInputs; the ledger interleaves Op::Noop
-    // (zeros) into the transcript at verify time; values don't match.
+    // On-chain compatibility for this conditional circuit is asserted in
+    // `tests/ledger_integration_test.rs::voting_verifies_with_ledger_shape_pis`,
+    // which reproduces the ledger's Noop-interleaving verify path.
 
     // Verify.
     vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
