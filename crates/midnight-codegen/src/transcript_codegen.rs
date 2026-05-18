@@ -37,6 +37,7 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
             use midnight::runtime::onchain_state::state::StateValue;
             use midnight::runtime::transient_crypto::curve::Fr;
             use midnight::runtime::base_crypto::fab::AlignedValue;
+            use midnight::runtime::storage::arena::Sp;
 
             /// Type alias for verify-mode operations.
             pub type VmOp = Op<ResultModeVerify>;
@@ -145,18 +146,31 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
                     });
                 },
                 "set" => {
-                    let inner: Vec<TokenStream> = args
-                        .iter()
-                        .map(|a| generate_op_stmt(a, field_names))
-                        .collect();
+                    // On-chain pattern (matches compactc 0.30.0 emission for
+                    // `Cell<T>::set(v)` where the contract state is a top-of-stack
+                    // `StateValue::Array`):
+                    //
+                    //   Op::Push { storage: false, value: StateValue::Cell(AlignedValue::from(field_idx)) }  // key
+                    //   Op::Push { storage: true,  value: StateValue::Cell(AlignedValue::from(v)) }          // value
+                    //   Op::Ins  { cached: false, n: 1 }                                                     // arr[key] = value
+                    //
+                    // The two `Push` ops differ in `storage` (Weak vs Strong)
+                    // and `Ins { cached: false }` pops `[value, key, container]`.
+                    // No `Idx` needed because the array `Ins` indexes by the key.
+                    let value_expr = args
+                        .first()
+                        .map(arg_to_runtime_expr)
+                        .unwrap_or_else(|| quote! { () });
                     quote! {
-                        ops.push(Op::Idx {
-                            cached: false,
-                            push_path: true,
-                            path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+                        ops.push(Op::Push {
+                            storage: false,
+                            value: StateValue::Cell(Sp::new(AlignedValue::from(#field_idx))),
                         });
-                        #(#inner)*
-                        ops.push(Op::Ins { cached: true, n: 1 });
+                        ops.push(Op::Push {
+                            storage: true,
+                            value: StateValue::Cell(Sp::new(AlignedValue::from(#value_expr))),
+                        });
+                        ops.push(Op::Ins { cached: false, n: 1 });
                     }
                 }
                 _ => quote! {},
@@ -274,6 +288,57 @@ fn collect_witness_private_inputs(expr: &ExprIR) -> TokenStream {
         }
         ExprIR::UnaryOp { expr: inner, .. } => collect_witness_private_inputs(inner),
         _ => quote! {},
+    }
+}
+
+/// Generate a runtime Rust expression that evaluates to the value of an
+/// argument expression, suitable for wrapping in `AlignedValue::from(...)`.
+///
+/// Used by the `set` arm above to materialize the value being written into a
+/// `Cell<T>` at runtime. Handles the cases the IR currently emits for
+/// arguments: literals, `disclose(...)`, witness reads, and local variables.
+fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
+    match expr {
+        ExprIR::Literal { value, .. } => match value {
+            midnight_ir::expr::LiteralIR::Bool(b) => quote! { #b },
+            midnight_ir::expr::LiteralIR::Int(n) => {
+                // u128 → u64 is safe for everything we currently support
+                // (Boolean, Uint<N> with N ≤ 64). Larger Uint values are
+                // a future-work concern tracked alongside multi-Fr value
+                // encoding.
+                let n = *n as u64;
+                quote! { #n }
+            }
+            midnight_ir::expr::LiteralIR::Str(s) => quote! { #s },
+        },
+        ExprIR::Disclose { value, .. } => arg_to_runtime_expr(value),
+        ExprIR::WitnessAccess { field, .. } => {
+            let field_ident = format_ident!("{}", field.to_string());
+            quote! { witnesses.#field_ident.value() }
+        }
+        ExprIR::Var { name, .. } => {
+            let ident = format_ident!("{}", name.to_string());
+            quote! { #ident }
+        }
+        ExprIR::MethodCall {
+            receiver, method, ..
+        } => {
+            let m = method.to_string();
+            match m.as_str() {
+                // `.into()` / `.value()` are transparent: forward the receiver.
+                "into" | "value" => arg_to_runtime_expr(receiver),
+                _ => {
+                    let r = arg_to_runtime_expr(receiver);
+                    let m_ident = format_ident!("{}", m);
+                    quote! { #r.#m_ident() }
+                }
+            }
+        }
+        ExprIR::Reference { expr: inner, .. } => arg_to_runtime_expr(inner),
+        // Anything else falls back to `()` and will fail to compile with a
+        // clear "the trait `From<()>` is not implemented" message, which
+        // points the user at an unsupported argument shape.
+        _ => quote! { () },
     }
 }
 

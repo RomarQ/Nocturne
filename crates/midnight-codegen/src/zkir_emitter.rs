@@ -107,9 +107,7 @@ struct ZkirEmitter {
     field_names: Vec<String>,
     /// Ledger field types, parallel-indexed with `field_names`. Used to
     /// dispatch on the inner type of `Cell<T>`/`Map<K, V>`/etc. when
-    /// emitting StateValue encodings. Unused today; scaffolding for the
-    /// encoding work in `memories/storage-cell-encoding-gap.md`.
-    #[allow(dead_code)]
+    /// emitting StateValue encodings.
     field_types: Vec<syn::Type>,
     /// Witness field name → type, for emitting type constraints on PrivateInput.
     witness_types: HashMap<String, syn::Type>,
@@ -593,40 +591,44 @@ impl ZkirEmitter {
         Some(read_value)
     }
 
-    /// Emit ZKIR for writing a ledger field: Idx(push_path) + Push(value) + Ins.
+    /// Emit ZKIR for `Cell::set(value)` at `field_idx`.
+    ///
+    /// On-chain encoding (verified empirically against compactc 0.30.0):
+    /// the contract state is a `StateValue::Array` of ledger fields, sitting
+    /// at the top of the VM stack on circuit entry. Writing one field is an
+    /// array element assignment expressed as three VM ops:
+    ///
+    /// ```text
+    /// Push { storage: false, value: Cell(field_idx) }   // key
+    /// Push { storage: true,  value: Cell(new_value) }   // value
+    /// Ins  { cached: false, n: 1 }                      // arr[key] = value
+    /// ```
+    ///
+    /// The two `Push` ops differ in `storage` so the VM tags them with
+    /// `Weak` vs `Strong` strength (`onchain-vm/src/vm.rs:631`); `Ins`
+    /// pops `[value, key, container]` and inserts. No `Idx` is needed —
+    /// the array `Ins` indexes by the key directly.
     fn emit_ledger_write(&mut self, field_idx: u8, value: Option<Index>) -> Option<Index> {
-        let g = self.guard;
+        // The KEY: Push(storage: false, Cell(Bytes<1>(field_idx))).
+        let key_var = self.emit_load_imm(Fr::from(field_idx as u64));
+        let key_encoding = aligned_value_encoding_bytes(1);
+        self.emit_push_cell(key_var, Some(&key_encoding), /* storage = */ false);
 
-        // Idx { cached: false, push_path: true, path: [Value(field_idx)] }
-        let idx_op = self.emit_load_imm(Fr::from(0x70u64));
-        self.push_declare_pub_input(idx_op);
-        self.emit_key_field_repr(field_idx);
-        self.instructions.push(Instruction::PiSkip {
-            guard: Some(g),
-            count: 4,
-        });
-
-        // Push { storage: false, value } → currently emits a placeholder
-        // 2-declare group. TODO: switch to `emit_push_cell` once the
-        // transcript codegen also emits the matching `Op::Push` (today it
-        // only emits Idx + Ins for Cell::set/Map::insert, so any IR change
-        // here would diverge from the runtime transcript). See
-        // `memories/storage-cell-encoding-gap.md`.
+        // The VALUE: Push(storage: true, Cell(<value-typed AlignedValue>)).
         if let Some(val_idx) = value {
-            let push_op = self.emit_load_imm(Fr::from(0x10u64));
-            self.push_declare_pub_input(push_op);
-            self.push_declare_pub_input(val_idx);
-            self.instructions.push(Instruction::PiSkip {
-                guard: Some(g),
-                count: 2,
-            });
+            let inner_ty = self
+                .field_types
+                .get(field_idx as usize)
+                .and_then(extract_cell_inner_type);
+            let value_encoding = inner_ty.as_ref().and_then(aligned_value_encoding);
+            self.emit_push_cell(val_idx, value_encoding.as_ref(), /* storage = */ true);
         }
 
-        // Ins { cached: true, n: 1 } → [0xa1]
-        let ins_op = self.emit_load_imm(Fr::from(0xa1u64));
+        // The Ins: Ins { cached: false, n: 1 } → opcode 0x91.
+        let ins_op = self.emit_load_imm(Fr::from(0x91u64));
         self.push_declare_pub_input(ins_op);
         self.instructions.push(Instruction::PiSkip {
-            guard: Some(g),
+            guard: Some(self.guard),
             count: 1,
         });
 
@@ -783,16 +785,20 @@ struct AlignedValueEncoding {
     value_field_count: usize,
 }
 
+/// Encoding for `AlignedValue<Bytes<N>>`: alignment `[1, N]`, value width 1 Fr
+/// (callers must ensure `N * 8 ≤ 253` for the value to fit in one Fr).
+fn aligned_value_encoding_bytes(n: u32) -> AlignedValueEncoding {
+    AlignedValueEncoding {
+        alignment_atoms: vec![1, n],
+        value_field_count: 1,
+    }
+}
+
 /// Compute the `AlignedValueEncoding` for a supported Rust type.
 ///
 /// Returns `None` for types not yet handled (multi-Fr value layouts like
 /// large `Bytes<N>`, custom ADTs). Callers fall back to the legacy
-/// emission path.
-///
-/// Currently unused: held as scaffolding for the Cell::set / Map::insert
-/// work in `memories/storage-cell-encoding-gap.md` and
-/// `memories/map-ledger-field-encoding.md`.
-#[allow(dead_code)]
+/// 2-declare emission path.
 fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
 
@@ -816,7 +822,10 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
         Some(64)
     } else if ty_str == "u128" {
         Some(128)
-    } else if let Some(n) = ty_str.strip_prefix("Uint<").and_then(|s| s.strip_suffix('>')) {
+    } else if let Some(n) = ty_str
+        .strip_prefix("Uint<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
         n.parse::<u32>().ok()
     } else {
         None
@@ -839,9 +848,7 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
     None
 }
 
-/// If `ty` is `Cell<T>`, return `T`. Otherwise `None`. Currently unused;
-/// scaffolding for the next-stage encoding work referenced above.
-#[allow(dead_code)]
+/// If `ty` is `Cell<T>`, return `T`. Otherwise `None`.
 fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last()

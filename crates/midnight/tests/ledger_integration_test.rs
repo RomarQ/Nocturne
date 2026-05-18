@@ -53,6 +53,30 @@ mod counter {
 }
 
 #[midnight::contract]
+mod flag {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct FlagState {
+        pub raised: Cell<bool>,
+    }
+
+    impl FlagState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                raised: Cell::new(false),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn raise(&mut self) {
+            self.raised.set(true);
+        }
+    }
+}
+
+#[midnight::contract]
 mod ballot {
     use super::*;
 
@@ -104,6 +128,30 @@ fn build_counter_ir() -> midnight_zkir::IrSource {
     let contract = midnight_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output.circuits.into_iter().next().unwrap().ir_source
+}
+
+fn build_flag_raise_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod flag {
+            #[midnight(ledger)]
+            pub struct FlagState { raised: Cell<bool> }
+            impl FlagState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { raised: Cell::new(false) } }
+                #[midnight(circuit)]
+                pub fn raise(&mut self) { self.raised.set(true); }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "raise")
+        .unwrap()
+        .ir_source
 }
 
 fn build_cast_vote_ir() -> midnight_zkir::IrSource {
@@ -304,3 +352,46 @@ async fn voting_verifies_with_ledger_shape_pis() {
         .expect("on-chain verify must succeed with ledger-shape PIs");
 }
 
+/// Confirms `Cell<bool>::set(true)` produces an on-chain compatible
+/// transcript: the IR and the runtime-built transcript agree, the proof
+/// constructs through the canonical `ContractCallExt::construct_proof`
+/// path, and the verifier accepts ledger-shape PIs built as
+/// `[binding_input, comm, ..field_repr(transcript)]`.
+///
+/// Exercises the Push+Push+Ins encoding for storage writes
+/// (see `memories/storage-cell-encoding-gap.md`).
+#[tokio::test]
+async fn flag_raise_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_flag_raise_ir();
+    let nocturne_transcript = flag::transcript::build_raise_transcript();
+    let preimage = canonical_preimage("raise", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    // Build ledger-shape PIs: [binding_input, comm, ..field_repr(transcript)].
+    // No conditional branches → no Noop interleaving needed.
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs \
+         for a Cell<bool>::set(true) circuit"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell::set");
+}

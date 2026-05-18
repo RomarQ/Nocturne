@@ -1,48 +1,57 @@
-# `Cell::set` / `Map::insert` are not on-chain compatible today
+# `Cell::set` on-chain encoding — closed for typed primitives
 
 **Discovered**: 2026-05-18 (during Stage 0 of Map work)
-**Status**: known gap. Helper scaffolding (`AlignedValueEncoding`, `aligned_value_encoding`, `extract_cell_inner_type`, `emit_push_cell`) is in `crates/midnight-codegen/src/zkir_emitter.rs` ready for use; call sites + transcript codegen are the next-stage work.
+**Status**: closed for `Cell<bool>` and `Cell<UintN/u8..u128>` via the Push+Push+Ins pattern. Multi-Fr value types (`Bytes<N>`, `Field`, custom ADTs) still fall back to the legacy 2-declare emission.
 
-## What's broken
+## What landed
 
-`emit_ledger_write` in `crates/midnight-codegen/src/zkir_emitter.rs` emits a placeholder 2-declare Push group: `[Push opcode (0x10), value]`. The matching transcript codegen in `crates/midnight-codegen/src/transcript_codegen.rs::generate_op_stmt` for the `"set"` arm emits **no `Op::Push` at all** — just `Op::Idx` followed by `Op::Ins`. The IR and the transcript builder are jointly consistent (both wrong in the same way), so existing local prove+verify passes, but **neither matches what midnight-ledger / compactc expect on-chain**.
-
-## What the on-chain encoding actually looks like
-
-Empirical compactc 0.30.0 emission for `b.write(disclose(true))` where `ledger b: Boolean`:
+The on-chain pattern (from empirical compactc 0.30.0 emission) is:
 
 ```
-group 1 (count=5): Push storage=false, Cell discriminant, alignment [1, 1], value (encoded as 2)
-group 2 (count=5): Push storage=true,  Cell discriminant, alignment [1, 1], value (encoded as 1)
-group 3 (count=1): Ins cached=false, n=1  (0x91)
-group 4 (count=1): Ins cached=true,  n=1  (0xa1)
+Op::Push { storage: false, value: StateValue::Cell(AlignedValue::from(field_idx)) }  // KEY
+Op::Push { storage: true,  value: StateValue::Cell(AlignedValue::from(value)) }      // VALUE
+Op::Ins  { cached: false, n: 1 }                                                     // arr[key] = value
 ```
 
-Two open questions before we can match this:
+No `Idx` — the contract state is a top-of-stack `StateValue::Array`, and `Ins { n: 1 }` pops `[value, key, container]` and inserts directly. The two `Push` ops differ in `storage`: Weak (false) for the key, Strong (true) for the value. See `reference-repos/midnight-ledger/onchain-vm/src/vm.rs:631` for the strength tagging.
 
-1. **Why two Pushes?** One has `storage: false`, the other `storage: true`. Probably one pushes the "transient" representation, the other the "storage" representation, and the two `Ins` ops combine them. Need to read `midnight_ledger::onchain_runtime` / `onchain_vm`'s VM execution for `Push` + `Ins` to confirm.
+### IR side (`zkir_emitter.rs::emit_ledger_write`)
 
-2. **Why are the encoded values different (2 vs 1) for `true`?** Compact may encode Boolean via an enum tag offset, or one of the pushes might carry a type discriminant instead of the literal value. Same investigation as (1).
+Emits a `Push` group per the encoding table:
+- KEY: `aligned_value_encoding_bytes(1)` → 5 declares: `[0x10, 1 (cell_disc), 1, 1 (alignment), field_idx]`
+- VALUE: `aligned_value_encoding(inner_ty)` for known T (Boolean, u8..u128, Uint<N≤253>) → 5 declares: `[0x11, 1, 1, ceil(N/8), value]`. For unknown T → 2-declare fallback `[0x11, value]` (not on-chain compatible).
+- Ins: 1 declare `[0x91]`.
 
-## What Stage 0 actually landed
+### Transcript side (`transcript_codegen.rs`, `"set"` arm)
 
-- `AlignedValueEncoding` struct, `aligned_value_encoding(ty)` function, `extract_cell_inner_type(ty)` function, and `emit_push_cell(value_var, encoding, storage)` method on `ZkirEmitter`. All currently `#[allow(dead_code)]` — they encode the per-type alignment + value width that the eventual Push emission will need.
-- `ZkirEmitter` now carries `field_types: Vec<syn::Type>` parallel to `field_names`, so future call sites can look up the inner `T` of `Cell<T>` (or `K`/`V` of `Map<K, V>`) at the call site.
+Emits matching runtime ops:
+```rust
+ops.push(Op::Push { storage: false, value: StateValue::Cell(Sp::new(AlignedValue::from(field_idx))) });
+ops.push(Op::Push { storage: true,  value: StateValue::Cell(Sp::new(AlignedValue::from(value))) });
+ops.push(Op::Ins  { cached: false, n: 1 });
+```
 
-The helpers only handle 1-Fr value types (Boolean, `u8..u64`, `Uint<N>` for N ≤ 64). Multi-Fr types like `Bytes<32>` are explicitly `None` until we add multi-Fr emission.
+`arg_to_runtime_expr` materializes the value expression: handles `Literal`, `Disclose`, `WitnessAccess`, `Var`, `MethodCall` (passing through `.into()`/`.value()`), `Reference`.
 
-## What needs to land next
+### Verified by
 
-1. Read the VM exec for `Push` + `Ins` to confirm the two-Push pattern (storage vs transient).
-2. Update `transcript_codegen.rs::generate_op_stmt`'s `"set"` arm to emit the matching `Op::Push { ... }` sequence so the runtime transcript carries the right ops.
-3. Wire `emit_push_cell` into `emit_ledger_write` with the right pattern.
-4. Add a `ledger_integration_test` that proves+verifies a `Cell<bool>::set(true)` circuit through the canonical `ContractCallExt::construct_proof` path — the test I tried to add in this turn (`flag_raise_proves_and_verifies`), reverted pending the encoding fix.
-5. Generalize to `Map::insert`, which reuses the same Push-Cell encoding twice (once for the key, once for the value).
+`crates/midnight/tests/ledger_integration_test.rs::flag_raise_proves_and_verifies` — a `Cell<bool>::set(true)` circuit that:
+1. constructs through `ContractCallExt::construct_proof`
+2. `ir.prove(...)` returns PIs matching `[binding_input, comm, ..field_repr(transcript)]`
+3. `vk.verify(...)` accepts those ledger-shape PIs.
+
+## What still needs work
+
+1. **Multi-Fr value types**: `Bytes<N>` for `N*8 > 64`, custom ADTs, and `Field` (which uses `AlignmentAtom::Field`, not `Bytes{N}`) fall back to 2-declare emission. They are NOT on-chain compatible. To support: extend `aligned_value_encoding` to return a `value_field_count > 1`, and update `emit_push_cell` to emit one declare per Fr in the value.
+
+2. **Map::insert** (next stage): reuses the same Push pattern, twice — once for the K-typed key (so the generic `emit_push_cell` already covers it), once for the V-typed value. Just needs the dispatcher to route `insert` to the same emit path with K, V types resolved from the `Map<K, V>` field type. See `map-ledger-field-encoding.md`.
+
+3. **Map::remove / Cell::clear**: uses `Rem` (0x19/0x1a) instead of `Ins`. Smaller surface area.
 
 ## Files
 
-- Helpers: `crates/midnight-codegen/src/zkir_emitter.rs` (search for `AlignedValueEncoding`, `aligned_value_encoding`, `extract_cell_inner_type`, `emit_push_cell`)
-- Broken call site (IR): `crates/midnight-codegen/src/zkir_emitter.rs::emit_ledger_write` — has the TODO comment pointing here
-- Broken call site (transcript): `crates/midnight-codegen/src/transcript_codegen.rs::generate_op_stmt`, `"set"` arm
+- IR emission: `crates/midnight-codegen/src/zkir_emitter.rs::emit_ledger_write` + `emit_push_cell` + `aligned_value_encoding` table
+- Transcript emission: `crates/midnight-codegen/src/transcript_codegen.rs`, `"set"` arm + `arg_to_runtime_expr`
+- E2E test: `crates/midnight/tests/ledger_integration_test.rs::flag_raise_proves_and_verifies`
 - Empirical compactc reference: `/tmp/compact-voting/zkir/end_ballot.zkir` (build with `compactc /tmp/voting.compact /tmp/compact-voting`)
-- Related: `memories/map-ledger-field-encoding.md` (uses the same Push pattern, blocked on the same gap)
+- Related: `memories/map-ledger-field-encoding.md`

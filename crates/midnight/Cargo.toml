@@ -17,6 +17,7 @@ midnight-onchain-state = { workspace = true }
 midnight-transient-crypto = { workspace = true }
 midnight-base-crypto = { workspace = true }
 midnight-zkir = { workspace = true }
+midnight-ledger-storage = { workspace = true }
 
 [dev-dependencies]
 midnight-codegen = { workspace = true }

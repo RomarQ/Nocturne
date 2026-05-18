@@ -242,27 +242,34 @@ mod tests {
 
         // This circuit:
         // 1. PrivateInput for witness.secret
-        // 2. Ledger write (Idx + Push + Ins)
+        // 2. Ledger write (Push key + Push value + Ins) — the on-chain
+        //    encoding shape produced by compactc 0.30.0 for `Cell::set(v)`.
         //
         // The PrivateInput reads from private_transcript.
         // The ledger write encodes as public_transcript_inputs.
-
-        // Count declare_pub_input entries from the ZKIR to build matching inputs.
-        // Let binding produces a PrivateInput.
-        // Then set produces: Idx(0x70, key) + Push(0x10, val) + Ins(0xa1)
+        //
+        // `stored: Cell` (no type argument) means `extract_cell_inner_type`
+        // returns `None`, so the VALUE Push falls back to the legacy
+        // 2-declare emission. The KEY Push uses the proper Bytes<1>
+        // encoding (5 declares). This unit test only verifies the IR
+        // accepts a matching ProofPreimage; full on-chain compatibility for
+        // typed `Cell<T>` is exercised by `ledger_integration_test.rs`.
         let secret_value = Fr::from(777u64);
 
         let public_transcript_inputs: Vec<Fr> = vec![
-            // Idx(push_path=true, field=0): [0x70, 1, 1, 0]
-            Fr::from(0x70u64),
+            // Push(storage=false, Cell(Bytes<1>(0))) — KEY:
+            //   [0x10, 1 (cell_disc), 1, 1 (alignment), 0 (field_idx)]
+            Fr::from(0x10u64),
+            Fr::from(0x01u64),
             Fr::from(0x01u64),
             Fr::from(0x01u64),
             Fr::from(0x00u64),
-            // Push(storage=false): [0x10, value]
-            Fr::from(0x10u64),
-            secret_value, // the witness value being written
-            // Ins(cached=true, n=1): [0xa1]
-            Fr::from(0xa1u64),
+            // Push(storage=true) — VALUE (fallback, 2 declares for untyped Cell):
+            //   [0x11, value]
+            Fr::from(0x11u64),
+            secret_value,
+            // Ins(cached=false, n=1) = 0x91
+            Fr::from(0x91u64),
         ];
 
         let preimage = ProofPreimage {
