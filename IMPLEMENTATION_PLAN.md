@@ -77,24 +77,44 @@ Full prove → verify cycle for counter increment circuit.
 | B.6 | `match` on enums | L | Cascaded `CondSelect` |
 | B.7 | Proof generation test for voting contract with witnesses | M | Validates conditional branch proving |
 
-### Phase C: Deployment
+### Phase C: Deployment — **out of scope**
+
+Deployment, transaction building, wallet handling, and node interaction are
+**not** Nocturne's responsibility. Nocturne is an eDSL for *authoring*
+Midnight contracts — it ends at producing artifacts (ZKIR, `.prover`,
+`.verifier`, `contract-info.json`) that downstream tooling can consume.
+
+On-chain compatibility of those artifacts is validated by going through the
+canonical `midnight-ledger` code paths in
+`crates/midnight/tests/ledger_integration_test.rs` — no real node needed.
+
+Tools that deploy/call Nocturne-compiled contracts:
+
+- [`midnight-rs`](https://github.com/RomarQ/midnight-rs) (Rust SDK)
+- Compact's own TypeScript runtime
+- Anything else that targets `midnight-ledger`'s `ContractDeploy` /
+  `ContractCall` formats
+
+### Phase C (new): Authoring depth
 
 | # | Task | Size | Notes |
 |---|---|---|---|
-| C.1 | `ContractDeploy` assembly | M | `initial_state` + `nonce` + `ContractOperation` with verifier keys |
-| C.2 | `ContractCall` assembly | M | Package proof + transcripts into contract call |
-| C.3 | `cargo midnight deploy` | L | Submit deployment transaction to Midnight node |
-| C.4 | `cargo midnight call` | L | Submit circuit call transaction |
+| C.1 | `Map<K, V>` ledger field | L | Key encoding in transcript ops, `get`/`set`/`contains`/`remove` |
+| C.2 | `MerkleTree<DEPTH>` insert + membership proof | L | Needs correct alignment for `PersistentHash` on leaves |
+| C.3 | `Cell<T>` for arbitrary `T` (not just `u64`/`bool`) | M | `AlignedValue` construction for user types |
+| C.4 | Custom ADTs (`#[midnight(state_type)]`) | L | Enum/struct → `StateValue` encoding |
+| C.5 | `for` loop unrolling (const bounds) | L | Detect `for i in 0..N`, unroll |
+| C.6 | `match` on enums | L | Cascaded `CondSelect` |
+| C.7 | `Bytes<N>` as witness (multi-Fr emission) | L | See `memories/witness-type-support.md` |
 
 ### Phase D: Advanced
 
 | # | Task | Size |
 |---|---|---|
-| D.1 | ZKIR optimization (constant propagation, dead constraints) | L |
+| D.1 | ZKIR optimization (compactc-style value reuse to shrink VKs) | L |
 | D.2 | ZKIR v3 support (symbolic names) | M |
-| D.3 | Cross-contract calls | L |
-| D.4 | Environment context (`block_height`, `caller`) | M |
-| D.5 | E2E test framework against Midnight node | L |
+| D.3 | Cross-contract calls (artifact emission only — no submission) | L |
+| D.4 | Environment context (`block_height`, `caller`) accessible from circuit body | M |
 
 ---
 
