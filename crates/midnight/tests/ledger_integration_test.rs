@@ -53,6 +53,54 @@ mod counter {
 }
 
 #[midnight::contract]
+mod reader {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct ReaderState {
+        pub stored: Cell<u64>,
+    }
+
+    impl ReaderState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(0u64),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn read_stored(&self) {
+            let _v = self.stored.get();
+        }
+    }
+}
+
+#[midnight::contract]
+mod counter_reader {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct CounterReaderState {
+        pub count: Counter,
+    }
+
+    impl CounterReaderState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn read_count(&self) {
+            let _v = self.count.value();
+        }
+    }
+}
+
+#[midnight::contract]
 mod records {
     use super::*;
 
@@ -192,6 +240,58 @@ fn build_counter_ir() -> midnight_zkir::IrSource {
     let contract = midnight_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output.circuits.into_iter().next().unwrap().ir_source
+}
+
+fn build_read_stored_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod reader {
+            #[midnight(ledger)]
+            pub struct ReaderState { stored: Cell<u64> }
+            impl ReaderState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(0u64) } }
+                #[midnight(circuit)]
+                pub fn read_stored(&self) {
+                    let _v = self.stored.get();
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "read_stored")
+        .unwrap()
+        .ir_source
+}
+
+fn build_read_count_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod counter_reader {
+            #[midnight(ledger)]
+            pub struct CounterReaderState { count: Counter }
+            impl CounterReaderState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { count: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn read_count(&self) {
+                    let _v = self.count.value();
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "read_count")
+        .unwrap()
+        .ir_source
 }
 
 fn build_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
@@ -690,4 +790,85 @@ async fn map_remove_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map::remove");
+}
+
+/// Confirms `Cell<u64>::get()` produces an on-chain compatible transcript.
+/// The full 4-declare Popeq pattern (matches Map::contains' Popeq):
+///   Popeq{cached:true, result: AlignedValue<u64>} → [0x0d, 1, 8, value]
+///
+/// This is the read-path fix — emit_ledger_read previously emitted only the
+/// opcode declare, which left the alignment + value out of the IR PIs and
+/// made the on-chain verify hash diverge.
+#[tokio::test]
+async fn cell_get_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_stored_ir();
+    let state = reader::ReaderState::new();
+    let nocturne_transcript = reader::transcript::build_read_stored_transcript(&state);
+
+    let preimage = canonical_preimage("read_stored", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Cell::get"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell::get");
+}
+
+/// Same as `cell_get_proves_and_verifies` but for `Counter::value() -> u64`.
+/// Counter shares the same on-chain representation as `Cell<u64>` (both
+/// `StateValue::Cell(AlignedValue<Bytes{8}>)`), so the Popeq shape is
+/// identical.
+#[tokio::test]
+async fn counter_value_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_count_ir();
+    let state = counter_reader::CounterReaderState::new();
+    let nocturne_transcript = counter_reader::transcript::build_read_count_transcript(&state);
+
+    let preimage = canonical_preimage("read_count", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Counter::value"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Counter::value");
 }

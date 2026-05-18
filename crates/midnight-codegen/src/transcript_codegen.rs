@@ -163,7 +163,10 @@ fn expr_needs_state(expr: &ExprIR) -> bool {
     match expr {
         ExprIR::LedgerAccess { method, args, .. } => {
             let m = method.to_string();
-            matches!(m.as_str(), "contains" | "member") || args.iter().any(expr_needs_state)
+            matches!(
+                m.as_str(),
+                "contains" | "member" | "get" | "value" | "__direct_access"
+            ) || args.iter().any(expr_needs_state)
         }
         ExprIR::If {
             cond,
@@ -221,18 +224,44 @@ fn generate_op_stmt(
                     ops.push(Op::Addi { immediate: 1 });
                     ops.push(Op::Ins { cached: true, n: 1 });
                 },
-                "get" | "value" | "__direct_access" => quote! {
-                    ops.push(Op::Dup { n: 0 });
-                    ops.push(Op::Idx {
-                        cached: false,
-                        push_path: false,
-                        path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
-                    });
-                    ops.push(Op::Popeq {
-                        cached: true,
-                        result: AlignedValue::from(0u8),
-                    });
-                },
+                "get" | "value" | "__direct_access" => {
+                    // On-chain read pattern: Dup + Idx + Popeq{cached:true, result}.
+                    // The `result` must be the actual value the on-chain VM will
+                    // compute, so compute it from `state` here. Counter uses
+                    // `.value()` (returns u64), Cell<T> uses `.get()` (returns T).
+                    let field_ident = format_ident!("{}", field_name);
+                    let (accessor, result_ty) = match field_ty {
+                        Some(t) if is_counter_type(t) => (
+                            quote! { state.#field_ident.value() },
+                            Some(syn::parse_quote!(u64)),
+                        ),
+                        Some(t) if extract_cell_inner_type(t).is_some() => (
+                            quote! { state.#field_ident.get() },
+                            extract_cell_inner_type(t),
+                        ),
+                        // Unknown field type — best-effort placeholder. Will
+                        // not match on-chain encoding; user-visible if it ever
+                        // surfaces because the verifier will reject the proof.
+                        _ => (quote! { 0u8 }, None),
+                    };
+                    let cast = result_ty
+                        .as_ref()
+                        .and_then(primitive_cast_for_type)
+                        .map(|c| quote! { (#accessor) #c })
+                        .unwrap_or_else(|| quote! { #accessor });
+                    quote! {
+                        ops.push(Op::Dup { n: 0 });
+                        ops.push(Op::Idx {
+                            cached: false,
+                            push_path: false,
+                            path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+                        });
+                        ops.push(Op::Popeq {
+                            cached: true,
+                            result: AlignedValue::from(#cast),
+                        });
+                    }
+                }
                 "contains" | "member" => {
                     // On-chain pattern for `Map<K, V>::contains(k) -> bool`:
                     //   Dup{n:0} + Idx{[Bytes<1>(field_idx)]} + Push{storage:false, Cell(key)}
@@ -655,6 +684,16 @@ fn primitive_cast_for_type(ty: &syn::Type) -> Option<TokenStream> {
     }
 
     None
+}
+
+/// True if `ty` is the `Counter` ledger primitive.
+fn is_counter_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return seg.ident == "Counter";
+    }
+    false
 }
 
 /// If `ty` is `Cell<T>`, return `T`. Mirrors `zkir_emitter::extract_cell_inner_type`.

@@ -40,6 +40,25 @@ ops.push(Op::Ins  { cached: false, n: 1 });
 2. `ir.prove(...)` returns PIs matching `[binding_input, comm, ..field_repr(transcript)]`
 3. `vk.verify(...)` accepts those ledger-shape PIs.
 
+### Cell::get / Counter::value on-chain reads also landed
+
+The corresponding read path (Dup + Idx + Popeq) had the same shape bug
+as `Cell::set` before it: `emit_ledger_read` declared only the Popeq
+opcode (1 declare), missing the alignment + value declares. Fixed to
+emit the full 4-declare Popeq `[0x0d, segment_count, atom, value]`
+with `cached:true` (matching compactc and `Map::contains`' trailing
+Popeq).
+
+The transcript builder for circuits with reads now takes
+`state: &<LedgerName>` (same as Map::contains needed) so it can
+compute the actual Popeq result via `state.<field>.value()` (Counter)
+or `state.<field>.get()` (Cell<T>). `primitive_cast_for_type` applies
+to the read-result so the runtime AlignedValue alignment atom matches
+the IR's encoding for each type.
+
+End-to-end verified by `cell_get_proves_and_verifies` and
+`counter_value_proves_and_verifies` in `ledger_integration_test.rs`.
+
 ## What still needs work
 
 1. **Multi-Fr value types**: `Bytes<N>` for `N*8 > 64`, custom ADTs, and `Field` (which uses `AlignmentAtom::Field`, not `Bytes{N}`) fall back to 2-declare emission. They are NOT on-chain compatible. To support: extend `aligned_value_encoding` to return a `value_field_count > 1`, and update `emit_push_cell` to emit one declare per Fr in the value.

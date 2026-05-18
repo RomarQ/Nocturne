@@ -156,11 +156,11 @@ mod tests {
             mod reader {
                 #[midnight(ledger)]
                 pub struct State {
-                    value: Cell,
+                    value: Cell<u64>,
                 }
                 impl State {
                     #[midnight(constructor)]
-                    pub fn new() -> Self { Self { value: Cell::new(0) } }
+                    pub fn new() -> Self { Self { value: Cell::new(0u64) } }
                     #[midnight(circuit)]
                     pub fn read_value(&mut self) {
                         let _v = self.value.get();
@@ -170,26 +170,27 @@ mod tests {
         });
         print_zkir(&name, &ir);
 
-        // Ledger read ops: Dup(0x30) + Idx(0x50, key) + Popeq(0x0c)
-        // The PublicInput instruction reads from public_transcript_outputs.
+        // Ledger read ops (typed Cell<u64> → 4-declare Popeq for u64 ≡ Bytes{8}):
+        //   Dup{n:0}                                  → [0x30]
+        //   Idx{cached:false, push_path:false, [f]}   → [0x50, 1, 1, field_idx]
+        //   Popeq{cached:true, result: AlignedValue<u64>} → [0x0d, 1, 8, value]
         //
-        // public_transcript_inputs = field repr of the VM ops:
-        //   Dup: [0x30] = 1 field
-        //   Idx(push_path=false, field=0): [0x50, align(1,1), key(0)] = 4 fields
-        //   Popeq: [0x0c] = 1 field (result comes via PublicInput separately)
+        // PublicInput reads the result Fr from public_transcript_outputs.
+        let read_value = Fr::from(99u64);
         let public_transcript_inputs: Vec<Fr> = vec![
             Fr::from(0x30u64), // Dup
             Fr::from(0x50u64), // Idx opcode
             Fr::from(0x01u64), // alignment: segment_count
             Fr::from(0x01u64), // alignment: Bytes{1}
             Fr::from(0x00u64), // key: field 0
-            Fr::from(0x0cu64), // Popeq opcode
+            Fr::from(0x0du64), // Popeq opcode (cached:true)
+            Fr::from(0x01u64), // result alignment: segment_count
+            Fr::from(0x08u64), // result alignment: Bytes{8} (u64 = 8 bytes)
+            read_value,        // the read value, declared from PublicInput
         ];
 
         // The Popeq result value comes via PublicInput from transcript_outputs.
-        let public_transcript_outputs: Vec<Fr> = vec![
-            Fr::from(99u64), // the value read from ledger (arbitrary test value)
-        ];
+        let public_transcript_outputs: Vec<Fr> = vec![read_value];
 
         let preimage = ProofPreimage {
             inputs: vec![],

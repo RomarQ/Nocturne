@@ -232,7 +232,14 @@ impl ZkirEmitter {
 
                 match method_name.as_str() {
                     "increment" => self.emit_counter_increment(field_idx),
-                    "get" | "value" | "__direct_access" => self.emit_ledger_read(field_idx),
+                    "get" | "value" | "__direct_access" => {
+                        // Resolve the read result type (u64 for Counter,
+                        // T for Cell<T>). When unresolved, falls back to
+                        // the legacy 1-declare Popeq for backwards-compat,
+                        // but that emission is NOT on-chain compatible.
+                        let result_ty = field_ty.as_ref().and_then(extract_ledger_read_result_type);
+                        self.emit_ledger_read(field_idx, result_ty.as_ref())
+                    }
                     "set" => {
                         let val = args.first().and_then(|a| self.emit_expr(a));
                         self.emit_ledger_write(field_idx, val)
@@ -563,11 +570,23 @@ impl ZkirEmitter {
 
     /// Emit ZKIR for reading a ledger field: Dup + Idx + Popeq.
     ///
-    /// Matches Compact's ledger read pattern:
-    ///   dup [n: 0]
-    ///   idx [cached: false] [pushPath: false] [path: f]
-    ///   popeq [cached: true] [result: void]
-    fn emit_ledger_read(&mut self, field_idx: u8) -> Option<Index> {
+    /// On-chain encoding (matches the compactc 0.30.0 read pattern, the
+    /// same shape `Map::contains` uses for its trailing Popeq):
+    ///
+    /// ```text
+    /// Dup  { n: 0 }                                        // [0x30]
+    /// Idx  { cached: false, push_path: false, [Bytes<1>(field_idx)] }
+    ///                                                       // [0x50, align(2), field_idx(1)]
+    /// Popeq { cached: false, result: AlignedValue<T> }     // [0x0c, align(2), result(1)]
+    /// ```
+    ///
+    /// `result_ty` carries the read-result type (`u64` for Counter,
+    /// `T` for `Cell<T>`). When `Some` with a single-Fr encoding, emit the
+    /// full 4-declare Popeq the on-chain VM expects. When `None` or
+    /// multi-Fr, fall back to the legacy 1-declare Popeq — that path is
+    /// internally consistent with our transcript codegen (so unit tests
+    /// pass) but is NOT on-chain compatible.
+    fn emit_ledger_read(&mut self, field_idx: u8, result_ty: Option<&syn::Type>) -> Option<Index> {
         let g = self.guard;
 
         // Dup { n: 0 } → field repr: [0x30]
@@ -588,15 +607,41 @@ impl ZkirEmitter {
             count: 4,
         });
 
-        // Popeq { cached: false } → field repr: [0x0c, result_fields...]
-        // The read result comes from the transcript as public_input.
-        let popeq_op = self.emit_load_imm(Fr::from(0x0cu64));
-        self.push_declare_pub_input(popeq_op);
+        // Popeq { cached: true, result: AlignedValue<T> } → 0x0d. Reads use
+        // the cached form because the value the prover claims is in the
+        // transcript; the VM just verifies it matches the slot it walked to.
+        let result_enc = result_ty.and_then(aligned_value_encoding);
         let read_value = self.emit_instruction(Instruction::PublicInput { guard: None });
-        self.instructions.push(Instruction::PiSkip {
-            guard: Some(g),
-            count: 1,
-        });
+        let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
+        self.push_declare_pub_input(popeq_op);
+
+        match result_enc {
+            Some(enc) if enc.value_field_count == 1 => {
+                // [opcode, ..alignment_atoms, result] — alignment.field_repr
+                // for a single-segment Bytes{N} is [segment_count=1, N], so
+                // the full Popeq is [0x0c, 1, N, value].
+                for atom in &enc.alignment_atoms {
+                    let v = self.emit_load_imm(Fr::from(*atom as u64));
+                    self.push_declare_pub_input(v);
+                }
+                self.push_declare_pub_input(read_value);
+                // opcode (1) + alignment atoms (N) + value (1)
+                let count = 2 + enc.alignment_atoms.len();
+                self.instructions.push(Instruction::PiSkip {
+                    guard: Some(g),
+                    count: count as u32,
+                });
+            }
+            _ => {
+                // Legacy 1-declare fallback. Not on-chain compatible — only
+                // for unknown / multi-Fr result types. Logged in the memory
+                // file alongside the Cell::set work.
+                self.instructions.push(Instruction::PiSkip {
+                    guard: Some(g),
+                    count: 1,
+                });
+            }
+        }
 
         Some(read_value)
     }
@@ -1103,6 +1148,27 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
     // we don't yet support raw Field cells — needs the unsigned wraparound
     // encoded into the LoadImm).
     // Bytes<N>: similarly deferred until we add multi-Fr value emission.
+    None
+}
+
+/// Return the value type read by `self.<field>.get()` / `.value()` for a
+/// given ledger field type. Maps `Counter` → `u64` and `Cell<T>` → `T`.
+/// Returns `None` for types where direct reads don't apply (`Map<_,_>`)
+/// or that we don't yet handle.
+fn extract_ledger_read_result_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        if seg.ident == "Counter" {
+            return Some(syn::parse_quote!(u64));
+        }
+        if seg.ident == "Cell"
+            && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+            && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+        {
+            return Some(inner.clone());
+        }
+    }
     None
 }
 
