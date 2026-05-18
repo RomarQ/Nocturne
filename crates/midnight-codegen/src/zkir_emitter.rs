@@ -636,8 +636,12 @@ impl ZkirEmitter {
                 let val_var = args.get(1).and_then(|a| self.emit_expr(a))?;
                 self.emit_map_insert(field_idx, key_var, &key_enc, val_var, &val_enc)
             }
-            // `get`, `remove` are upcoming stages. Leave them to fall through
-            // to the unsupported path until then.
+            "remove" => {
+                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
+                self.emit_map_remove(field_idx, key_var, &key_enc)
+            }
+            // `get` is the remaining stage. Leave it to fall through to the
+            // unsupported path until then.
             _ => {
                 for arg in args {
                     self.emit_expr(arg);
@@ -789,6 +793,60 @@ impl ZkirEmitter {
             .push(Instruction::ConstrainToBoolean { var: result_var });
 
         Some(result_var)
+    }
+
+    /// Emit ZKIR for `Map::remove(&k)` at `field_idx`. The return value
+    /// (`Option<V>` at the runtime level) is currently discarded by the
+    /// circuit — `get`/`lookup` will plumb it through once Option alignment
+    /// encoding lands.
+    ///
+    /// On-chain encoding mirrors `insert` minus the value Push and minus
+    /// one Ins, since `Rem` pops `[key, container]` and pushes back the
+    /// modified container in one step:
+    ///
+    /// ```text
+    /// Idx  { cached: false, push_path: true, path: [field_idx] }  // [0x70, align(2), field_idx(1)]
+    /// Push { storage: false, value: Cell(key) }                    // [0x10, Cell disc(1), K-align, K-value]
+    /// Rem  { cached: false }                                       // [0x19]  remove k from Map
+    /// Ins  { cached: true,  n: 1 }                                 // [0xa1]  write modified Map back to Array
+    /// ```
+    fn emit_map_remove(
+        &mut self,
+        field_idx: u8,
+        key_var: Index,
+        key_encoding: &AlignedValueEncoding,
+    ) -> Option<Index> {
+        let g = self.guard;
+
+        // Idx { cached: false, push_path: true, path: [Bytes<1>(field_idx)] } → 0x70.
+        let idx_op = self.emit_load_imm(Fr::from(0x70u64));
+        self.push_declare_pub_input(idx_op);
+        self.emit_key_field_repr(field_idx);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Push { storage: false, value: Cell(key) }.
+        self.emit_push_cell(key_var, Some(key_encoding), /* storage = */ false);
+
+        // Rem { cached: false } → 0x19.
+        let rem_op = self.emit_load_imm(Fr::from(0x19u64));
+        self.push_declare_pub_input(rem_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Ins { cached: true, n: 1 } → 0xa1 — restore parent Array.
+        let ins_op = self.emit_load_imm(Fr::from(0xa1u64));
+        self.push_declare_pub_input(ins_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        None
     }
 
     /// Emit ZKIR for `Cell::set(value)` at `field_idx`.

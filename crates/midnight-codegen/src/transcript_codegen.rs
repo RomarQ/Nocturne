@@ -301,6 +301,9 @@ fn generate_op_stmt(
                         generate_cell_set(field_idx, args, field_ty)
                     }
                 }
+                "remove" if field_ty.and_then(extract_map_kv_types).is_some() => {
+                    generate_map_remove(field_idx, args, field_ty)
+                }
                 _ => quote! {},
             }
         }
@@ -548,6 +551,47 @@ fn generate_map_insert(
             value: StateValue::Cell(Sp::new(AlignedValue::from(#val_cast))),
         });
         ops.push(Op::Ins { cached: false, n: 1 });
+        ops.push(Op::Ins { cached: true, n: 1 });
+    }
+}
+
+/// Emit the runtime ops for `Map<K, V>::remove(&k)`. Same Idx + Push pattern
+/// as `insert`, but with `Rem` instead of `Push(value) + Ins(first)` — the
+/// VM-level `Rem` pops `[key, container]` and pushes back the modified
+/// container in one step.
+///
+///   Idx{cached:false, push_path:true, [Bytes<1>(field_idx)]}
+///   Push{storage:false, Cell(key)}
+///   Rem{cached:false}        // remove k from the Map
+///   Ins{cached:true, n:1}    // write modified Map back to the Array
+fn generate_map_remove(
+    field_idx: u8,
+    args: &[ExprIR],
+    field_ty: Option<&syn::Type>,
+) -> TokenStream {
+    let key_expr = args
+        .first()
+        .map(arg_to_runtime_expr)
+        .unwrap_or_else(|| quote! { () });
+
+    let k_ty = field_ty.and_then(extract_map_key_type);
+    let key_cast = k_ty
+        .as_ref()
+        .and_then(primitive_cast_for_type)
+        .map(|c| quote! { (#key_expr) #c })
+        .unwrap_or_else(|| quote! { #key_expr });
+
+    quote! {
+        ops.push(Op::Idx {
+            cached: false,
+            push_path: true,
+            path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+        });
+        ops.push(Op::Push {
+            storage: false,
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_cast))),
+        });
+        ops.push(Op::Rem { cached: false });
         ops.push(Op::Ins { cached: true, n: 1 });
     }
 }

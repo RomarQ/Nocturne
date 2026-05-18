@@ -86,7 +86,7 @@ Beyond per-operation emission, Map needs:
 | Stage 1 | `Map::contains(&k) -> bool` end-to-end with ledger integration test | **landed** |
 | Stage 2 | `Map::get(&k) -> Option<V>` end-to-end | pending |
 | Stage 3 | `Map::insert(k, v)` end-to-end with ledger integration test | **landed** |
-| Stage 4 | `Map::remove(&k)` end-to-end | pending |
+| Stage 4 | `Map::remove(&k)` end-to-end with ledger integration test | **landed** |
 
 ### Stage 1 status
 
@@ -135,15 +135,35 @@ Beyond per-operation emission, Map needs:
   through `ContractCallExt::construct_proof`. Insert returns no value
   so the test has no Popeq — purely the 5-op sequence.
 
-### Remaining stages
+### Stage 4 status
+
+`Map<K, V>::remove(&k)` is on-chain compatible for single-Fr K. The
+return value (`Option<V>` at runtime) is currently discarded at the
+circuit level — plumbing it through waits for Stage 2's Option alignment
+encoding work.
+
+Encoding (4 ops):
+
+```text
+Idx  { cached: false, push_path: true, [Bytes<1>(field_idx)] }  → [0x70, 1, 1, field_idx]
+Push { storage: false, Cell(key) }                               → [0x10, 1, K-align, K-value]
+Rem  { cached: false }                                            → [0x19]
+Ins  { cached: true,  n: 1 }                                      → [0xa1]  restore parent Array
+```
+
+`Rem` pops `[key, container]` and pushes back the modified container in
+one step (vs. insert which needs Push(value) + first Ins). The trailing
+`Ins{cached:true}` does the same parent-restoration job as in insert.
+
+E2E test: `ledger_integration_test::map_remove_proves_and_verifies`.
+
+### Remaining stage
 
 - **Stage 2 (`Map::get`)**: returns `Option<V>` which needs Option
   alignment encoding (`Alignment::concat([bool, V])`). Likely needs a
   new `aligned_value_encoding_option(v_ty)` variant and matching IR
-  emission for the Option discriminant + V slot.
-- **Stage 4 (`Map::remove`)**: uses the `Rem` opcode (0x19/0x1a).
-  Should be the smallest of the remaining stages — same Idx + Push key
-  pattern as contains, then `Rem` instead of `Member`, no Popeq.
+  emission for the Option discriminant + V slot. Unblocks plumbing the
+  return value of `remove` through too (both return `Option<V>`).
 
 ## References
 

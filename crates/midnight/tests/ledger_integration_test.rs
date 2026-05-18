@@ -79,6 +79,11 @@ mod records {
         pub fn record(&mut self, witnesses: &RecordsWitnesses) {
             self.records.insert(witnesses.user_id, witnesses.amount);
         }
+
+        #[midnight(circuit)]
+        pub fn erase(&mut self, witnesses: &RecordsWitnesses) {
+            self.records.remove(&witnesses.user_id);
+        }
     }
 }
 
@@ -189,7 +194,7 @@ fn build_counter_ir() -> midnight_zkir::IrSource {
     output.circuits.into_iter().next().unwrap().ir_source
 }
 
-fn build_record_ir() -> midnight_zkir::IrSource {
+fn build_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use midnight_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod records {
@@ -204,6 +209,10 @@ fn build_record_ir() -> midnight_zkir::IrSource {
                 pub fn record(&mut self, witnesses: &RecordsWitnesses) {
                     self.records.insert(witnesses.user_id, witnesses.amount);
                 }
+                #[midnight(circuit)]
+                pub fn erase(&mut self, witnesses: &RecordsWitnesses) {
+                    self.records.remove(&witnesses.user_id);
+                }
             }
         }
     };
@@ -212,9 +221,17 @@ fn build_record_ir() -> midnight_zkir::IrSource {
     output
         .circuits
         .into_iter()
-        .find(|c| c.circuit_name == "record")
+        .find(|c| c.circuit_name == circuit_name)
         .unwrap()
         .ir_source
+}
+
+fn build_record_ir() -> midnight_zkir::IrSource {
+    build_records_circuit_ir("record")
+}
+
+fn build_erase_ir() -> midnight_zkir::IrSource {
+    build_records_circuit_ir("erase")
 }
 
 fn build_check_member_ir() -> midnight_zkir::IrSource {
@@ -624,4 +641,53 @@ async fn map_insert_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map::insert");
+}
+
+/// Confirms `Map<Uint<64>, Uint<64>>::remove(&k)` produces an on-chain
+/// compatible transcript: Idx + Push(key) + Rem + Ins matches between IR
+/// and runtime ops, proof constructs through `ContractCallExt::construct_proof`,
+/// verifier accepts ledger-shape PIs. No Popeq since remove returns no value
+/// at the circuit level (Option<V> plumbing waits for Stage 2 / Map::get).
+#[tokio::test]
+async fn map_remove_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_erase_ir();
+    let witnesses = records::RecordsWitnesses {
+        user_id: Uint::<64>::from(7u64),
+        amount: Uint::<64>::from(42u64),
+    };
+    let nocturne_transcript = records::transcript::build_erase_transcript(&witnesses);
+
+    // PrivateInput reads only `user_id` for erase. The `amount` witness is
+    // never accessed by the circuit, so it's not in the private transcript.
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            7u64,
+        )];
+    let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Map::remove"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map::remove");
 }
