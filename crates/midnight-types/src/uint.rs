@@ -62,15 +62,15 @@ impl<const N: u32> Mul for Uint<N> {
     }
 }
 
-impl<const N: u32> PartialOrd for Uint<N> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.0.cmp(&other.0))
-    }
-}
-
 impl<const N: u32> Ord for Uint<N> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.0.cmp(&other.0)
+    }
+}
+
+impl<const N: u32> PartialOrd for Uint<N> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 

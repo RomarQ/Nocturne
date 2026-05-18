@@ -17,10 +17,7 @@ pub enum ExprIR {
     },
 
     /// Read a witness field: `witnesses.field`.
-    WitnessAccess {
-        span: Span,
-        field: Ident,
-    },
+    WitnessAccess { span: Span, field: Ident },
 
     /// Binary operation: `a + b`, `a * b`, `a == b`, etc.
     BinaryOp {
@@ -68,34 +65,19 @@ pub enum ExprIR {
     },
 
     /// `assert!(cond)` or `assert_eq!(a, b)`.
-    Assert {
-        span: Span,
-        kind: AssertKind,
-    },
+    Assert { span: Span, kind: AssertKind },
 
     /// `midnight::disclose(value)`.
-    Disclose {
-        span: Span,
-        value: Box<ExprIR>,
-    },
+    Disclose { span: Span, value: Box<ExprIR> },
 
     /// A literal value: integer, bool, string, bytes.
-    Literal {
-        span: Span,
-        value: LiteralIR,
-    },
+    Literal { span: Span, value: LiteralIR },
 
     /// A local variable reference.
-    Var {
-        span: Span,
-        name: Ident,
-    },
+    Var { span: Span, name: Ident },
 
     /// A block of statements.
-    Block {
-        span: Span,
-        stmts: Vec<ExprIR>,
-    },
+    Block { span: Span, stmts: Vec<ExprIR> },
 
     /// Struct construction: `Self { field: value, ... }`.
     StructInit {
@@ -111,22 +93,13 @@ pub enum ExprIR {
     },
 
     /// Tuple expression: `(a, b)`.
-    Tuple {
-        span: Span,
-        elements: Vec<ExprIR>,
-    },
+    Tuple { span: Span, elements: Vec<ExprIR> },
 
     /// A reference: `&expr`.
-    Reference {
-        span: Span,
-        expr: Box<ExprIR>,
-    },
+    Reference { span: Span, expr: Box<ExprIR> },
 
     /// Expression we couldn't parse -- stored for error reporting.
-    Unsupported {
-        span: Span,
-        description: String,
-    },
+    Unsupported { span: Span, description: String },
 }
 
 /// Classification of assert expressions.

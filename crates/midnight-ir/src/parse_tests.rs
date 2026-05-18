@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::parse::parse_contract;
     use crate::contract::*;
     use crate::expr::*;
+    use crate::parse::parse_contract;
 
     fn parse(input: proc_macro2::TokenStream) -> crate::MidnightResult<ContractIR> {
         let module: syn::ItemMod = syn::parse2(input).expect("failed to parse module");
@@ -244,12 +244,18 @@ mod tests {
         assert_eq!(circuit.body.len(), 2);
 
         match &circuit.body[0] {
-            ExprIR::Assert { kind: AssertKind::Assert(_), .. } => {}
+            ExprIR::Assert {
+                kind: AssertKind::Assert(_),
+                ..
+            } => {}
             other => panic!("expected Assert, got: {other:?}"),
         }
 
         match &circuit.body[1] {
-            ExprIR::Assert { kind: AssertKind::AssertEq(_, _), .. } => {}
+            ExprIR::Assert {
+                kind: AssertKind::AssertEq(_, _),
+                ..
+            } => {}
             other => panic!("expected AssertEq, got: {other:?}"),
         }
     }
@@ -282,7 +288,12 @@ mod tests {
         // self.threshold.set(midnight::disclose(42)) -> LedgerAccess with set method
         assert_eq!(circuit.body.len(), 1);
         match &circuit.body[0] {
-            ExprIR::LedgerAccess { field, method, args, .. } => {
+            ExprIR::LedgerAccess {
+                field,
+                method,
+                args,
+                ..
+            } => {
                 assert_eq!(field.to_string(), "threshold");
                 assert_eq!(method.to_string(), "set");
                 assert_eq!(args.len(), 1);

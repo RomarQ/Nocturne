@@ -13,10 +13,16 @@ mod counter {
 
     impl CounterState {
         #[midnight(constructor)]
-        pub fn new() -> Self { Self { count: Counter::zero() } }
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
 
         #[midnight(circuit)]
-        pub fn increment(&mut self) { self.count.increment(); }
+        pub fn increment(&mut self) {
+            self.count.increment();
+        }
     }
 }
 
@@ -48,6 +54,10 @@ fn test_bundle_creation() {
     let ir = &bundle.circuits["increment"];
     assert!(!ir.instructions.is_empty());
 
-    println!("✓ ContractBundle: name={}, entries={:?}, circuits={}",
-        bundle.name, bundle.entry_points, bundle.circuits.len());
+    println!(
+        "✓ ContractBundle: name={}, entries={:?}, circuits={}",
+        bundle.name,
+        bundle.entry_points,
+        bundle.circuits.len()
+    );
 }

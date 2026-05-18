@@ -48,6 +48,6 @@ impl<const N: usize> fmt::Debug for Bytes<N> {
 impl<const N: usize> ZkType for Bytes<N> {
     fn field_count() -> usize {
         // Each field element can hold ~31 bytes.
-        (N + 30) / 31
+        N.div_ceil(31)
     }
 }

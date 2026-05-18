@@ -36,7 +36,7 @@ mod ballot {
         }
 
         #[midnight(circuit)]
-        pub fn register(&mut self, voter_id: u64) {
+        pub fn register(&mut self, _voter_id: u64) {
             // placeholder
         }
 

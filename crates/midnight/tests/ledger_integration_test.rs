@@ -16,17 +16,17 @@ use midnight::runtime::transient_crypto::hash::transient_commit;
 use midnight::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
 use midnight::types::*;
 
+use midnight_base_crypto::cost_model::RunningCost;
 use midnight_coin_structure::contract::ContractAddress;
 use midnight_ledger::construct::{ContractCallExt, ContractCallPrototype};
 use midnight_ledger::structure::ProofPreimageVersioned;
+use midnight_ledger_storage::arena::Sp;
 use midnight_ledger_storage::db::InMemoryDB;
-use midnight_base_crypto::cost_model::RunningCost;
 use midnight_onchain_runtime::context::Effects;
 use midnight_onchain_runtime::ops::Op;
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ContractOperation, EntryPointBuf};
 use midnight_onchain_runtime::transcript::{Transcript, TranscriptVersion};
-use midnight_ledger_storage::arena::Sp;
 
 #[midnight::contract]
 mod counter {
@@ -40,7 +40,9 @@ mod counter {
     impl CounterState {
         #[midnight(constructor)]
         pub fn new() -> Self {
-            Self { count: Counter::zero() }
+            Self {
+                count: Counter::zero(),
+            }
         }
 
         #[midnight(circuit)]
@@ -68,7 +70,10 @@ mod ballot {
     impl Ballot {
         #[midnight(constructor)]
         pub fn new() -> Self {
-            Self { votes_for: Counter::zero(), votes_against: Counter::zero() }
+            Self {
+                votes_for: Counter::zero(),
+                votes_against: Counter::zero(),
+            }
         }
 
         #[midnight(circuit)]
@@ -171,9 +176,8 @@ fn canonical_preimage(
         .field_repr(&mut io_repr);
     let comm_comm = transient_commit::<[Fr]>(&io_repr, rand);
 
-    let preimage_v = <ProofPreimage as ContractCallExt<InMemoryDB>>::construct_proof(
-        &prototype, comm_comm,
-    );
+    let preimage_v =
+        <ProofPreimage as ContractCallExt<InMemoryDB>>::construct_proof(&prototype, comm_comm);
     match preimage_v {
         ProofPreimageVersioned::V2(p) => (*p).clone(),
         _ => panic!("unexpected ProofPreimageVersioned variant"),
@@ -191,7 +195,6 @@ fn wrap_transcript(ops: Vec<Op<ResultModeVerify, InMemoryDB>>) -> Transcript<InM
         version: Some(Sp::new(TranscriptVersion { major: 2, minor: 3 })),
     }
 }
-
 
 #[tokio::test]
 async fn counter_ledger_constructed_preimage_satisfies_circuit() {
@@ -215,10 +218,7 @@ async fn counter_ledger_constructed_preimage_proves_and_verifies() {
         .expect("data provider");
     let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
     let rng = rand::thread_rng();
-    let (proof, pis, _skips) = ir
-        .prove(rng, &pp, pk, &preimage)
-        .await
-        .expect("prove");
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
 
     vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
         .expect("ledger-constructed preimage must verify end-to-end");
@@ -246,11 +246,17 @@ async fn voting_verifies_with_ledger_shape_pis() {
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_cast_vote_ir();
-    let witnesses = ballot::BallotWitnesses { choice: Boolean::from(true) };
+    let witnesses = ballot::BallotWitnesses {
+        choice: Boolean::from(true),
+    };
     let nocturne_transcript = ballot::transcript::build_cast_vote_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(true)];
-    let preimage = canonical_preimage("cast_vote", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage(
+        "cast_vote",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -270,10 +276,8 @@ async fn voting_verifies_with_ledger_shape_pis() {
         on_chain_program.push(op.clone());
         let _ = skips_iter.next();
     }
-    for skip in skips_iter {
-        if let Some(n) = skip {
-            on_chain_program.push(VmOp::Noop { n: *n as u32 });
-        }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
     }
 
     // Build the ledger-shape PIs.

@@ -18,6 +18,7 @@ mod tests {
         (transient_commit::<[Fr]>(&preimage, opening), opening)
     }
 
+    #[allow(dead_code)] // kept as a reusable helper for future check-based tests
     fn compile_and_check(input: proc_macro2::TokenStream) {
         let module: syn::ItemMod = syn::parse2(input).expect("parse module");
         let contract = parse_contract(module).expect("parse contract");
@@ -94,7 +95,8 @@ mod tests {
                     pub fn increment(&mut self) { self.count.increment(); }
                 }
             }
-        }).expect("parse");
+        })
+        .expect("parse");
         let contract = parse_contract(module).expect("contract");
         let output = zkir_emitter::emit_contract(&contract);
         let circuit = &output.circuits[0];
@@ -108,13 +110,13 @@ mod tests {
         //   Addi(1): [0x0e, 0x01] = 2 fields
         //   Ins(cached=true, n=1): [0xa1] = 1 field
         let public_transcript_inputs: Vec<Fr> = vec![
-            Fr::from(0x70u64),  // Idx opcode
-            Fr::from(0x01u64),  // alignment: segment_count = 1
-            Fr::from(0x01u64),  // alignment: Bytes{1} = 1
-            Fr::from(0x00u64),  // key: field index = 0
-            Fr::from(0x0eu64),  // Addi opcode
-            Fr::from(0x01u64),  // Addi immediate = 1
-            Fr::from(0xa1u64),  // Ins opcode
+            Fr::from(0x70u64), // Idx opcode
+            Fr::from(0x01u64), // alignment: segment_count = 1
+            Fr::from(0x01u64), // alignment: Bytes{1} = 1
+            Fr::from(0x00u64), // key: field index = 0
+            Fr::from(0x0eu64), // Addi opcode
+            Fr::from(0x01u64), // Addi immediate = 1
+            Fr::from(0xa1u64), // Ins opcode
         ];
 
         let preimage = ProofPreimage {
@@ -176,17 +178,17 @@ mod tests {
         //   Idx(push_path=false, field=0): [0x50, align(1,1), key(0)] = 4 fields
         //   Popeq: [0x0c] = 1 field (result comes via PublicInput separately)
         let public_transcript_inputs: Vec<Fr> = vec![
-            Fr::from(0x30u64),  // Dup
-            Fr::from(0x50u64),  // Idx opcode
-            Fr::from(0x01u64),  // alignment: segment_count
-            Fr::from(0x01u64),  // alignment: Bytes{1}
-            Fr::from(0x00u64),  // key: field 0
-            Fr::from(0x0cu64),  // Popeq opcode
+            Fr::from(0x30u64), // Dup
+            Fr::from(0x50u64), // Idx opcode
+            Fr::from(0x01u64), // alignment: segment_count
+            Fr::from(0x01u64), // alignment: Bytes{1}
+            Fr::from(0x00u64), // key: field 0
+            Fr::from(0x0cu64), // Popeq opcode
         ];
 
         // The Popeq result value comes via PublicInput from transcript_outputs.
         let public_transcript_outputs: Vec<Fr> = vec![
-            Fr::from(99u64),    // the value read from ledger (arbitrary test value)
+            Fr::from(99u64), // the value read from ledger (arbitrary test value)
         ];
 
         let preimage = ProofPreimage {
@@ -258,7 +260,7 @@ mod tests {
             Fr::from(0x00u64),
             // Push(storage=false): [0x10, value]
             Fr::from(0x10u64),
-            secret_value,       // the witness value being written
+            secret_value, // the witness value being written
             // Ins(cached=true, n=1): [0xa1]
             Fr::from(0xa1u64),
         ];
@@ -315,7 +317,8 @@ mod tests {
                     }
                 }
             }
-        }).expect("parse");
+        })
+        .expect("parse");
         let contract = parse_contract(module).expect("contract");
         let output = zkir_emitter::emit_contract(&contract);
         let circuit = &output.circuits[0];
@@ -338,8 +341,12 @@ mod tests {
         // by pi_skip with guard=!cond (false).
         let public_transcript_inputs: Vec<Fr> = vec![
             // votes_for increment (active: guard=cond=true)
-            Fr::from(0x70u64), Fr::from(1u64), Fr::from(1u64), Fr::from(0u64),
-            Fr::from(0x0eu64), Fr::from(1u64),
+            Fr::from(0x70u64),
+            Fr::from(1u64),
+            Fr::from(1u64),
+            Fr::from(0u64),
+            Fr::from(0x0eu64),
+            Fr::from(1u64),
             Fr::from(0xa1u64),
             // votes_against increment: SKIPPED (guard=!cond=false)
         ];
@@ -395,14 +402,21 @@ mod tests {
             }
         });
 
-        assert_eq!(ir.num_inputs, 1, "circuit with 1 public arg should have num_inputs=1");
+        assert_eq!(
+            ir.num_inputs, 1,
+            "circuit with 1 public arg should have num_inputs=1"
+        );
         println!("✓ Circuit '{name}' has num_inputs={}", ir.num_inputs);
 
         // The argument is at memory index 0, guard at index 1.
         // Public transcript inputs encode the counter increment ops.
         let public_transcript_inputs: Vec<Fr> = vec![
-            Fr::from(0x70u64), Fr::from(1u64), Fr::from(1u64), Fr::from(0u64),
-            Fr::from(0x0eu64), Fr::from(1u64),
+            Fr::from(0x70u64),
+            Fr::from(1u64),
+            Fr::from(1u64),
+            Fr::from(0u64),
+            Fr::from(0x0eu64),
+            Fr::from(1u64),
             Fr::from(0xa1u64),
         ];
 
@@ -447,11 +461,19 @@ mod tests {
             }
         });
 
-        assert!(ir.do_communications_commitment,
-            "circuit with return value should have do_communications_commitment=true");
+        assert!(
+            ir.do_communications_commitment,
+            "circuit with return value should have do_communications_commitment=true"
+        );
 
-        let has_output = ir.instructions.iter().any(|i| matches!(i, midnight_zkir::Instruction::Output { .. }));
-        assert!(has_output, "circuit with return value should have Output instruction");
+        let has_output = ir
+            .instructions
+            .iter()
+            .any(|i| matches!(i, midnight_zkir::Instruction::Output { .. }));
+        assert!(
+            has_output,
+            "circuit with return value should have Output instruction"
+        );
 
         println!("✓ Circuit '{name}' has output + communications commitment");
     }
@@ -476,9 +498,15 @@ mod tests {
         assert_eq!(ir.num_inputs, 1);
 
         let has_constrain_bits = ir.instructions.iter().any(|i| {
-            matches!(i, midnight_zkir::Instruction::ConstrainBits { bits: 64, .. })
+            matches!(
+                i,
+                midnight_zkir::Instruction::ConstrainBits { bits: 64, .. }
+            )
         });
-        assert!(has_constrain_bits, "u64 param should emit ConstrainBits(64)");
+        assert!(
+            has_constrain_bits,
+            "u64 param should emit ConstrainBits(64)"
+        );
         println!("✓ Circuit '{name}': u64 param has ConstrainBits(64)");
     }
 
@@ -501,10 +529,14 @@ mod tests {
             }
         });
 
-        let has_constrain_bool = ir.instructions.iter().any(|i| {
-            matches!(i, midnight_zkir::Instruction::ConstrainToBoolean { .. })
-        });
-        assert!(has_constrain_bool, "Boolean witness should emit ConstrainToBoolean");
+        let has_constrain_bool = ir
+            .instructions
+            .iter()
+            .any(|i| matches!(i, midnight_zkir::Instruction::ConstrainToBoolean { .. }));
+        assert!(
+            has_constrain_bool,
+            "Boolean witness should emit ConstrainToBoolean"
+        );
         println!("✓ Circuit '{name}': Boolean witness has ConstrainToBoolean");
     }
 

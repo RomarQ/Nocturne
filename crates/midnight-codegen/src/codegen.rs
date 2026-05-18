@@ -1,7 +1,7 @@
 //! Top-level code generation orchestrator.
 
-use midnight_ir::ContractIR;
 use crate::zkir_emitter::{self, ContractZkirOutput};
+use midnight_ir::ContractIR;
 
 /// All generated artifacts for a single contract.
 pub struct ContractArtifacts {

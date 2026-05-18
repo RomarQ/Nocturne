@@ -31,10 +31,10 @@
 //! pi_skip guard:G count:4   // group marker
 //! ```
 
-use midnight_ir::{CircuitIR, ContractIR, ExprIR};
 use midnight_ir::expr::{AssertKind, LiteralIR};
-use midnight_zkir::{Instruction, IrSource};
+use midnight_ir::{CircuitIR, ContractIR, ExprIR};
 use midnight_transient_crypto::curve::Fr;
+use midnight_zkir::{Instruction, IrSource};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -142,7 +142,8 @@ impl ZkirEmitter {
         } else {
             value
         };
-        self.instructions.push(Instruction::DeclarePubInput { var: final_var });
+        self.instructions
+            .push(Instruction::DeclarePubInput { var: final_var });
     }
 
     fn emit_circuit(&mut self, circuit: &CircuitIR) -> ZkirOutput {
@@ -174,7 +175,8 @@ impl ZkirEmitter {
             // The last value in memory is the return value.
             if self.next_index > 0 {
                 let last_idx = self.next_index - 1;
-                self.instructions.push(Instruction::Output { var: last_idx });
+                self.instructions
+                    .push(Instruction::Output { var: last_idx });
             }
         }
 
@@ -194,7 +196,12 @@ impl ZkirEmitter {
     /// Emit instructions for an expression, returning the memory index of the result (if any).
     fn emit_expr(&mut self, expr: &ExprIR) -> Option<Index> {
         match expr {
-            ExprIR::LedgerAccess { field, method, args, .. } => {
+            ExprIR::LedgerAccess {
+                field,
+                method,
+                args,
+                ..
+            } => {
                 let method_name = method.to_string();
                 let field_idx = self.field_index(&field.to_string());
 
@@ -267,11 +274,17 @@ impl ZkirEmitter {
                     BinOp::Lt(_) => {
                         Some(self.emit_instruction(Instruction::LessThan { a, b, bits: 64 }))
                     }
-                    BinOp::Gt(_) => {
-                        Some(self.emit_instruction(Instruction::LessThan { a: b, b: a, bits: 64 }))
-                    }
+                    BinOp::Gt(_) => Some(self.emit_instruction(Instruction::LessThan {
+                        a: b,
+                        b: a,
+                        bits: 64,
+                    })),
                     BinOp::Le(_) => {
-                        let gt = self.emit_instruction(Instruction::LessThan { a: b, b: a, bits: 64 });
+                        let gt = self.emit_instruction(Instruction::LessThan {
+                            a: b,
+                            b: a,
+                            bits: 64,
+                        });
                         Some(self.emit_instruction(Instruction::Not { a: gt }))
                     }
                     BinOp::Ge(_) => {
@@ -289,7 +302,9 @@ impl ZkirEmitter {
                 }
             }
 
-            ExprIR::UnaryOp { op, expr: inner, .. } => {
+            ExprIR::UnaryOp {
+                op, expr: inner, ..
+            } => {
                 let a = self.emit_expr(inner)?;
                 match op {
                     syn::UnOp::Neg(_) => Some(self.emit_instruction(Instruction::Neg { a })),
@@ -313,13 +328,19 @@ impl ZkirEmitter {
                     AssertKind::AssertEq(a, b) => {
                         let idx_a = self.emit_expr(a)?;
                         let idx_b = self.emit_expr(b)?;
-                        self.instructions.push(Instruction::ConstrainEq { a: idx_a, b: idx_b });
+                        self.instructions
+                            .push(Instruction::ConstrainEq { a: idx_a, b: idx_b });
                     }
                 }
                 None
             }
 
-            ExprIR::If { cond, then_branch, else_branch, .. } => {
+            ExprIR::If {
+                cond,
+                then_branch,
+                else_branch,
+                ..
+            } => {
                 let cond_idx = self.emit_expr(cond)?;
                 let outer_guard = self.guard;
                 let outer_in_conditional = self.in_conditional;
@@ -372,29 +393,24 @@ impl ZkirEmitter {
 
             ExprIR::FnCall { name, args, .. } => {
                 let name_str = name.to_string();
-                let arg_indices: Vec<Index> = args
-                    .iter()
-                    .filter_map(|a| self.emit_expr(a))
-                    .collect();
+                let arg_indices: Vec<Index> =
+                    args.iter().filter_map(|a| self.emit_expr(a)).collect();
 
                 match name_str.as_str() {
                     "persistent_hash" => {
                         use midnight_base_crypto::fab::{
                             Alignment, AlignmentAtom, AlignmentSegment,
                         };
-                        let alignment = Alignment(vec![
-                            AlignmentSegment::Atom(AlignmentAtom::Field),
-                        ]);
+                        let alignment =
+                            Alignment(vec![AlignmentSegment::Atom(AlignmentAtom::Field)]);
                         Some(self.emit_instruction(Instruction::PersistentHash {
                             alignment,
                             inputs: arg_indices,
                         }))
                     }
-                    "transient_hash" => {
-                        Some(self.emit_instruction(Instruction::TransientHash {
-                            inputs: arg_indices,
-                        }))
-                    }
+                    "transient_hash" => Some(self.emit_instruction(Instruction::TransientHash {
+                        inputs: arg_indices,
+                    })),
                     _ => arg_indices.last().copied(),
                 }
             }
@@ -494,19 +510,28 @@ impl ZkirEmitter {
         let idx_op = self.emit_load_imm(Fr::from(0x70u64));
         self.push_declare_pub_input(idx_op);
         self.emit_key_field_repr(field_idx);
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 4 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
 
         // Addi { immediate: 1 } → field repr: [0x0e, 1]
         let addi_op = self.emit_load_imm(Fr::from(0x0eu64));
         let one = self.emit_load_imm(Fr::from(1u64));
         self.push_declare_pub_input(addi_op);
         self.push_declare_pub_input(one);
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 2 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 2,
+        });
 
         // Ins { cached: true, n: 1 } → field repr: [0xa1]
         let ins_op = self.emit_load_imm(Fr::from(0xa1u64));
         self.push_declare_pub_input(ins_op);
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
 
         Some(one)
     }
@@ -523,21 +548,30 @@ impl ZkirEmitter {
         // Dup { n: 0 } → field repr: [0x30]
         let dup_op = self.emit_load_imm(Fr::from(0x30u64));
         self.push_declare_pub_input(dup_op);
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
 
         // Idx { cached: false, push_path: false, path: [Value(field_idx)] }
         // Opcode: 0x50 | 0 = 0x50
         let idx_op = self.emit_load_imm(Fr::from(0x50u64));
         self.push_declare_pub_input(idx_op);
         self.emit_key_field_repr(field_idx);
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 4 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
 
         // Popeq { cached: false } → field repr: [0x0c, result_fields...]
         // The read result comes from the transcript as public_input.
         let popeq_op = self.emit_load_imm(Fr::from(0x0cu64));
         self.push_declare_pub_input(popeq_op);
         let read_value = self.emit_instruction(Instruction::PublicInput { guard: None });
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
 
         Some(read_value)
     }
@@ -550,20 +584,29 @@ impl ZkirEmitter {
         let idx_op = self.emit_load_imm(Fr::from(0x70u64));
         self.push_declare_pub_input(idx_op);
         self.emit_key_field_repr(field_idx);
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 4 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
 
         // Push { storage: false, value } → [0x10, value_fields...]
         if let Some(val_idx) = value {
             let push_op = self.emit_load_imm(Fr::from(0x10u64));
             self.push_declare_pub_input(push_op);
             self.push_declare_pub_input(val_idx);
-            self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 2 });
+            self.instructions.push(Instruction::PiSkip {
+                guard: Some(g),
+                count: 2,
+            });
         }
 
         // Ins { cached: true, n: 1 } → [0xa1]
         let ins_op = self.emit_load_imm(Fr::from(0xa1u64));
         self.push_declare_pub_input(ins_op);
-        self.instructions.push(Instruction::PiSkip { guard: Some(g), count: 1 });
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
 
         value
     }
@@ -589,28 +632,47 @@ impl ZkirEmitter {
         let type_str = quote::quote!(#ty).to_string().replace(' ', "");
 
         if type_str == "Boolean" || type_str == "bool" {
-            self.instructions.push(Instruction::ConstrainToBoolean { var });
+            self.instructions
+                .push(Instruction::ConstrainToBoolean { var });
         } else if type_str.starts_with("Uint<")
-            || type_str == "u8" || type_str == "u16" || type_str == "u32"
-            || type_str == "u64" || type_str == "u128"
+            || type_str == "u8"
+            || type_str == "u16"
+            || type_str == "u32"
+            || type_str == "u64"
+            || type_str == "u128"
         {
             // Extract bit count from Uint<N>.
-            let bits = if type_str == "u8" { 8 }
-            else if type_str == "u16" { 16 }
-            else if type_str == "u32" { 32 }
-            else if type_str == "u64" { 64 }
-            else if type_str == "u128" { 128 }
-            else if let Some(n) = type_str.strip_prefix("Uint<").and_then(|s| s.strip_suffix('>')) {
+            let bits = if type_str == "u8" {
+                8
+            } else if type_str == "u16" {
+                16
+            } else if type_str == "u32" {
+                32
+            } else if type_str == "u64" {
+                64
+            } else if type_str == "u128" {
+                128
+            } else if let Some(n) = type_str
+                .strip_prefix("Uint<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 n.parse::<u32>().unwrap_or(64)
             } else {
                 64
             };
-            self.instructions.push(Instruction::ConstrainBits { var, bits });
+            self.instructions
+                .push(Instruction::ConstrainBits { var, bits });
         } else if type_str.starts_with("Bytes<") {
             // Bytes<N> → constrain to N*8 bits.
-            if let Some(n) = type_str.strip_prefix("Bytes<").and_then(|s| s.strip_suffix('>')) {
+            if let Some(n) = type_str
+                .strip_prefix("Bytes<")
+                .and_then(|s| s.strip_suffix('>'))
+            {
                 let bytes: u32 = n.parse().unwrap_or(32);
-                self.instructions.push(Instruction::ConstrainBits { var, bits: bytes * 8 });
+                self.instructions.push(Instruction::ConstrainBits {
+                    var,
+                    bits: bytes * 8,
+                });
             }
         }
         // Field type: no constraint needed (native field element).

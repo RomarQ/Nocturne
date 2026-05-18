@@ -9,7 +9,7 @@
 
 use midnight_ir::{CircuitIR, ContractIR, ExprIR};
 use proc_macro2::TokenStream;
-use quote::{quote, format_ident};
+use quote::{format_ident, quote};
 
 /// Generate the transcript builder module for a contract.
 pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
@@ -20,10 +20,7 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
         .map(|f| f.name.to_string())
         .collect();
 
-    let witnesses_name = contract
-        .witnesses
-        .as_ref()
-        .map(|w| &w.name);
+    let witnesses_name = contract.witnesses.as_ref().map(|w| &w.name);
 
     let circuit_fns: Vec<TokenStream> = contract
         .circuits
@@ -112,7 +109,12 @@ fn generate_circuit_transcript_fn(
 /// Generate Rust statements that push VM Ops.
 fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
     match expr {
-        ExprIR::LedgerAccess { field, method, args, .. } => {
+        ExprIR::LedgerAccess {
+            field,
+            method,
+            args,
+            ..
+        } => {
             let field_name = field.to_string();
             let method_name = method.to_string();
             let field_idx = field_names
@@ -161,7 +163,12 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
             }
         }
 
-        ExprIR::If { cond, then_branch, else_branch, .. } => {
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             // Collect witness values used in the condition for private_transcript.
             let witness_adds = collect_witness_private_inputs(cond);
             let cond_expr = generate_runtime_cond(cond);
@@ -194,7 +201,13 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
         }
 
         ExprIR::Let { name, value, .. } => {
-            let var_name = format_ident!("_let_{}", name);
+            // Strip leading underscores from the user-side name before
+            // prefixing with `_let_`, otherwise `let _v = ...` becomes the
+            // identifier `_let__v` and trips the `non_snake_case` lint with
+            // its double underscore.
+            let stripped = name.to_string();
+            let stripped = stripped.trim_start_matches('_');
+            let var_name = format_ident!("_let_{}", stripped);
             let val_stmt = generate_op_stmt(value, field_names);
             quote! {
                 let #var_name = {
@@ -229,7 +242,9 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
             quote! { #(#inner)* }
         }
 
-        ExprIR::MethodCall { receiver, method, .. } => {
+        ExprIR::MethodCall {
+            receiver, method, ..
+        } => {
             let method_name = method.to_string();
             match method_name.as_str() {
                 "into" | "value" => generate_op_stmt(receiver, field_names),
@@ -269,7 +284,9 @@ fn generate_runtime_cond(expr: &ExprIR) -> TokenStream {
             let field_ident = format_ident!("{}", field.to_string());
             quote! { witnesses.#field_ident.value() }
         }
-        ExprIR::MethodCall { receiver, method, .. } => {
+        ExprIR::MethodCall {
+            receiver, method, ..
+        } => {
             let method_name = method.to_string();
             match method_name.as_str() {
                 "into" | "value" => generate_runtime_cond(receiver),
@@ -284,16 +301,14 @@ fn generate_runtime_cond(expr: &ExprIR) -> TokenStream {
             let ident = format_ident!("{}", name.to_string());
             quote! { #ident }
         }
-        ExprIR::Literal { value, .. } => {
-            match value {
-                midnight_ir::expr::LiteralIR::Bool(b) => quote! { #b },
-                midnight_ir::expr::LiteralIR::Int(n) => {
-                    let n = *n as u64;
-                    quote! { #n != 0 }
-                }
-                _ => quote! { true },
+        ExprIR::Literal { value, .. } => match value {
+            midnight_ir::expr::LiteralIR::Bool(b) => quote! { #b },
+            midnight_ir::expr::LiteralIR::Int(n) => {
+                let n = *n as u64;
+                quote! { #n != 0 }
             }
-        }
+            _ => quote! { true },
+        },
         ExprIR::BinaryOp { op, lhs, rhs, .. } => {
             let l = generate_runtime_cond(lhs);
             let r = generate_runtime_cond(rhs);

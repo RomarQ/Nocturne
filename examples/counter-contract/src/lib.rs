@@ -9,6 +9,12 @@ pub mod counter {
         pub count: Counter,
     }
 
+    impl Default for CounterState {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl CounterState {
         #[midnight(constructor)]
         pub fn new() -> Self {
@@ -32,7 +38,6 @@ pub mod counter {
 #[cfg(test)]
 mod tests {
     use super::counter::*;
-    use midnight::types::*;
 
     #[midnight::test]
     fn test_counter() {

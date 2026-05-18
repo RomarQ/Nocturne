@@ -73,13 +73,13 @@ fn cmd_build() {
                 println!("Contract '{name}':");
 
                 let zkir_dir = entry.path().join("zkir");
-                if zkir_dir.exists() {
-                    if let Ok(files) = std::fs::read_dir(&zkir_dir) {
-                        for f in files.flatten() {
-                            let fname = f.file_name().to_string_lossy().to_string();
-                            if fname.ends_with(".zkir") {
-                                println!("  zkir/{fname}");
-                            }
+                if zkir_dir.exists()
+                    && let Ok(files) = std::fs::read_dir(&zkir_dir)
+                {
+                    for f in files.flatten() {
+                        let fname = f.file_name().to_string_lossy().to_string();
+                        if fname.ends_with(".zkir") {
+                            println!("  zkir/{fname}");
                         }
                     }
                 }
@@ -117,21 +117,23 @@ fn cmd_keygen() {
         std::process::exit(1);
     }
 
-    println!("Found {} ZKIR circuit(s). Generating keys...", zkir_files.len());
+    println!(
+        "Found {} ZKIR circuit(s). Generating keys...",
+        zkir_files.len()
+    );
 
     for zkir_path in &zkir_files {
-        let circuit_name = zkir_path
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let circuit_name = zkir_path.file_stem().unwrap().to_string_lossy().to_string();
 
         println!("  Compiling circuit '{circuit_name}'...");
 
         match load_and_keygen(zkir_path) {
             Ok((k, rows)) => {
                 println!("    k={k}, rows={rows}");
-                println!("    Keys written to {}", zkir_path.parent().unwrap().display());
+                println!(
+                    "    Keys written to {}",
+                    zkir_path.parent().unwrap().display()
+                );
             }
             Err(e) => {
                 eprintln!("    Failed: {e}");
@@ -165,11 +167,7 @@ fn load_and_keygen(path: &Path) -> Result<(u8, usize), Box<dyn std::error::Error
         use midnight_serialize::tagged_serialize;
         use midnight_transient_crypto::proofs::Zkir;
 
-        let pp = MidnightDataProvider::new(
-            FetchMode::OnDemand,
-            OutputMode::Log,
-            vec![],
-        )?;
+        let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])?;
 
         let (pk, vk) = ir.keygen(&pp).await?;
 

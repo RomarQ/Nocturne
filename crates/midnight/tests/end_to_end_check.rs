@@ -3,11 +3,11 @@
 //!
 //! This proves the complete pipeline: Rust contract → ZKIR + transcript → satisfiable proof.
 
-use midnight::types::*;
 use midnight::runtime::transient_crypto::curve::Fr;
 use midnight::runtime::transient_crypto::hash::transient_commit;
 use midnight::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
 use midnight::runtime::transient_crypto::repr::FieldRepr;
+use midnight::types::*;
 
 #[midnight::contract]
 mod counter {
@@ -21,7 +21,9 @@ mod counter {
     impl CounterState {
         #[midnight(constructor)]
         pub fn new() -> Self {
-            Self { count: Counter::zero() }
+            Self {
+                count: Counter::zero(),
+            }
         }
 
         #[midnight(circuit)]
@@ -45,7 +47,10 @@ fn end_to_end_counter_increment() {
         op.field_repr(&mut public_transcript_inputs);
     }
 
-    println!("Transcript ops field repr ({} fields):", public_transcript_inputs.len());
+    println!(
+        "Transcript ops field repr ({} fields):",
+        public_transcript_inputs.len()
+    );
     for (i, fr) in public_transcript_inputs.iter().enumerate() {
         println!("  [{i}]: {fr:?}");
     }

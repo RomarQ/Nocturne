@@ -1,8 +1,8 @@
 //! Integration test: verify that the generated deploy module
 //! produces a valid initial StateValue for contract deployment.
 
-use midnight::types::*;
 use midnight::runtime::onchain_state::state::StateValue;
+use midnight::types::*;
 
 #[midnight::contract]
 mod counter {
@@ -16,7 +16,9 @@ mod counter {
     impl CounterState {
         #[midnight(constructor)]
         pub fn new() -> Self {
-            Self { count: Counter::zero() }
+            Self {
+                count: Counter::zero(),
+            }
         }
 
         #[midnight(circuit)]

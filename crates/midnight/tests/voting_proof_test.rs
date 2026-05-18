@@ -5,11 +5,13 @@
 //! demonstrates that the correct counter was incremented without
 //! revealing which one.
 
-use midnight::types::*;
 use midnight::runtime::transient_crypto::curve::Fr;
 use midnight::runtime::transient_crypto::hash::transient_commit;
-use midnight::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir, PARAMS_VERIFIER};
+use midnight::runtime::transient_crypto::proofs::{
+    KeyLocation, PARAMS_VERIFIER, ProofPreimage, Zkir,
+};
 use midnight::runtime::transient_crypto::repr::FieldRepr;
+use midnight::types::*;
 use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
 #[midnight::contract]
@@ -84,20 +86,29 @@ async fn prove_and_verify_voting_with_witness() {
         output.circuits.into_iter().next().unwrap().ir_source
     };
 
-    println!("ZKIR: k={}, rows={}, num_inputs={}",
-        ir.model().k(), ir.model().rows(), ir.num_inputs);
+    println!(
+        "ZKIR: k={}, rows={}, num_inputs={}",
+        ir.model().k(),
+        ir.model().rows(),
+        ir.num_inputs
+    );
 
     // The voter's choice is private: true = vote yes.
-    let choice = Fr::from(true);
+    let _choice = Fr::from(true);
 
     // Build transcript using the generated builder with real witness values.
     // The builder now evaluates the condition at runtime and only emits
     // ops for the active branch.
-    let witnesses = ballot::BallotWitnesses { choice: Boolean::from(true) };
+    let witnesses = ballot::BallotWitnesses {
+        choice: Boolean::from(true),
+    };
     let transcript = ballot::transcript::build_cast_vote_transcript(&witnesses);
 
     // With choice=true, only votes_for.increment ops should be emitted.
-    println!("Transcript ops: {} (should be 3 for active branch only)", transcript.ops.len());
+    println!(
+        "Transcript ops: {} (should be 3 for active branch only)",
+        transcript.ops.len()
+    );
 
     // Compute field repr from the transcript.
     let mut public_transcript_inputs: Vec<Fr> = Vec::new();
@@ -127,7 +138,9 @@ async fn prove_and_verify_voting_with_witness() {
         }
         Err(e) => {
             let json = serde_json::to_string_pretty(&ir).unwrap();
-            panic!("check failed: {e}\n\nZKIR:\n{json}\n\npublic_transcript_inputs: {public_transcript_inputs:?}");
+            panic!(
+                "check failed: {e}\n\nZKIR:\n{json}\n\npublic_transcript_inputs: {public_transcript_inputs:?}"
+            );
         }
     }
 
@@ -141,7 +154,11 @@ async fn prove_and_verify_voting_with_witness() {
     let rng = rand::thread_rng();
     let (proof, pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
 
-    println!("Proof generated: {} bytes, {} public inputs", proof.0.len(), pis.len());
+    println!(
+        "Proof generated: {} bytes, {} public inputs",
+        proof.0.len(),
+        pis.len()
+    );
     println!("Skips: {skips:?}");
 
     // On-chain compatibility for this conditional circuit is asserted in

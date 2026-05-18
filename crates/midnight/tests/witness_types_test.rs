@@ -36,15 +36,18 @@ mod multi_witness {
     impl State {
         #[midnight(constructor)]
         pub fn new() -> Self {
-            Self { counter: Counter::zero() }
+            Self {
+                counter: Counter::zero(),
+            }
         }
 
-        /// Boolean witness used as an if-condition (the original cast_vote pattern).
+        /// Boolean witness used as an if-condition. Only the then-branch
+        /// touches state — the else-branch is empty — so this exercises the
+        /// no-else path of the cond_select-zeroing fix without writing two
+        /// identical bodies (which clippy flags as a code smell).
         #[midnight(circuit)]
         pub fn use_flag(&mut self, witnesses: &AllSupportedWitnesses) {
             if witnesses.flag.value() {
-                self.counter.increment();
-            } else {
                 self.counter.increment();
             }
         }
@@ -88,11 +91,19 @@ fn each_witness_type_builds_transcript() {
 
     // Boolean — the existing cast_vote pattern.
     let t = multi_witness::transcript::build_use_flag_transcript(&w);
-    assert_eq!(t.private_transcript.len(), 1, "one Fr for the Boolean witness");
+    assert_eq!(
+        t.private_transcript.len(),
+        1,
+        "one Fr for the Boolean witness"
+    );
 
     // Field — must not silently truncate the high bits of u128.
     let t = multi_witness::transcript::build_use_field_transcript(&w);
-    assert_eq!(t.private_transcript.len(), 1, "one Fr for the Field witness");
+    assert_eq!(
+        t.private_transcript.len(),
+        1,
+        "one Fr for the Field witness"
+    );
     assert_eq!(
         t.private_transcript[0],
         midnight::runtime::transient_crypto::curve::Fr::from(u128::MAX),

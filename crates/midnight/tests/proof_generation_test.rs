@@ -4,11 +4,11 @@
 //! generate keys → build transcript → create ProofPreimage → generate
 //! actual Plonk ZK proof → verify it passes.
 
-use midnight::types::*;
 use midnight::runtime::transient_crypto::curve::Fr;
 use midnight::runtime::transient_crypto::hash::transient_commit;
 use midnight::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
 use midnight::runtime::transient_crypto::repr::FieldRepr;
+use midnight::types::*;
 use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
 #[midnight::contract]
@@ -23,7 +23,9 @@ mod counter {
     impl CounterState {
         #[midnight(constructor)]
         pub fn new() -> Self {
-            Self { count: Counter::zero() }
+            Self {
+                count: Counter::zero(),
+            }
         }
 
         #[midnight(circuit)]
@@ -57,7 +59,11 @@ async fn generate_and_verify_proof() {
         output.circuits.into_iter().next().unwrap().ir_source
     };
 
-    println!("Step 1: ZKIR emitted (k={}, rows={})", ir.model().k(), ir.model().rows());
+    println!(
+        "Step 1: ZKIR emitted (k={}, rows={})",
+        ir.model().k(),
+        ir.model().rows()
+    );
 
     // Step 2: Build transcript ops using the generated transcript builder.
     let transcript = counter::transcript::build_increment_transcript();
@@ -68,8 +74,11 @@ async fn generate_and_verify_proof() {
     for op in &transcript.ops {
         op.field_repr(&mut public_transcript_inputs);
     }
-    println!("Step 2: Transcript built ({} ops, {} public input fields)",
-        transcript.ops.len(), public_transcript_inputs.len());
+    println!(
+        "Step 2: Transcript built ({} ops, {} public input fields)",
+        transcript.ops.len(),
+        public_transcript_inputs.len()
+    );
 
     // Step 4: Verify circuit is satisfiable first (cheap check).
     let preimage = ProofPreimage {
@@ -91,11 +100,8 @@ async fn generate_and_verify_proof() {
     println!("Step 3: IrSource::check() passed (pi_skips: {pi_skips:?})");
 
     // Step 5: Generate prover/verifier keys.
-    let pp = MidnightDataProvider::new(
-        FetchMode::OnDemand,
-        OutputMode::Log,
-        vec![],
-    ).expect("data provider");
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
 
     let (pk, _vk) = ir.keygen(&pp).await.expect("keygen");
     println!("Step 4: Plonk keygen complete");
@@ -117,7 +123,8 @@ async fn generate_and_verify_proof() {
     // any divergence between the circuit's PI layout and the ledger's
     // unconditional 2-slot prefix would fail this assertion long before it
     // would reach an on-chain verifier.
-    let (comm, _opening) = preimage.communications_commitment
+    let (comm, _opening) = preimage
+        .communications_commitment
         .expect("circuit must opt in to communications commitment");
     let mut expected_pis: Vec<Fr> = vec![preimage.binding_input, comm];
     expected_pis.extend(public_transcript_inputs.iter().copied());

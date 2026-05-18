@@ -1,8 +1,7 @@
 use proc_macro2::Span;
 use syn::{
     Expr, ExprCall, ExprField, ExprMethodCall, ExprPath, FnArg, ImplItem, ImplItemFn, Item,
-    ItemImpl, ItemMod, ItemStruct, Pat, ReturnType, Stmt,
-    parse::Parser,
+    ItemImpl, ItemMod, ItemStruct, Pat, ReturnType, Stmt, parse::Parser,
 };
 
 use crate::attrs::{MidnightAttr, find_midnight_attr};
@@ -15,10 +14,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
     let name = module.ident.clone();
     let span = Span::call_site();
 
-    let items = module
-        .content
-        .map(|(_, items)| items)
-        .unwrap_or_default();
+    let items = module.content.map(|(_, items)| items).unwrap_or_default();
 
     let mut ledger: Option<LedgerIR> = None;
     let mut witnesses: Option<WitnessIR> = None;
@@ -30,35 +26,33 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
 
     for item in items {
         match &item {
-            Item::Struct(s) => {
-                match find_midnight_attr(&s.attrs) {
-                    Some((MidnightAttr::Ledger, _attr_span)) => {
-                        if ledger.is_some() {
-                            diagnostics.push(MidnightError::new(
-                                s.ident.span(),
-                                ErrorCode::DuplicateLedger,
-                                "only one #[midnight(ledger)] struct is allowed per contract",
-                            ));
-                        } else {
-                            ledger = Some(parse_ledger_struct(s)?);
-                        }
-                    }
-                    Some((MidnightAttr::Witnesses, _attr_span)) => {
-                        if witnesses.is_some() {
-                            diagnostics.push(MidnightError::new(
-                                s.ident.span(),
-                                ErrorCode::DuplicateWitnesses,
-                                "only one #[midnight(witnesses)] struct is allowed per contract",
-                            ));
-                        } else {
-                            witnesses = Some(parse_witnesses_struct(s)?);
-                        }
-                    }
-                    _ => {
-                        other_items.push(item);
+            Item::Struct(s) => match find_midnight_attr(&s.attrs) {
+                Some((MidnightAttr::Ledger, _attr_span)) => {
+                    if ledger.is_some() {
+                        diagnostics.push(MidnightError::new(
+                            s.ident.span(),
+                            ErrorCode::DuplicateLedger,
+                            "only one #[midnight(ledger)] struct is allowed per contract",
+                        ));
+                    } else {
+                        ledger = Some(parse_ledger_struct(s)?);
                     }
                 }
-            }
+                Some((MidnightAttr::Witnesses, _attr_span)) => {
+                    if witnesses.is_some() {
+                        diagnostics.push(MidnightError::new(
+                            s.ident.span(),
+                            ErrorCode::DuplicateWitnesses,
+                            "only one #[midnight(witnesses)] struct is allowed per contract",
+                        ));
+                    } else {
+                        witnesses = Some(parse_witnesses_struct(s)?);
+                    }
+                }
+                _ => {
+                    other_items.push(item);
+                }
+            },
             Item::Impl(impl_block) => {
                 parse_impl_block(
                     impl_block,
@@ -290,14 +284,14 @@ fn parse_query(method: &ImplItemFn) -> MidnightResult<QueryIR> {
     let name = method.sig.ident.clone();
 
     // Validate: query must take &self, not &mut self.
-    if let Some(FnArg::Receiver(recv)) = method.sig.inputs.first() {
-        if recv.mutability.is_some() {
-            return Err(MidnightError::new(
-                name.span(),
-                ErrorCode::QueryMustBeImmutable,
-                "query functions must take &self, not &mut self",
-            ));
-        }
+    if let Some(FnArg::Receiver(recv)) = method.sig.inputs.first()
+        && recv.mutability.is_some()
+    {
+        return Err(MidnightError::new(
+            name.span(),
+            ErrorCode::QueryMustBeImmutable,
+            "query functions must take &self, not &mut self",
+        ));
     }
 
     let params = parse_fn_params(&method.sig)?;
@@ -320,20 +314,20 @@ fn parse_query(method: &ImplItemFn) -> MidnightResult<QueryIR> {
 fn parse_fn_params(sig: &syn::Signature) -> MidnightResult<Vec<ParamIR>> {
     let mut params = Vec::new();
     for arg in &sig.inputs {
-        if let FnArg::Typed(pat_type) = arg {
-            if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                let name = &pat_ident.ident;
-                // Skip witness parameters (detected by type containing "Witnesses").
-                let ty_str = quote::quote!(#pat_type.ty).to_string();
-                if ty_str.contains("Witnesses") {
-                    continue;
-                }
-                params.push(ParamIR {
-                    span: name.span(),
-                    name: name.clone(),
-                    ty: *pat_type.ty.clone(),
-                });
+        if let FnArg::Typed(pat_type) = arg
+            && let Pat::Ident(pat_ident) = &*pat_type.pat
+        {
+            let name = &pat_ident.ident;
+            // Skip witness parameters (detected by type containing "Witnesses").
+            let ty_str = quote::quote!(#pat_type.ty).to_string();
+            if ty_str.contains("Witnesses") {
+                continue;
             }
+            params.push(ParamIR {
+                span: name.span(),
+                name: name.clone(),
+                ty: *pat_type.ty.clone(),
+            });
         }
     }
     Ok(params)
@@ -381,7 +375,12 @@ fn parse_circuit_params(
         }
     }
 
-    Ok((mutates_ledger, takes_witnesses, witnesses_param_name, params))
+    Ok((
+        mutates_ledger,
+        takes_witnesses,
+        witnesses_param_name,
+        params,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -470,10 +469,7 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                 let full_path = quote::quote!(#path).to_string();
                 Ok(ExprIR::Var {
                     span: Span::call_site(),
-                    name: syn::Ident::new(
-                        &full_path.replace(' ', ""),
-                        Span::call_site(),
-                    ),
+                    name: syn::Ident::new(&full_path.replace(' ', ""), Span::call_site()),
                 })
             }
         }
@@ -504,23 +500,20 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
             args,
             ..
         }) => {
-            let parsed_args: Vec<ExprIR> = args
-                .iter()
-                .map(parse_expr)
-                .collect::<MidnightResult<_>>()?;
+            let parsed_args: Vec<ExprIR> =
+                args.iter().map(parse_expr).collect::<MidnightResult<_>>()?;
 
             // Detect `self.field.method(args)` pattern for ledger access.
-            if let Expr::Field(ExprField { base, member, .. }) = &**receiver {
-                if is_self_expr(base) {
-                    if let syn::Member::Named(field_name) = member {
-                        return Ok(ExprIR::LedgerAccess {
-                            span: method.span(),
-                            field: field_name.clone(),
-                            method: method.clone(),
-                            args: parsed_args,
-                        });
-                    }
-                }
+            if let Expr::Field(ExprField { base, member, .. }) = &**receiver
+                && is_self_expr(base)
+                && let syn::Member::Named(field_name) = member
+            {
+                return Ok(ExprIR::LedgerAccess {
+                    span: method.span(),
+                    field: field_name.clone(),
+                    method: method.clone(),
+                    args: parsed_args,
+                });
             }
 
             let parsed_receiver = parse_expr(receiver)?;
@@ -534,39 +527,37 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
 
         Expr::Field(ExprField { base, member, .. }) => {
             // Detect `witnesses.field` pattern.
-            if let Expr::Path(ExprPath { path, .. }) = &**base {
-                if let Some(ident) = path.get_ident() {
-                    let name = ident.to_string();
-                    if name == "witnesses" || name.ends_with("witnesses") {
-                        if let syn::Member::Named(field_name) = member {
-                            return Ok(ExprIR::WitnessAccess {
-                                span: field_name.span(),
-                                field: field_name.clone(),
-                            });
-                        }
-                    }
+            if let Expr::Path(ExprPath { path, .. }) = &**base
+                && let Some(ident) = path.get_ident()
+            {
+                let name = ident.to_string();
+                if (name == "witnesses" || name.ends_with("witnesses"))
+                    && let syn::Member::Named(field_name) = member
+                {
+                    return Ok(ExprIR::WitnessAccess {
+                        span: field_name.span(),
+                        field: field_name.clone(),
+                    });
                 }
             }
 
             // Detect `self.field` (ledger read without method call).
-            if is_self_expr(base) {
-                if let syn::Member::Named(field_name) = member {
-                    return Ok(ExprIR::LedgerAccess {
-                        span: field_name.span(),
-                        field: field_name.clone(),
-                        method: syn::Ident::new("__direct_access", Span::call_site()),
-                        args: vec![],
-                    });
-                }
+            if is_self_expr(base)
+                && let syn::Member::Named(field_name) = member
+            {
+                return Ok(ExprIR::LedgerAccess {
+                    span: field_name.span(),
+                    field: field_name.clone(),
+                    method: syn::Ident::new("__direct_access", Span::call_site()),
+                    args: vec![],
+                });
             }
 
             // Generic field access.
             let parsed_base = parse_expr(base)?;
             let field_ident = match member {
                 syn::Member::Named(n) => n.clone(),
-                syn::Member::Unnamed(idx) => {
-                    syn::Ident::new(&format!("_{}", idx.index), idx.span)
-                }
+                syn::Member::Unnamed(idx) => syn::Ident::new(&format!("_{}", idx.index), idx.span),
             };
             Ok(ExprIR::MethodCall {
                 span: field_ident.span(),
@@ -577,10 +568,8 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
         }
 
         Expr::Call(ExprCall { func, args, .. }) => {
-            let parsed_args: Vec<ExprIR> = args
-                .iter()
-                .map(parse_expr)
-                .collect::<MidnightResult<_>>()?;
+            let parsed_args: Vec<ExprIR> =
+                args.iter().map(parse_expr).collect::<MidnightResult<_>>()?;
 
             // Extract function name.
             if let Expr::Path(ExprPath { path, .. }) = &**func {
@@ -718,13 +707,11 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                 .to_string(),
         }),
 
-        Expr::ForLoop(_) => {
-            Ok(ExprIR::Unsupported {
-                span: Span::call_site(),
-                description: "for loops not yet supported (will support const-bounded in Phase 6)"
-                    .to_string(),
-            })
-        }
+        Expr::ForLoop(_) => Ok(ExprIR::Unsupported {
+            span: Span::call_site(),
+            description: "for loops not yet supported (will support const-bounded in Phase 6)"
+                .to_string(),
+        }),
 
         _ => Ok(ExprIR::Unsupported {
             span: Span::call_site(),

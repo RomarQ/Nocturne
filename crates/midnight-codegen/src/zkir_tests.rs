@@ -53,7 +53,10 @@ mod tests {
             .iter()
             .filter(|i| matches!(i, Instruction::DeclarePubInput { .. }))
             .count();
-        assert!(pub_input_count > 0, "should emit DeclarePubInput for transcript ops");
+        assert!(
+            pub_input_count > 0,
+            "should emit DeclarePubInput for transcript ops"
+        );
 
         // Should contain PiSkip instructions (grouping transcript ops)
         let pi_skip_count = instrs
@@ -280,7 +283,10 @@ mod tests {
         let has_declare = instrs
             .iter()
             .any(|i| matches!(i, Instruction::DeclarePubInput { .. }));
-        assert!(has_declare, "ledger read should emit DeclarePubInput for VM ops");
+        assert!(
+            has_declare,
+            "ledger read should emit DeclarePubInput for VM ops"
+        );
     }
 
     #[test]
@@ -315,7 +321,10 @@ mod tests {
             .filter(|i| matches!(i, Instruction::DeclarePubInput { .. }))
             .count();
         // At least one for disclose + several for ledger write ops
-        assert!(declare_count >= 2, "should have DeclarePubInput for disclose + ops");
+        assert!(
+            declare_count >= 2,
+            "should have DeclarePubInput for disclose + ops"
+        );
     }
 
     /// Regression guard for the on-chain public-input layout.

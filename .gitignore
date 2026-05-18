@@ -1,5 +1,7 @@
 /target
-Cargo.lock
+# Cargo.lock IS committed: this is a workspace with a binary crate
+# (tools/cargo-midnight) and the lockfile pins exact dependency versions
+# for reproducible builds.
 *.swp
 *.swo
 *~

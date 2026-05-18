@@ -19,13 +19,22 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install rustfmt + clippy
+        run: rustup component add rustfmt clippy
+
       - uses: Swatinem/rust-cache@v2
 
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
       - name: Build workspace
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: cargo-midnight build (counter example)
         run: ./target/debug/cargo-midnight build
