@@ -59,6 +59,12 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
         .iter()
         .map(|f| f.name.to_string())
         .collect();
+    let field_types: Vec<syn::Type> = contract
+        .ledger
+        .fields
+        .iter()
+        .map(|f| f.ty.clone())
+        .collect();
 
     // Collect witness field types for type constraints on PrivateInput.
     let witness_types: HashMap<String, syn::Type> = contract
@@ -76,7 +82,7 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
         .circuits
         .iter()
         .map(|circuit| {
-            let mut emitter = ZkirEmitter::new(&field_names, &witness_types);
+            let mut emitter = ZkirEmitter::new(&field_names, &field_types, &witness_types);
             emitter.emit_circuit(circuit)
         })
         .collect();
@@ -99,12 +105,22 @@ struct ZkirEmitter {
     /// Cached `LoadImm 0` to avoid re-emitting for every guarded declare.
     zero_var: Option<Index>,
     field_names: Vec<String>,
+    /// Ledger field types, parallel-indexed with `field_names`. Used to
+    /// dispatch on the inner type of `Cell<T>`/`Map<K, V>`/etc. when
+    /// emitting StateValue encodings. Unused today; scaffolding for the
+    /// encoding work in `memories/storage-cell-encoding-gap.md`.
+    #[allow(dead_code)]
+    field_types: Vec<syn::Type>,
     /// Witness field name → type, for emitting type constraints on PrivateInput.
     witness_types: HashMap<String, syn::Type>,
 }
 
 impl ZkirEmitter {
-    fn new(field_names: &[String], witness_types: &HashMap<String, syn::Type>) -> Self {
+    fn new(
+        field_names: &[String],
+        field_types: &[syn::Type],
+        witness_types: &HashMap<String, syn::Type>,
+    ) -> Self {
         Self {
             instructions: Vec::new(),
             next_index: 0,
@@ -114,6 +130,7 @@ impl ZkirEmitter {
             in_conditional: false,
             zero_var: None,
             field_names: field_names.to_vec(),
+            field_types: field_types.to_vec(),
             witness_types: witness_types.clone(),
         }
     }
@@ -589,7 +606,12 @@ impl ZkirEmitter {
             count: 4,
         });
 
-        // Push { storage: false, value } → [0x10, value_fields...]
+        // Push { storage: false, value } → currently emits a placeholder
+        // 2-declare group. TODO: switch to `emit_push_cell` once the
+        // transcript codegen also emits the matching `Op::Push` (today it
+        // only emits Idx + Ins for Cell::set/Map::insert, so any IR change
+        // here would diverge from the runtime transcript). See
+        // `memories/storage-cell-encoding-gap.md`.
         if let Some(val_idx) = value {
             let push_op = self.emit_load_imm(Fr::from(0x10u64));
             self.push_declare_pub_input(push_op);
@@ -609,6 +631,62 @@ impl ZkirEmitter {
         });
 
         value
+    }
+
+    /// Emit a `Push { storage, value: StateValue::Cell(AlignedValue) }` group.
+    ///
+    /// NOT YET WIRED UP: held as scaffolding for the next-stage Cell::set
+    /// and Map::insert work. See `memories/storage-cell-encoding-gap.md`
+    /// for the remaining alignment + two-Push-pattern questions.
+    #[allow(dead_code)]
+    ///
+    /// The on-chain transcript op encodes as
+    /// `[Push opcode (0x10|0x11), Cell discriminant (1), ..alignment.field_repr,
+    /// ..value.field_repr]`. See `StateValue::field_repr` in
+    /// `onchain-state/src/state.rs:172` and `AlignedValue::field_repr` in
+    /// `transient-crypto/src/fab.rs:381`. If the value's type isn't recognized
+    /// (`encoding` is `None`), falls back to the legacy 2-declare emission —
+    /// this preserves behavior for types the encoding table doesn't yet cover.
+    fn emit_push_cell(
+        &mut self,
+        value_var: Index,
+        encoding: Option<&AlignedValueEncoding>,
+        storage: bool,
+    ) {
+        let g = self.guard;
+        let push_op = self.emit_load_imm(Fr::from(if storage { 0x11u64 } else { 0x10u64 }));
+        self.push_declare_pub_input(push_op);
+
+        match encoding {
+            Some(enc) if enc.value_field_count == 1 => {
+                // Cell discriminant (1) + alignment.field_repr + 1-Fr value.
+                let cell_disc = self.emit_load_imm(Fr::from(1u64));
+                self.push_declare_pub_input(cell_disc);
+                for atom in &enc.alignment_atoms {
+                    let v = self.emit_load_imm(Fr::from(*atom as u64));
+                    self.push_declare_pub_input(v);
+                }
+                self.push_declare_pub_input(value_var);
+                // Total: Push opcode (1) + Cell disc (1) + alignment (1 + N atoms) + value (1)
+                //      = 4 + alignment_atoms.len()
+                let count = 3 + enc.alignment_atoms.len();
+                self.instructions.push(Instruction::PiSkip {
+                    guard: Some(g),
+                    count: count as u32,
+                });
+            }
+            _ => {
+                // Fallback: legacy 2-declare emission. Used when the value
+                // type isn't in the encoding table yet (e.g., multi-Fr types
+                // like Bytes<N>). Not on-chain compatible — a TODO until the
+                // encoding table covers all supported value types.
+                self.push_declare_pub_input(value_var);
+                self.instructions.push(Instruction::PiSkip {
+                    guard: Some(g),
+                    count: 2,
+                });
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -684,6 +762,96 @@ impl ZkirEmitter {
             .position(|f| f == field_name)
             .unwrap_or(0) as u8
     }
+}
+
+/// Encoding parameters for an `AlignedValue<T>` of a known Rust type.
+///
+/// Mirrors `AlignedValue::field_repr` (`transient-crypto/src/fab.rs:381`):
+/// alignment metadata first, then the value's field elements.
+///
+/// - `alignment_atoms`: the LoadImm-able sequence emitted for
+///   `alignment.field_repr` (`fab.rs:368-374`). For a single-atom alignment
+///   `[AlignmentSegment::Atom(AlignmentAtom::Bytes{N})]`, this is `[1, N]`
+///   (one segment, then the atom's encoded length).
+/// - `value_field_count`: number of `Fr` elements occupied by the value
+///   itself. Today we only encode single-Fr value types — multi-Fr
+///   (e.g., `Bytes<N>` for N giving > 1 Fr) is unsupported and falls
+///   through to the legacy emission.
+#[derive(Debug, Clone)]
+struct AlignedValueEncoding {
+    alignment_atoms: Vec<u32>,
+    value_field_count: usize,
+}
+
+/// Compute the `AlignedValueEncoding` for a supported Rust type.
+///
+/// Returns `None` for types not yet handled (multi-Fr value layouts like
+/// large `Bytes<N>`, custom ADTs). Callers fall back to the legacy
+/// emission path.
+///
+/// Currently unused: held as scaffolding for the Cell::set / Map::insert
+/// work in `memories/storage-cell-encoding-gap.md` and
+/// `memories/map-ledger-field-encoding.md`.
+#[allow(dead_code)]
+fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
+    let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
+
+    // Boolean and bool: encoded as Bytes<1>.
+    if ty_str == "Boolean" || ty_str == "bool" {
+        return Some(AlignedValueEncoding {
+            alignment_atoms: vec![1, 1],
+            value_field_count: 1,
+        });
+    }
+
+    // Uint<N> and primitive integer types: encoded as Bytes<ceil(N/8)>.
+    // For N ≤ 64 the value fits in one Fr.
+    let int_bits = if ty_str == "u8" {
+        Some(8u32)
+    } else if ty_str == "u16" {
+        Some(16)
+    } else if ty_str == "u32" {
+        Some(32)
+    } else if ty_str == "u64" {
+        Some(64)
+    } else if ty_str == "u128" {
+        Some(128)
+    } else if let Some(n) = ty_str.strip_prefix("Uint<").and_then(|s| s.strip_suffix('>')) {
+        n.parse::<u32>().ok()
+    } else {
+        None
+    };
+    if let Some(bits) = int_bits {
+        let bytes = bits.div_ceil(8);
+        // The Fr field is ~253 bits — anything up to that fits in one Fr.
+        if bits > 0 && bits <= 253 {
+            return Some(AlignedValueEncoding {
+                alignment_atoms: vec![1, bytes],
+                value_field_count: 1,
+            });
+        }
+    }
+
+    // Field: encoded as AlignmentAtom::Field (-2 in two's complement, but
+    // we don't yet support raw Field cells — needs the unsigned wraparound
+    // encoded into the LoadImm).
+    // Bytes<N>: similarly deferred until we add multi-Fr value emission.
+    None
+}
+
+/// If `ty` is `Cell<T>`, return `T`. Otherwise `None`. Currently unused;
+/// scaffolding for the next-stage encoding work referenced above.
+#[allow(dead_code)]
+fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Cell"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner.clone());
+    }
+    None
 }
 
 fn instruction_output_count(instruction: &Instruction) -> u32 {

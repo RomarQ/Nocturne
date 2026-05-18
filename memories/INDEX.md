@@ -12,3 +12,4 @@ Durable findings about Nocturne's interaction with midnight-ledger. Read before 
 | [where-to-find-things-in-midnight-ledger.md](where-to-find-things-in-midnight-ledger.md) | Reference map: which crate/file/function implements which part of the protocol. |
 | [witness-type-support.md](witness-type-support.md) | Boolean/Field/Uint<N> witnesses supported. Bytes<N> rejected at parse time pending multi-Fr witness emission. |
 | [map-ledger-field-encoding.md](map-ledger-field-encoding.md) | Empirical compactc emission for `Map<K, V>` insert/lookup/member, opcode reference, and staged implementation plan. |
+| [storage-cell-encoding-gap.md](storage-cell-encoding-gap.md) | `Cell::set` / `Map::insert` aren't on-chain compatible: transcript codegen omits `Op::Push` entirely, IR emits a 2-declare placeholder. Stage 0 helpers landed; call-site fix pending two-Push-pattern investigation. |

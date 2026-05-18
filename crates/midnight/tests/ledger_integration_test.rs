@@ -303,3 +303,4 @@ async fn voting_verifies_with_ledger_shape_pis() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed with ledger-shape PIs");
 }
+
