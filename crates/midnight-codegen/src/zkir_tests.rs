@@ -317,4 +317,69 @@ mod tests {
         // At least one for disclose + several for ledger write ops
         assert!(declare_count >= 2, "should have DeclarePubInput for disclose + ops");
     }
+
+    /// Regression guard for the on-chain public-input layout.
+    ///
+    /// `midnight_ledger::verify::ContractCall::public_inputs` unconditionally
+    /// pushes `[binding_input, communication_commitment, ..transcript]`. If a
+    /// circuit is emitted with `do_communications_commitment = false`, its
+    /// verifier key only reserves a slot for `binding_input`, and the ledger's
+    /// extra commitment input causes a Plonk PI-count mismatch at verify time.
+    ///
+    /// Every Nocturne-emitted circuit must therefore opt in to the commitment
+    /// slot — including circuits without a return value.
+    #[test]
+    fn every_circuit_emits_communications_commitment_slot() {
+        // A grab bag of circuit shapes: no return, return value, witness +
+        // conditional branches, public arg, multi-circuit contract.
+        let circuits = compile_circuits(quote::quote! {
+            mod shapes {
+                #[midnight(ledger)]
+                pub struct State {
+                    count: Counter,
+                    flag: Cell<bool>,
+                }
+
+                #[midnight(witnesses)]
+                pub struct Witnesses {
+                    pub choice: Boolean,
+                }
+
+                impl State {
+                    #[midnight(constructor)]
+                    pub fn new() -> Self {
+                        Self { count: Counter::zero(), flag: Cell::new(false) }
+                    }
+
+                    #[midnight(circuit)]
+                    pub fn increment(&mut self) {
+                        self.count.increment();
+                    }
+
+                    #[midnight(circuit)]
+                    pub fn cast(&mut self, witnesses: &Witnesses) {
+                        if witnesses.choice.value() {
+                            self.count.increment();
+                        } else {
+                            self.flag.set(true);
+                        }
+                    }
+
+                    #[midnight(circuit)]
+                    pub fn get_count(&self) -> u64 {
+                        self.count.value()
+                    }
+                }
+            }
+        });
+
+        assert!(!circuits.is_empty(), "test contract must produce circuits");
+        for (name, ir) in &circuits {
+            assert!(
+                ir.do_communications_commitment,
+                "circuit '{name}' has do_communications_commitment=false; \
+                 this would fail on-chain verify due to ledger PI count mismatch"
+            );
+        }
+    }
 }

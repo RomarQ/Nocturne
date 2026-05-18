@@ -144,6 +144,16 @@ async fn prove_and_verify_voting_with_witness() {
     println!("Proof generated: {} bytes, {} public inputs", proof.0.len(), pis.len());
     println!("Skips: {skips:?}");
 
+    // TODO: assert pis matches the ledger's public_inputs() layout, as
+    // proof_generation_test does for counter. For conditional circuits, prove
+    // returns `[binding_input, comm, ..pis for BOTH branches]` (DeclarePubInput
+    // always pushes; PiSkip only records skip ranges). The ledger's
+    // public_inputs() iterates the on-chain transcript program — which only
+    // holds the active branch — so it builds a shorter vector. Reconciling
+    // these requires either the ledger feeding placeholder slots for inactive
+    // branches, or the verifier consuming pi_skips. Investigate before adding
+    // the assertion here.
+
     // Verify.
     vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
         .expect("verification should succeed");

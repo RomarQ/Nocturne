@@ -109,6 +109,24 @@ async fn generate_and_verify_proof() {
     println!("  Public inputs: {} fields", pis.len());
     println!("  Skips: {skips:?}");
 
+    // Step 6b: The on-chain ledger constructs verifier inputs as
+    //   [binding_input, communication_commitment, ..transcript.field_repr()]
+    // (see midnight_ledger::verify::ContractCall::public_inputs). Reconstruct
+    // them the same way and assert the proof's pis match. This is the
+    // regression guard for the do_communications_commitment-class of bugs:
+    // any divergence between the circuit's PI layout and the ledger's
+    // unconditional 2-slot prefix would fail this assertion long before it
+    // would reach an on-chain verifier.
+    let (comm, _opening) = preimage.communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut expected_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    expected_pis.extend(public_transcript_inputs.iter().copied());
+    assert_eq!(
+        pis, expected_pis,
+        "prove returned PIs that don't match the ledger's public_inputs() layout; \
+         verify on-chain would fail with a PI count mismatch"
+    );
+
     // Step 7: Verify the proof!
     use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
 
