@@ -7,6 +7,7 @@
 
 use midnight::types::*;
 use midnight::runtime::transient_crypto::curve::Fr;
+use midnight::runtime::transient_crypto::hash::transient_commit;
 use midnight::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir, PARAMS_VERIFIER};
 use midnight::runtime::transient_crypto::repr::FieldRepr;
 use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
@@ -110,7 +111,12 @@ async fn prove_and_verify_voting_with_witness() {
         public_transcript_inputs: public_transcript_inputs.clone(),
         public_transcript_outputs: vec![],
         binding_input: Fr::from(42u64),
-        communications_commitment: None,
+        communications_commitment: if ir.do_communications_commitment {
+            let opening = Fr::from(0u64);
+            Some((transient_commit::<[Fr]>(&[], opening), opening))
+        } else {
+            None
+        },
         key_location: KeyLocation(std::borrow::Cow::Borrowed("test")),
     };
 

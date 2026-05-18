@@ -42,3 +42,9 @@ jobs:
         run: |
           test -f target/midnight/counter/zkir/increment.prover
           test -f target/midnight/counter/zkir/increment.verifier
+
+      - name: Verifier key matches compactc golden
+        run: |
+          cmp target/midnight/counter/zkir/increment.verifier \
+              tests/golden/counter-increment.verifier
+          echo "Verifier key is byte-identical to compactc output."

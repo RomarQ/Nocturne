@@ -40,8 +40,8 @@ mod tests {
 
         let (name, ir) = &circuits[0];
         assert_eq!(name, "increment");
-        // Counter increment has no Output instructions, so no comm commitment.
-        assert!(!ir.do_communications_commitment);
+        // do_communications_commitment is always emitted to match compactc.
+        assert!(ir.do_communications_commitment);
 
         let instrs = ir.instructions.as_ref();
 
@@ -123,7 +123,7 @@ mod tests {
         let json = serde_json::to_string_pretty(ir).expect("serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse JSON");
 
-        assert_eq!(parsed["do_communications_commitment"], false);
+        assert_eq!(parsed["do_communications_commitment"], true);
 
         // Verify instruction ops are correct
         let instrs = parsed["instructions"].as_array().unwrap();

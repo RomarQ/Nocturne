@@ -141,11 +141,10 @@ impl ZkirEmitter {
             }
         }
 
-        let has_outputs = self.instructions.iter().any(|i| matches!(i, Instruction::Output { .. }));
-
+        // Always emit communications commitment to match compactc behavior.
         let ir_source = IrSource {
             num_inputs: self.num_inputs,
-            do_communications_commitment: has_outputs,
+            do_communications_commitment: true,
             instructions: Arc::new(std::mem::take(&mut self.instructions)),
         };
 

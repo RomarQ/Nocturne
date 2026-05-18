@@ -6,7 +6,17 @@ mod tests {
     use crate::zkir_emitter;
     use midnight_ir::parse_contract;
     use midnight_transient_crypto::curve::Fr;
+    use midnight_transient_crypto::hash::transient_commit;
     use midnight_transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
+
+    /// Compute a valid (commitment, opening) pair over `inputs ++ outputs`.
+    /// Mirrors the check in `ir_vm.rs::preprocess` so check() accepts it.
+    fn comm_for(inputs: &[Fr], outputs: &[Fr]) -> (Fr, Fr) {
+        let opening = Fr::from(0u64);
+        let mut preimage = inputs.to_vec();
+        preimage.extend_from_slice(outputs);
+        (transient_commit::<[Fr]>(&preimage, opening), opening)
+    }
 
     fn compile_and_check(input: proc_macro2::TokenStream) {
         let module: syn::ItemMod = syn::parse2(input).expect("parse module");
@@ -30,9 +40,7 @@ mod tests {
                 public_transcript_outputs: vec![],
                 binding_input: Fr::from(42u64),
                 communications_commitment: if ir.do_communications_commitment {
-                    // We need to compute the correct commitment.
-                    // For now, use a placeholder -- check() will validate it.
-                    Some((Fr::from(0u64), Fr::from(0u64)))
+                    Some(comm_for(&vec![Fr::from(0u64); ir.num_inputs as usize], &[]))
                 } else {
                     None
                 },
@@ -116,7 +124,7 @@ mod tests {
             public_transcript_outputs: vec![],
             binding_input: Fr::from(42u64),
             communications_commitment: if ir.do_communications_commitment {
-                Some((Fr::from(0u64), Fr::from(0u64)))
+                Some(comm_for(&[], &[]))
             } else {
                 None
             },
@@ -188,7 +196,7 @@ mod tests {
             public_transcript_outputs,
             binding_input: Fr::from(42u64),
             communications_commitment: if ir.do_communications_commitment {
-                Some((Fr::from(0u64), Fr::from(0u64)))
+                Some(comm_for(&[], &[]))
             } else {
                 None
             },
@@ -262,7 +270,7 @@ mod tests {
             public_transcript_outputs: vec![],
             binding_input: Fr::from(42u64),
             communications_commitment: if ir.do_communications_commitment {
-                Some((Fr::from(0u64), Fr::from(0u64)))
+                Some(comm_for(&[], &[]))
             } else {
                 None
             },
@@ -343,7 +351,7 @@ mod tests {
             public_transcript_outputs: vec![],
             binding_input: Fr::from(42u64),
             communications_commitment: if ir.do_communications_commitment {
-                Some((Fr::from(0u64), Fr::from(0u64)))
+                Some(comm_for(&[], &[]))
             } else {
                 None
             },
@@ -404,7 +412,11 @@ mod tests {
             public_transcript_inputs,
             public_transcript_outputs: vec![],
             binding_input: Fr::from(1u64),
-            communications_commitment: None,
+            communications_commitment: if ir.do_communications_commitment {
+                Some(comm_for(&[Fr::from(42u64)], &[]))
+            } else {
+                None
+            },
             key_location: KeyLocation(std::borrow::Cow::Borrowed("test")),
         };
 
@@ -529,7 +541,11 @@ mod tests {
             public_transcript_inputs: vec![],
             public_transcript_outputs: vec![],
             binding_input: Fr::from(42u64),
-            communications_commitment: None,
+            communications_commitment: if ir.do_communications_commitment {
+                Some(comm_for(&[], &[]))
+            } else {
+                None
+            },
             key_location: KeyLocation(std::borrow::Cow::Borrowed("test")),
         };
 
