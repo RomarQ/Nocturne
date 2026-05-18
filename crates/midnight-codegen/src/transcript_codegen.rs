@@ -206,8 +206,18 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
             // Read the witness value and add to private transcript as Fr.
+            //
+            // `Boolean::value()` returns `bool`, `Field::value()` and
+            // `Uint::<N>::value()` both return `u128`. `Fr: From<bool>`,
+            // `From<u64>`, `From<u128>` — so `Fr::from(value())` works for
+            // all three without the previous `as u64` cast, which silently
+            // truncated `Field` and large `Uint<N>` values.
+            //
+            // Multi-Fr witnesses (e.g. `Bytes<N>`) are rejected at parse
+            // time in `crates/midnight-ir/src/parse.rs::parse_witnesses_struct`
+            // until we add proper multi-Fr witness emission.
             quote! {
-                private_transcript.push(Fr::from(witnesses.#field_ident.value() as u64));
+                private_transcript.push(Fr::from(witnesses.#field_ident.value()));
             }
         }
 

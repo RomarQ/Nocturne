@@ -161,6 +161,22 @@ fn parse_witnesses_struct(s: &ItemStruct) -> MidnightResult<WitnessIR> {
 
     for field in named_fields {
         let field_name = field.ident.clone().unwrap();
+
+        // Reject witness types we don't yet support. The transcript builder
+        // currently emits one `Fr` per witness via `Fr::from(field.value())`,
+        // which requires the value to fit in a single field element. Multi-Fr
+        // witnesses (e.g. `Bytes<N>`) need additional codegen — see
+        // `memories/conditional-branch-cond-select-zeroing.md` for the
+        // surrounding architecture and the open follow-up.
+        let ty_str = quote::quote!(#field.ty).to_string().replace(' ', "");
+        if ty_str.contains("Bytes<") {
+            return Err(MidnightError::new(
+                field_name.span(),
+                ErrorCode::InvalidType,
+                "Bytes<N> as a witness type is not yet supported; the transcript builder emits one Fr per witness via Fr::from(value()), which Bytes<N> doesn't satisfy. Use Boolean, Field, or Uint<N> for now.",
+            ));
+        }
+
         fields.push(WitnessFieldIR {
             span: field_name.span(),
             name: field_name,
