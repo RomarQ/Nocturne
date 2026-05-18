@@ -144,29 +144,12 @@ async fn prove_and_verify_voting_with_witness() {
     println!("Proof generated: {} bytes, {} public inputs", proof.0.len(), pis.len());
     println!("Skips: {skips:?}");
 
-    // KNOWN: prove+verify pass locally, but this circuit is NOT on-chain
-    // verifiable in its current form. Investigation 2026-05-18:
-    //
-    // - ledger::prove::ContractCall::prove (ledger/src/prove.rs:263-289)
-    //   rewrites the submitted active-only transcript by interleaving
-    //   Op::Noop { n: count } per pi_skips. Op::Noop's field_repr is
-    //   `vec![0u8.into(); n]` (onchain-vm/src/ops.rs:403) — pure zeros.
-    //
-    // - midnight-zkir's preprocess (zkir/src/ir_vm.rs:339-342) pushes
-    //   `memory[var]` to pis for every DeclarePubInput, with no
-    //   zero-out-on-inactive-guard logic. With Nocturne's per-branch
-    //   DeclarePubInput layout, the inactive branch's DeclarePubInputs end
-    //   up holding LoadImm values (non-zero), not zeros.
-    //
-    // - Compactc avoids this by emitting ONE set of DeclarePubInputs and
-    //   multiplexing branch values with cond_select. The on-chain
-    //   active-only transcript exactly fills those slots, and the Noop
-    //   path is never exercised because guard=1 PiSkips don't fire on the
-    //   active path.
-    //
-    // Fix: refactor the conditional-branch ZKIR emitter to use compactc's
-    // cond_select-multiplexing approach (single set of DeclarePubInputs
-    // with cond_select bridging branch values). Tracked separately.
+    // NOTE: prove+verify pass locally, but this circuit is NOT on-chain
+    // verifiable. The PI count divergence is asserted directly against the
+    // canonical ledger code path in `tests/ledger_integration_test.rs ::
+    // voting_pi_count_diverges_from_active_transcript`. Root cause: Nocturne
+    // emits per-branch DeclarePubInputs; the ledger interleaves Op::Noop
+    // (zeros) into the transcript at verify time; values don't match.
 
     // Verify.
     vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())

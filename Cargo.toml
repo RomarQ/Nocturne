@@ -43,6 +43,10 @@ midnight-onchain-state = "3.0.0"
 midnight-transient-crypto = "2.1.0"
 midnight-base-crypto = "1.0.0"
 midnight-serialize = "1.0.0"
+midnight-ledger = "8.1.0"
+midnight-onchain-runtime = "3.1.0"
+midnight-coin-structure = "2.0.1"
+midnight-ledger-storage = { package = "midnight-storage", version = "2.0.1" }
 
 # Proc macro tooling
 syn = { version = "2", features = ["full", "extra-traits", "visit", "visit-mut"] }
