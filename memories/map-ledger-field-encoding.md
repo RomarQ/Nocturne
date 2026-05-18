@@ -80,15 +80,43 @@ Beyond per-operation emission, Map needs:
 
 ## Recommended staging
 
-| Stage | Scope | Effort |
+| Stage | Scope | Status |
 |---|---|---|
-| Stage 0 | Generic key encoding (`emit_key_field_repr` for any `K`) + StateValue construction helpers | M |
-| Stage 1 | `Map::member(k)` end-to-end with ledger integration test | M |
-| Stage 2 | `Map::lookup(k)` end-to-end | M |
-| Stage 3 | `Map::insert(k, v)` end-to-end | L |
-| Stage 4 | `Map::remove(k)` end-to-end | S |
+| Stage 0 | Generic key encoding (`emit_key_field_repr` for any `K`) + StateValue construction helpers | landed (alongside Cell::set) |
+| Stage 1 | `Map::contains(&k) -> bool` end-to-end with ledger integration test | **landed** |
+| Stage 2 | `Map::get(&k) -> Option<V>` end-to-end | pending |
+| Stage 3 | `Map::insert(k, v)` end-to-end | pending |
+| Stage 4 | `Map::remove(&k)` end-to-end | pending |
 
-Stage 0 is shared infrastructure for everything that follows (and would also benefit `Cell<T>` for arbitrary T, MerkleTree, custom ADTs). Best to start there.
+### Stage 1 status
+
+`Map<K, V>::contains(&k)` is on-chain compatible for single-Fr key types
+(`Boolean`, `u8..u128`, `Uint<N≤253>`):
+
+- IR: `emit_map_member` in `crates/midnight-codegen/src/zkir_emitter.rs`
+  produces the Dup + Idx + Push + Member + Popeq sequence, reusing
+  `emit_push_cell` for the key.
+- Transcript: the `"contains"`/`"member"` arm in
+  `crates/midnight-codegen/src/transcript_codegen.rs` emits matching
+  runtime ops. The Popeq `result` is computed at transcript-build time
+  by calling the runtime stub on `state`, so the prover bakes the actual
+  Member result into the transcript. Circuits that read state get an
+  extra `state: &<LedgerName>` parameter via `circuit_needs_state`
+  detection.
+- Type-aware AlignedValue casts: `primitive_cast_for_type` maps
+  `Uint<64>` → `as u64` etc. so the runtime's
+  `AlignedValue::from(<expr> as u64)` produces the `Bytes{8}` alignment
+  the IR expects. Without this cast, `u128` (from `.value()`) would
+  produce `Bytes{16}` and disagree with the IR's `Uint<64>` encoding.
+- E2E test: `ledger_integration_test::map_contains_proves_and_verifies`
+  proves+verifies a `Map<Uint<64>, Boolean>::contains` circuit through
+  `ContractCallExt::construct_proof`.
+
+Stage 2 onward: `Map::get` returns `Option<V>` which needs Option
+alignment encoding (`Alignment::concat([bool, V])`); Stage 3 (`insert`)
+is the larger one, reusing the Cell::set Push+Push+Ins pattern with K
+and V types instead of `Bytes<1>` and `Cell<T>`. Stage 4 (`remove`)
+uses the `Rem` opcode (0x19/0x1a).
 
 ## References
 

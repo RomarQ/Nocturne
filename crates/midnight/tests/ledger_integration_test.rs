@@ -53,6 +53,35 @@ mod counter {
 }
 
 #[midnight::contract]
+mod membership {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MembersState {
+        pub members: Map<Uint<64>, Boolean>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MembersWitnesses {
+        pub user_id: Uint<64>,
+    }
+
+    impl MembersState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                members: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn check_member(&self, witnesses: &MembersWitnesses) {
+            let _exists = self.members.contains(&witnesses.user_id);
+        }
+    }
+}
+
+#[midnight::contract]
 mod flag {
     use super::*;
 
@@ -128,6 +157,34 @@ fn build_counter_ir() -> midnight_zkir::IrSource {
     let contract = midnight_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output.circuits.into_iter().next().unwrap().ir_source
+}
+
+fn build_check_member_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod membership {
+            #[midnight(ledger)]
+            pub struct MembersState { members: Map<Uint<64>, Boolean> }
+            #[midnight(witnesses)]
+            pub struct MembersWitnesses { pub user_id: Uint<64> }
+            impl MembersState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { members: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn check_member(&self, witnesses: &MembersWitnesses) {
+                    let _exists = self.members.contains(&witnesses.user_id);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "check_member")
+        .unwrap()
+        .ir_source
 }
 
 fn build_flag_raise_ir() -> midnight_zkir::IrSource {
@@ -394,4 +451,65 @@ async fn flag_raise_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell::set");
+}
+
+/// Confirms `Map<Uint<64>, Boolean>::contains(&k)` produces an on-chain
+/// compatible transcript: the IR Dup+Idx+Push+Member+Popeq sequence and
+/// the runtime ops match, the bool result is computed off-chain from the
+/// live state, the proof constructs through `ContractCallExt::construct_proof`,
+/// and the verifier accepts ledger-shape PIs.
+///
+/// State is an empty `Map`, so the expected result for any key is `false`.
+/// On-chain `Member` against an empty `StateValue::Map` returns `false` too,
+/// so the off-chain Popeq and the on-chain VM agree.
+#[tokio::test]
+async fn map_contains_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_check_member_ir();
+    let state = membership::MembersState::new();
+    let witnesses = membership::MembersWitnesses {
+        user_id: Uint::<64>::from(12345u64),
+    };
+    let nocturne_transcript =
+        membership::transcript::build_check_member_transcript(&state, &witnesses);
+
+    // PrivateInput reads from preimage.private_transcript, which is the
+    // concatenated value-only field_repr of these AlignedValues. Order
+    // matches the order of PrivateInput instructions in the IR (here:
+    // the single Uint<64> witness for user_id).
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            12345u64,
+        )];
+    let preimage = canonical_preimage(
+        "check_member",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs \
+         for a Map<Uint<64>, Boolean>::contains circuit"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map::contains");
 }

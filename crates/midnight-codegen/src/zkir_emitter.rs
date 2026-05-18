@@ -220,6 +220,16 @@ impl ZkirEmitter {
                 let method_name = method.to_string();
                 let field_idx = self.field_index(&field.to_string());
 
+                // Inspect the field type to choose the right emitter. Map
+                // dispatches separately from Counter/Cell because its
+                // methods (contains/get/set/remove) take a user-typed key.
+                let field_ty = self.field_types.get(field_idx as usize).cloned();
+                let map_kv = field_ty.as_ref().and_then(extract_map_kv_types);
+
+                if let Some((k_ty, _v_ty)) = map_kv {
+                    return self.emit_map_method(field_idx, &method_name, args, &k_ty);
+                }
+
                 match method_name.as_str() {
                     "increment" => self.emit_counter_increment(field_idx),
                     "get" | "value" | "__direct_access" => self.emit_ledger_read(field_idx),
@@ -591,6 +601,123 @@ impl ZkirEmitter {
         Some(read_value)
     }
 
+    /// Dispatch a method call on a `Map<K, V>` ledger field to the
+    /// per-operation emitter. The dispatcher knows the `K` type so it can
+    /// compute the right key encoding. Unsupported methods log a warning
+    /// (via `Unsupported` token) and fall through to a no-op.
+    fn emit_map_method(
+        &mut self,
+        field_idx: u8,
+        method_name: &str,
+        args: &[midnight_ir::ExprIR],
+        k_ty: &syn::Type,
+    ) -> Option<Index> {
+        // Compute the key encoding once. Map<K, V> with K that doesn't fit
+        // in a single Fr (e.g. Bytes<32>) is rejected here — see
+        // memories/map-ledger-field-encoding.md for the multi-Fr work.
+        let key_enc = aligned_value_encoding(k_ty)?;
+        if key_enc.value_field_count != 1 {
+            return None;
+        }
+
+        match method_name {
+            "contains" => {
+                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
+                self.emit_map_member(field_idx, key_var, &key_enc)
+            }
+            // `get`, `set`/`insert`, `remove` are upcoming stages. Leave
+            // them to fall through to the unsupported path until then.
+            _ => {
+                for arg in args {
+                    self.emit_expr(arg);
+                }
+                None
+            }
+        }
+    }
+
+    /// Emit ZKIR for `Map::contains(k) -> Boolean` at `field_idx`.
+    ///
+    /// On-chain encoding (verified empirically against compactc 0.30.0 for
+    /// `Map<Bytes<32>, Uint<64>>`; see
+    /// `/tmp/cond-experiments/map_out/zkir/member.zkir` and
+    /// `memories/map-ledger-field-encoding.md`):
+    ///
+    /// ```text
+    /// Dup  { n: 0 }                                        // [0x30]
+    /// Idx  { cached: false, push_path: false, path: [k] }  // [0x50, align(2), field_idx(1)]
+    /// Push { storage: false, value: Cell(user_key) }       // [0x10, Cell disc(1), align(2), value]
+    /// Member                                                // [0x18]
+    /// Popeq { cached: true, result: Boolean }              // [0x0d, align(2), bool_result]
+    /// ```
+    ///
+    /// `Member` pops `[key, container]` and pushes a boolean. `Popeq` then
+    /// pops the boolean and the runtime fills its `result` slot via the
+    /// transcript outputs (read via `PublicInput` on the prover side).
+    fn emit_map_member(
+        &mut self,
+        field_idx: u8,
+        key_var: Index,
+        key_encoding: &AlignedValueEncoding,
+    ) -> Option<Index> {
+        let g = self.guard;
+
+        // Dup { n: 0 } → 0x30.
+        let dup_op = self.emit_load_imm(Fr::from(0x30u64));
+        self.push_declare_pub_input(dup_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Idx { cached: false, push_path: false, len: 1 } selecting the Map
+        // field by its ledger-struct index. Key is Bytes<1>.
+        let idx_op = self.emit_load_imm(Fr::from(0x50u64));
+        self.push_declare_pub_input(idx_op);
+        self.emit_key_field_repr(field_idx);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Push { storage: false, value: StateValue::Cell(AlignedValue(user_key)) }.
+        // Uses emit_push_cell which handles the [opcode, Cell disc, alignment,
+        // value] structure. Only single-Fr key values are supported here
+        // today; multi-Fr keys (e.g. Bytes<32>) need extended encoding work.
+        self.emit_push_cell(key_var, Some(key_encoding), /* storage = */ false);
+
+        // Member → 0x18.
+        let member_op = self.emit_load_imm(Fr::from(0x18u64));
+        self.push_declare_pub_input(member_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Popeq { cached: true, result: Boolean } → [0x0d, 1 (align seg_count),
+        // 1 (Bytes<1> atom), bool_result]. PublicInput reads the result Fr
+        // from the transcript outputs into memory; that same value is then
+        // declared as the fourth field of the Popeq encoding.
+        let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
+        let result_var = self.emit_instruction(Instruction::PublicInput { guard: None });
+        self.push_declare_pub_input(popeq_op);
+        let align_one = self.emit_load_imm(Fr::from(1u64));
+        self.push_declare_pub_input(align_one);
+        self.push_declare_pub_input(align_one);
+        self.push_declare_pub_input(result_var);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // The Boolean result is in the verifier's view, so emit a
+        // ConstrainToBoolean over it for safety.
+        self.instructions
+            .push(Instruction::ConstrainToBoolean { var: result_var });
+
+        Some(result_var)
+    }
+
     /// Emit ZKIR for `Cell::set(value)` at `field_idx`.
     ///
     /// On-chain encoding (verified empirically against compactc 0.30.0):
@@ -857,6 +984,27 @@ fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
     {
         return Some(inner.clone());
+    }
+    None
+}
+
+/// If `ty` is `Map<K, V>`, return `(K, V)`. Otherwise `None`.
+fn extract_map_kv_types(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Map"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+    {
+        let mut type_args = args.args.iter().filter_map(|a| {
+            if let syn::GenericArgument::Type(t) = a {
+                Some(t.clone())
+            } else {
+                None
+            }
+        });
+        let k = type_args.next()?;
+        let v = type_args.next()?;
+        return Some((k, v));
     }
     None
 }

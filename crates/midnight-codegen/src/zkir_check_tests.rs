@@ -297,6 +297,92 @@ mod tests {
     }
 
     #[test]
+    fn map_contains_is_satisfiable() {
+        // Verifies the IR shape for `Map<K, V>::contains(k) -> bool`.
+        // Encoding (matches compactc 0.30.0 emission for member):
+        //   Dup{n:0}                                 → [0x30]
+        //   Idx{cached:false, push_path:false, [f]}  → [0x50, 1, 1, field_idx]
+        //   Push{storage:false, Cell(key)}           → [0x10, 1, 1, key_align_atom, key_val]
+        //   Member                                    → [0x18]
+        //   Popeq{cached:true, result: bool}         → [0x0d, 1, 1, bool]
+        //
+        // With Map<u64, bool> and a witness key of type Uint<64>, the key
+        // alignment atom is 8 (Bytes{8}) and the value/result fit in a
+        // single Fr each.
+        let (name, ir) = compile_first_circuit(quote::quote! {
+            mod membership {
+                #[midnight(ledger)]
+                pub struct State {
+                    members: Map<u64, bool>,
+                }
+                #[midnight(witnesses)]
+                pub struct W {
+                    user_id: Uint<64>,
+                }
+                impl State {
+                    #[midnight(constructor)]
+                    pub fn new() -> Self { Self { members: Map::empty() } }
+                    #[midnight(circuit)]
+                    pub fn check_member(&mut self, witnesses: &W) {
+                        let _exists = self.members.contains(&witnesses.user_id);
+                    }
+                }
+            }
+        });
+        print_zkir(&name, &ir);
+
+        let user_id_val = Fr::from(12345u64);
+        let bool_result = Fr::from(true); // claim: present
+
+        let public_transcript_inputs: Vec<Fr> = vec![
+            // Dup{n:0}
+            Fr::from(0x30u64),
+            // Idx{cached:false, push_path:false, [Bytes<1>(field=0)]}
+            Fr::from(0x50u64),
+            Fr::from(0x01u64), // alignment segment_count
+            Fr::from(0x01u64), // alignment Bytes{1} atom
+            Fr::from(0x00u64), // field_idx
+            // Push{storage:false, Cell(AlignedValue<Uint<64>>)} — KEY
+            Fr::from(0x10u64),
+            Fr::from(0x01u64), // Cell discriminant
+            Fr::from(0x01u64), // alignment segment_count
+            Fr::from(0x08u64), // alignment Bytes{8} atom
+            user_id_val,
+            // Member
+            Fr::from(0x18u64),
+            // Popeq{cached:true, result: AlignedValue<bool>}
+            Fr::from(0x0du64),
+            Fr::from(0x01u64), // alignment segment_count
+            Fr::from(0x01u64), // alignment Bytes{1} atom
+            bool_result,
+        ];
+
+        let preimage = ProofPreimage {
+            inputs: vec![],
+            private_transcript: vec![user_id_val],
+            public_transcript_inputs,
+            public_transcript_outputs: vec![bool_result],
+            binding_input: Fr::from(42u64),
+            communications_commitment: if ir.do_communications_commitment {
+                Some(comm_for(&[], &[]))
+            } else {
+                None
+            },
+            key_location: KeyLocation(std::borrow::Cow::Borrowed("test")),
+        };
+
+        match ir.check(&preimage) {
+            Ok(pi_skips) => {
+                println!("✓ Circuit '{name}' satisfiable! pi_skips: {pi_skips:?}");
+            }
+            Err(e) => {
+                let json = serde_json::to_string_pretty(&ir).unwrap_or_default();
+                panic!("Circuit '{name}' check failed: {e}\n\nZKIR:\n{json}");
+            }
+        }
+    }
+
+    #[test]
     fn voting_cast_vote_is_satisfiable() {
         let module: syn::ItemMod = syn::parse2(quote::quote! {
             mod ballot {

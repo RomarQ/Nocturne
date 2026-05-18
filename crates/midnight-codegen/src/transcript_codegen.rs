@@ -20,12 +20,28 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
         .map(|f| f.name.to_string())
         .collect();
 
+    let field_types: Vec<syn::Type> = contract
+        .ledger
+        .fields
+        .iter()
+        .map(|f| f.ty.clone())
+        .collect();
+
     let witnesses_name = contract.witnesses.as_ref().map(|w| &w.name);
+    let ledger_name = &contract.ledger.name;
 
     let circuit_fns: Vec<TokenStream> = contract
         .circuits
         .iter()
-        .map(|circuit| generate_circuit_transcript_fn(circuit, &field_names, witnesses_name))
+        .map(|circuit| {
+            generate_circuit_transcript_fn(
+                circuit,
+                &field_names,
+                &field_types,
+                witnesses_name,
+                ledger_name,
+            )
+        })
         .collect();
 
     quote! {
@@ -56,10 +72,19 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
 }
 
 /// Generate a transcript builder function for a single circuit.
+///
+/// When the circuit body contains ledger reads that need the live state to
+/// compute their expected results (today: `Map::contains`), the generated
+/// function takes an extra `state: &<LedgerStructName>` parameter so the
+/// transcript builder can call back into the runtime stub and bake the
+/// result into `Op::Popeq { result }`. Circuits that don't read keep the
+/// minimal signature for backwards compatibility with existing call sites.
 fn generate_circuit_transcript_fn(
     circuit: &CircuitIR,
     field_names: &[String],
+    field_types: &[syn::Type],
     witnesses_name: Option<&syn::Ident>,
+    ledger_name: &syn::Ident,
 ) -> TokenStream {
     let fn_name = format_ident!("build_{}_transcript", circuit.name);
     let doc = format!("Build the transcript for the `{}` circuit.", circuit.name);
@@ -67,8 +92,15 @@ fn generate_circuit_transcript_fn(
     let body_stmts: Vec<TokenStream> = circuit
         .body
         .iter()
-        .map(|expr| generate_op_stmt(expr, field_names))
+        .map(|expr| generate_op_stmt(expr, field_names, field_types))
         .collect();
+
+    let needs_state = circuit_needs_state(&circuit.body);
+    let state_param = if needs_state {
+        quote! { state: &#ledger_name, }
+    } else {
+        quote! {}
+    };
 
     if circuit.takes_witnesses {
         let param_name = circuit
@@ -83,7 +115,19 @@ fn generate_circuit_transcript_fn(
 
         quote! {
             #[doc = #doc]
-            pub fn #fn_name(#param_name: #witnesses_ty) -> TranscriptResult {
+            pub fn #fn_name(#state_param #param_name: #witnesses_ty) -> TranscriptResult {
+                let mut ops: Vec<VmOp> = Vec::new();
+                let mut private_transcript: Vec<Fr> = Vec::new();
+
+                #(#body_stmts)*
+
+                TranscriptResult { ops, private_transcript }
+            }
+        }
+    } else if needs_state {
+        quote! {
+            #[doc = #doc]
+            pub fn #fn_name(state: &#ledger_name) -> TranscriptResult {
                 let mut ops: Vec<VmOp> = Vec::new();
                 let mut private_transcript: Vec<Fr> = Vec::new();
 
@@ -107,8 +151,51 @@ fn generate_circuit_transcript_fn(
     }
 }
 
+/// Returns true if any sub-expression in the body is a ledger read that
+/// requires the live state to compute its expected result (currently:
+/// `Map::contains`). Lookup/get on `Cell` don't currently bake a state-
+/// dependent value into the transcript so they're excluded here.
+fn circuit_needs_state(body: &[ExprIR]) -> bool {
+    body.iter().any(expr_needs_state)
+}
+
+fn expr_needs_state(expr: &ExprIR) -> bool {
+    match expr {
+        ExprIR::LedgerAccess { method, args, .. } => {
+            let m = method.to_string();
+            matches!(m.as_str(), "contains" | "member") || args.iter().any(expr_needs_state)
+        }
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expr_needs_state(cond)
+                || then_branch.iter().any(expr_needs_state)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(expr_needs_state))
+        }
+        ExprIR::Block { stmts, .. } => stmts.iter().any(expr_needs_state),
+        ExprIR::Let { value, .. } => expr_needs_state(value),
+        ExprIR::MethodCall { receiver, args, .. } => {
+            expr_needs_state(receiver) || args.iter().any(expr_needs_state)
+        }
+        ExprIR::BinaryOp { lhs, rhs, .. } => expr_needs_state(lhs) || expr_needs_state(rhs),
+        ExprIR::UnaryOp { expr: inner, .. } => expr_needs_state(inner),
+        ExprIR::Reference { expr: inner, .. } => expr_needs_state(inner),
+        ExprIR::Disclose { value, .. } => expr_needs_state(value),
+        _ => false,
+    }
+}
+
 /// Generate Rust statements that push VM Ops.
-fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
+fn generate_op_stmt(
+    expr: &ExprIR,
+    field_names: &[String],
+    field_types: &[syn::Type],
+) -> TokenStream {
     match expr {
         ExprIR::LedgerAccess {
             field,
@@ -122,6 +209,7 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
                 .iter()
                 .position(|f| f == &field_name)
                 .unwrap_or(0) as u8;
+            let field_ty = field_types.get(field_idx as usize);
 
             match method_name.as_str() {
                 "increment" => quote! {
@@ -145,6 +233,56 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
                         result: AlignedValue::from(0u8),
                     });
                 },
+                "contains" | "member" => {
+                    // On-chain pattern for `Map<K, V>::contains(k) -> bool`:
+                    //   Dup{n:0} + Idx{[Bytes<1>(field_idx)]} + Push{storage:false, Cell(key)}
+                    //   + Member + Popeq{cached:true, result: bool}
+                    //
+                    // The bool result is computed at transcript-build time by
+                    // calling the runtime stub on `state`, so the prover and
+                    // verifier agree on what the on-chain VM will compute when
+                    // it executes `Member`.
+                    let field_ident = format_ident!("{}", field_name);
+                    let raw_key = args
+                        .first()
+                        .map(arg_to_runtime_raw_expr)
+                        .unwrap_or_else(|| quote! { () });
+                    let key_for_align = args
+                        .first()
+                        .map(arg_to_runtime_expr)
+                        .unwrap_or_else(|| quote! { () });
+                    // The key cast must match what the IR alignment table
+                    // expects for `K` (e.g. Uint<64> → Bytes{8}, not Bytes{16}
+                    // that AlignedValue::from(u128) would emit). Extract K
+                    // from Map<K, V> and apply the right primitive cast.
+                    let k_ty = field_ty.and_then(extract_map_key_type);
+                    let key_cast = k_ty
+                        .as_ref()
+                        .and_then(primitive_cast_for_type)
+                        .map(|cast| quote! { (#key_for_align) #cast })
+                        .unwrap_or_else(|| quote! { #key_for_align });
+                    quote! {
+                        {
+                            let __key = #raw_key;
+                            ops.push(Op::Dup { n: 0 });
+                            ops.push(Op::Idx {
+                                cached: false,
+                                push_path: false,
+                                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+                            });
+                            ops.push(Op::Push {
+                                storage: false,
+                                value: StateValue::Cell(Sp::new(AlignedValue::from(#key_cast))),
+                            });
+                            ops.push(Op::Member);
+                            let __result: bool = state.#field_ident.contains(&__key);
+                            ops.push(Op::Popeq {
+                                cached: true,
+                                result: AlignedValue::from(__result),
+                            });
+                        }
+                    }
+                }
                 "set" => {
                     // On-chain pattern (matches compactc 0.30.0 emission for
                     // `Cell<T>::set(v)` where the contract state is a top-of-stack
@@ -161,6 +299,16 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
                         .first()
                         .map(arg_to_runtime_expr)
                         .unwrap_or_else(|| quote! { () });
+                    // Same alignment-matching cast as `contains`: extract T
+                    // from Cell<T> and cast the value to the primitive width
+                    // the IR expects (Uint<64> → u64, not the u128 that
+                    // `.value()` returns).
+                    let t_ty = field_ty.and_then(extract_cell_inner_type);
+                    let value_cast = t_ty
+                        .as_ref()
+                        .and_then(primitive_cast_for_type)
+                        .map(|cast| quote! { (#value_expr) #cast })
+                        .unwrap_or_else(|| quote! { #value_expr });
                     quote! {
                         ops.push(Op::Push {
                             storage: false,
@@ -168,7 +316,7 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
                         });
                         ops.push(Op::Push {
                             storage: true,
-                            value: StateValue::Cell(Sp::new(AlignedValue::from(#value_expr))),
+                            value: StateValue::Cell(Sp::new(AlignedValue::from(#value_cast))),
                         });
                         ops.push(Op::Ins { cached: false, n: 1 });
                     }
@@ -188,13 +336,13 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
             let cond_expr = generate_runtime_cond(cond);
             let then_stmts: Vec<TokenStream> = then_branch
                 .iter()
-                .map(|e| generate_op_stmt(e, field_names))
+                .map(|e| generate_op_stmt(e, field_names, field_types))
                 .collect();
 
             if let Some(else_exprs) = else_branch {
                 let else_stmts: Vec<TokenStream> = else_exprs
                     .iter()
-                    .map(|e| generate_op_stmt(e, field_names))
+                    .map(|e| generate_op_stmt(e, field_names, field_types))
                     .collect();
                 quote! {
                     #witness_adds
@@ -222,7 +370,7 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
             let stripped = name.to_string();
             let stripped = stripped.trim_start_matches('_');
             let var_name = format_ident!("_let_{}", stripped);
-            let val_stmt = generate_op_stmt(value, field_names);
+            let val_stmt = generate_op_stmt(value, field_names, field_types);
             quote! {
                 let #var_name = {
                     #val_stmt
@@ -251,7 +399,7 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
         ExprIR::Block { stmts, .. } => {
             let inner: Vec<TokenStream> = stmts
                 .iter()
-                .map(|s| generate_op_stmt(s, field_names))
+                .map(|s| generate_op_stmt(s, field_names, field_types))
                 .collect();
             quote! { #(#inner)* }
         }
@@ -261,7 +409,7 @@ fn generate_op_stmt(expr: &ExprIR, field_names: &[String]) -> TokenStream {
         } => {
             let method_name = method.to_string();
             match method_name.as_str() {
-                "into" | "value" => generate_op_stmt(receiver, field_names),
+                "into" | "value" => generate_op_stmt(receiver, field_names, field_types),
                 _ => quote! {},
             }
         }
@@ -339,6 +487,120 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
         // clear "the trait `From<()>` is not implemented" message, which
         // points the user at an unsupported argument shape.
         _ => quote! { () },
+    }
+}
+
+/// Map a Rust type that flows into `AlignedValue::from(_)` to the primitive
+/// cast suffix the runtime needs to match the IR's alignment table.
+///
+/// Why this matters: `Uint<64>::value()` returns `u128`, and
+/// `AlignedValue::from(u128)` uses `Bytes{16}` alignment, but our IR emits
+/// `Bytes{8}` for a `Uint<64>` field. Without an explicit `as u64` cast the
+/// transcript and the IR disagree on the alignment atom and `prove` rejects
+/// the transcript with a "Public transcript input mismatch" error.
+///
+/// Returns `None` for types where no cast is needed (`bool`/`Boolean`) or
+/// for types we don't yet support (`Bytes<N>`, `Field`, custom ADTs).
+fn primitive_cast_for_type(ty: &syn::Type) -> Option<TokenStream> {
+    let ty_str = quote!(#ty).to_string().replace(' ', "");
+
+    // Boolean wrapper and raw bool: `AlignedValue::from(bool)` already
+    // uses Bytes{1}, no cast needed.
+    if ty_str == "Boolean" || ty_str == "bool" {
+        return None;
+    }
+
+    // Raw primitive integers — the cast is a no-op but keeping it makes
+    // the generated code uniform regardless of where the value comes from.
+    if ty_str == "u8" {
+        return Some(quote! { as u8 });
+    }
+    if ty_str == "u16" {
+        return Some(quote! { as u16 });
+    }
+    if ty_str == "u32" {
+        return Some(quote! { as u32 });
+    }
+    if ty_str == "u64" {
+        return Some(quote! { as u64 });
+    }
+    if ty_str == "u128" {
+        return Some(quote! { as u128 });
+    }
+
+    // Uint<N>: snap to the narrowest primitive that holds N bits, matching
+    // `aligned_value_encoding`'s `bytes = ceil(N/8)` choice.
+    if let Some(n) = ty_str
+        .strip_prefix("Uint<")
+        .and_then(|s| s.strip_suffix('>'))
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        return Some(if n <= 8 {
+            quote! { as u8 }
+        } else if n <= 16 {
+            quote! { as u16 }
+        } else if n <= 32 {
+            quote! { as u32 }
+        } else if n <= 64 {
+            quote! { as u64 }
+        } else {
+            quote! { as u128 }
+        });
+    }
+
+    None
+}
+
+/// If `ty` is `Cell<T>`, return `T`. Mirrors `zkir_emitter::extract_cell_inner_type`.
+fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Cell"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner.clone());
+    }
+    None
+}
+
+/// If `ty` is `Map<K, V>`, return `K`. Mirrors `zkir_emitter::extract_map_kv_types`.
+fn extract_map_key_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Map"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+    {
+        for a in &args.args {
+            if let syn::GenericArgument::Type(t) = a {
+                return Some(t.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Like [`arg_to_runtime_expr`], but preserves the receiver's *typed*
+/// wrapper instead of unwrapping to its primitive value. Used when the
+/// generated code needs the original `Boolean`/`Uint<N>`/`Field` value so
+/// it can be passed to a method like `Map::contains(&K)` whose K type is
+/// the wrapper, not the inner primitive.
+fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
+    match expr {
+        ExprIR::Reference { expr: inner, .. } => arg_to_runtime_raw_expr(inner),
+        ExprIR::WitnessAccess { field, .. } => {
+            let field_ident = format_ident!("{}", field.to_string());
+            // `Clone` is fine for the small types we currently support
+            // (Boolean, Uint<N>) — they're all `Copy + Hash + Eq`.
+            quote! { witnesses.#field_ident.clone() }
+        }
+        ExprIR::Disclose { value, .. } => arg_to_runtime_raw_expr(value),
+        ExprIR::Var { name, .. } => {
+            let ident = format_ident!("{}", name.to_string());
+            quote! { #ident.clone() }
+        }
+        // For anything else, fall back to the value-unwrapped form.
+        other => arg_to_runtime_expr(other),
     }
 }
 
