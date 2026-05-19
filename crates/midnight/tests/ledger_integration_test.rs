@@ -3465,3 +3465,215 @@ async fn bytes_v_get_sugar_absent_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map<_, Bytes<32>>::get sugar (absent)");
 }
+
+#[midnight::contract]
+mod set_contract {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct SetContractState {
+        pub members: Set<Bytes<32>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct SetContractWitnesses {
+        pub digest: Bytes<32>,
+    }
+
+    impl SetContractState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                members: Set::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn add(&mut self, witnesses: &SetContractWitnesses) {
+            self.members.insert(witnesses.digest.clone());
+        }
+
+        #[midnight(circuit)]
+        pub fn check(&self, witnesses: &SetContractWitnesses) {
+            let _exists = self.members.contains(&witnesses.digest);
+        }
+
+        #[midnight(circuit)]
+        pub fn erase(&mut self, witnesses: &SetContractWitnesses) {
+            self.members.remove(&witnesses.digest);
+        }
+    }
+}
+
+fn build_set_contract_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod set_contract {
+            #[midnight(ledger)]
+            pub struct SetContractState { members: Set<Bytes<32>> }
+            #[midnight(witnesses)]
+            pub struct SetContractWitnesses { pub digest: Bytes<32> }
+            impl SetContractState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { members: Set::empty() } }
+                #[midnight(circuit)]
+                pub fn add(&mut self, witnesses: &SetContractWitnesses) {
+                    self.members.insert(witnesses.digest.clone());
+                }
+                #[midnight(circuit)]
+                pub fn check(&self, witnesses: &SetContractWitnesses) {
+                    let _exists = self.members.contains(&witnesses.digest);
+                }
+                #[midnight(circuit)]
+                pub fn erase(&mut self, witnesses: &SetContractWitnesses) {
+                    self.members.remove(&witnesses.digest);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+/// `Set<Bytes<32>>::insert(k)` matches compactc 0.22 emission. Unlike
+/// `Map::insert`, the value Push is `StateValue::Null` (encoded as
+/// `[0x11, 0]` — 2 declares) instead of `Push(Cell(value))`. The full
+/// pattern is Idx + Push(Cell(key)) + Push(Null) + Ins + Ins.
+#[tokio::test]
+async fn set_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_contract_circuit_ir("add");
+    let witnesses = set_contract::SetContractWitnesses {
+        digest: Bytes::<32>::from([0xA5u8; 32]),
+    };
+    let nocturne_transcript = set_contract::transcript::build_add_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0xA5u8; 32])];
+    let preimage = canonical_preimage(
+        "add",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Set<Bytes<32>>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<Bytes<32>>::insert");
+}
+
+/// `Set<Bytes<32>>::contains(&k)`. Same on-chain pattern as `Map::contains`
+/// (Member opcode is shared, Set just stores Null values).
+#[tokio::test]
+async fn set_contains_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_contract_circuit_ir("check");
+    let state = set_contract::SetContractState::new();
+    let witnesses = set_contract::SetContractWitnesses {
+        digest: Bytes::<32>::from([0x55u8; 32]),
+    };
+    let nocturne_transcript = set_contract::transcript::build_check_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0x55u8; 32])];
+    let preimage = canonical_preimage(
+        "check",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Set<Bytes<32>>::contains"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<Bytes<32>>::contains");
+}
+
+/// `Set<Bytes<32>>::remove(&k)`. Identical to `Map::remove` — Rem + Ins.
+#[tokio::test]
+async fn set_remove_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_contract_circuit_ir("erase");
+    let witnesses = set_contract::SetContractWitnesses {
+        digest: Bytes::<32>::from([0xEEu8; 32]),
+    };
+    let nocturne_transcript = set_contract::transcript::build_erase_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0xEEu8; 32])];
+    let preimage = canonical_preimage(
+        "erase",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Set<Bytes<32>>::remove"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<Bytes<32>>::remove");
+}

@@ -240,13 +240,19 @@ impl ZkirEmitter {
                 let field_idx = self.field_index(&field.to_string());
 
                 // Inspect the field type to choose the right emitter. Map
-                // dispatches separately from Counter/Cell because its
-                // methods (contains/get/set/remove) take a user-typed key.
+                // and Set dispatch separately from Counter/Cell because
+                // their methods (contains/get/set/insert/remove/member)
+                // take a user-typed key.
                 let field_ty = self.field_types.get(field_idx as usize).cloned();
                 let map_kv = field_ty.as_ref().and_then(extract_map_kv_types);
 
                 if let Some((k_ty, v_ty)) = map_kv {
                     return self.emit_map_method(field_idx, &method_name, args, &k_ty, &v_ty);
+                }
+
+                let set_t = field_ty.as_ref().and_then(extract_set_inner_type);
+                if let Some(t_ty) = set_t {
+                    return self.emit_set_method(field_idx, &method_name, args, &t_ty);
                 }
 
                 match method_name.as_str() {
@@ -1075,6 +1081,116 @@ impl ZkirEmitter {
         None
     }
 
+    /// Dispatch a method call on a `Set<T>` ledger field. Set reuses
+    /// `Map`'s on-chain ops with `StateValue::Null` as the placeholder
+    /// value — `contains`/`member` and `remove` are identical to their
+    /// Map counterparts; `insert` differs only in pushing Null instead
+    /// of `Cell(value)` for the value slot.
+    ///
+    /// Empirically verified against compactc 0.22 for `Set<Bytes<32>>`
+    /// (`/tmp/set-experiments/out/zkir/{add,check,erase}.zkir`).
+    fn emit_set_method(
+        &mut self,
+        field_idx: u8,
+        method_name: &str,
+        args: &[midnight_ir::ExprIR],
+        t_ty: &syn::Type,
+    ) -> Option<Index> {
+        let key_enc = aligned_value_encoding(t_ty)?;
+        match method_name {
+            "contains" | "member" => {
+                let first = args.first().and_then(|a| self.emit_expr(a))?;
+                let key_vars = gather_n_vars(first, key_enc.value_field_count);
+                self.emit_map_member(field_idx, &key_vars, &key_enc)
+            }
+            "insert" => {
+                let first = args.first().and_then(|a| self.emit_expr(a))?;
+                let key_vars = gather_n_vars(first, key_enc.value_field_count);
+                self.emit_set_insert(field_idx, &key_vars, &key_enc)
+            }
+            "remove" => {
+                let first = args.first().and_then(|a| self.emit_expr(a))?;
+                let key_vars = gather_n_vars(first, key_enc.value_field_count);
+                self.emit_map_remove(field_idx, &key_vars, &key_enc)
+            }
+            _ => {
+                for arg in args {
+                    self.emit_expr(arg);
+                }
+                None
+            }
+        }
+    }
+
+    /// Emit ZKIR for `Set<T>::insert(k)` at `field_idx`. Same shape as
+    /// `Map::insert` except the value Push pushes `StateValue::Null`
+    /// instead of `StateValue::Cell(value)`:
+    ///
+    /// ```text
+    /// Idx  { cached: false, push_path: true, [field_idx] }  // navigate to Set
+    /// Push { storage: false, Cell(key) }                     // K bytes
+    /// Push { storage: true,  Null }                          // [0x11, 0]
+    /// Ins  { cached: false, n: 1 }                           // insert (k, Null)
+    /// Ins  { cached: true,  n: 1 }                           // restore parent
+    /// ```
+    fn emit_set_insert(
+        &mut self,
+        field_idx: u8,
+        key_vars: &[Index],
+        key_encoding: &AlignedValueEncoding,
+    ) -> Option<Index> {
+        let g = self.guard;
+
+        // Idx { cached: false, push_path: true, path: [Bytes<1>(field_idx)] } → 0x70.
+        let idx_op = self.emit_load_imm(Fr::from(0x70u64));
+        self.push_declare_pub_input(idx_op);
+        self.emit_key_field_repr(field_idx);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Push { storage: false, value: Cell(key) }.
+        self.emit_push_cell(key_vars, Some(key_encoding), /* storage = */ false);
+
+        // Push { storage: true, value: Null } → [0x11, 0]. 2 declares total.
+        self.emit_push_null(/* storage = */ true);
+
+        // Ins { cached: false, n: 1 } → 0x91.
+        let ins1_op = self.emit_load_imm(Fr::from(0x91u64));
+        self.push_declare_pub_input(ins1_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Ins { cached: true, n: 1 } → 0xa1.
+        let ins2_op = self.emit_load_imm(Fr::from(0xa1u64));
+        self.push_declare_pub_input(ins2_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        None
+    }
+
+    /// Emit a `Push { storage, value: StateValue::Null }` group — used by
+    /// Set::insert for the value slot. `Null` encodes as a single field
+    /// element `0` (`state.rs::field_repr` line 176), so the group is
+    /// just `[opcode, 0]` — 2 declares total.
+    fn emit_push_null(&mut self, storage: bool) {
+        let g = self.guard;
+        let push_op = self.emit_load_imm(Fr::from(if storage { 0x11u64 } else { 0x10u64 }));
+        let null_disc = self.emit_load_imm(Fr::from(0u64));
+        self.push_declare_pub_input(push_op);
+        self.push_declare_pub_input(null_disc);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 2,
+        });
+    }
+
     /// Emit ZKIR for `Cell::set(value)` at `field_idx`.
     ///
     /// On-chain encoding (verified empirically against compactc 0.30.0):
@@ -1481,6 +1597,19 @@ fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last()
         && seg.ident == "Cell"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner.clone());
+    }
+    None
+}
+
+/// If `ty` is `Set<T>`, return `T`. Otherwise `None`.
+fn extract_set_inner_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Set"
         && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
     {

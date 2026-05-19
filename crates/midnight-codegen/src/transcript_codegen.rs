@@ -293,14 +293,18 @@ fn generate_op_stmt(
                     // to the bool — when used as a statement, the bool is
                     // dropped; when used inside `if cond { ... }` as the cond
                     // (via `generate_runtime_cond`), the bool drives branching.
+                    // Works for both Map and Set fields (same Member opcode,
+                    // K type resolved via extract_field_key_type).
                     let block = generate_map_contains_block(field_idx, &field_name, args, field_ty);
                     quote! { let _ = #block; }
                 }
                 "insert" => {
-                    // `insert` on a Map field — see the Map::insert arm below.
-                    // If the field happens to be a Cell, fall through to set.
+                    // Dispatch by field type: Map → Map::insert (k, v),
+                    // Set → Set::insert (k, Null), Cell → Cell::set (v).
                     if field_ty.and_then(extract_map_kv_types).is_some() {
                         generate_map_insert(field_idx, args, field_ty)
+                    } else if field_ty.and_then(extract_set_inner_type).is_some() {
+                        generate_set_insert(field_idx, args, field_ty)
                     } else {
                         generate_cell_set(field_idx, args, field_ty)
                     }
@@ -316,6 +320,10 @@ fn generate_op_stmt(
                 }
                 "remove" if field_ty.and_then(extract_map_kv_types).is_some() => {
                     generate_map_remove(field_idx, args, field_ty)
+                }
+                "remove" if field_ty.and_then(extract_set_inner_type).is_some() => {
+                    // Set::remove has the same on-chain pattern as Map::remove.
+                    generate_set_remove(field_idx, args, field_ty)
                 }
                 "lookup" if field_ty.and_then(extract_map_kv_types).is_some() => {
                     generate_map_lookup(field_idx, &field_name, args, field_ty)
@@ -520,7 +528,9 @@ fn generate_map_contains_block(
         .first()
         .map(arg_to_runtime_raw_expr)
         .unwrap_or_else(|| quote! { () });
-    let k_ty = field_ty.and_then(extract_map_key_type);
+    // K-type for the AlignedValue alignment: Map<K, V> → K, Set<T> → T.
+    // Both expose `.contains(&K)` so the runtime method name is shared.
+    let k_ty = field_ty.and_then(extract_field_key_type);
     let key_aligned = args
         .first()
         .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
@@ -862,6 +872,88 @@ fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
         return Some(inner.clone());
     }
     None
+}
+
+/// Emit the runtime ops for `Set<T>::insert(k)`. Same shape as
+/// `Map::insert` except the value Push pushes `StateValue::Null` instead
+/// of `StateValue::Cell(value)` — see the IR-side `emit_set_insert` for
+/// the full encoding and the empirical compactc reference.
+fn generate_set_insert(
+    field_idx: u8,
+    args: &[ExprIR],
+    field_ty: Option<&syn::Type>,
+) -> TokenStream {
+    let t_ty = field_ty.and_then(extract_set_inner_type);
+    let key_aligned = args
+        .first()
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
+
+    quote! {
+        ops.push(Op::Idx {
+            cached: false,
+            push_path: true,
+            path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+        });
+        ops.push(Op::Push {
+            storage: false,
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
+        });
+        ops.push(Op::Push {
+            storage: true,
+            value: StateValue::Null,
+        });
+        ops.push(Op::Ins { cached: false, n: 1 });
+        ops.push(Op::Ins { cached: true, n: 1 });
+    }
+}
+
+/// Emit the runtime ops for `Set<T>::remove(&k)`. Identical to
+/// `Map::remove` — Set reuses Map's on-chain Rem+Ins pattern.
+fn generate_set_remove(
+    field_idx: u8,
+    args: &[ExprIR],
+    field_ty: Option<&syn::Type>,
+) -> TokenStream {
+    let t_ty = field_ty.and_then(extract_set_inner_type);
+    let key_aligned = args
+        .first()
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
+
+    quote! {
+        ops.push(Op::Idx {
+            cached: false,
+            push_path: true,
+            path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+        });
+        ops.push(Op::Push {
+            storage: false,
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
+        });
+        ops.push(Op::Rem { cached: false });
+        ops.push(Op::Ins { cached: true, n: 1 });
+    }
+}
+
+/// If `ty` is `Set<T>`, return `T`. Mirrors `zkir_emitter::extract_set_inner_type`.
+fn extract_set_inner_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "Set"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner.clone());
+    }
+    None
+}
+
+/// Return the K type for any keyed ledger field (Map<K, V> → K, Set<T> → T).
+/// Used by the shared contains/member emission helper to choose the right
+/// AlignedValue alignment for the key Push.
+fn extract_field_key_type(ty: &syn::Type) -> Option<syn::Type> {
+    extract_map_key_type(ty).or_else(|| extract_set_inner_type(ty))
 }
 
 /// If `ty` is `Map<K, V>`, return `K`. Mirrors `zkir_emitter::extract_map_kv_types`.

@@ -7,11 +7,13 @@ mod cell;
 mod counter;
 mod map;
 mod merkle_tree;
+mod set;
 
 pub use cell::Cell;
 pub use counter::Counter;
 pub use map::Map;
 pub use merkle_tree::MerkleTree;
+pub use set::Set;
 
 /// Marker trait for types that can live in ledger (on-chain) state.
 pub trait LedgerType: Sized {
