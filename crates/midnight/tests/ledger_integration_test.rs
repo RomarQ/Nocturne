@@ -77,6 +77,35 @@ mod reader {
 }
 
 #[midnight::contract]
+mod bytes_cell {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct BytesCellState {
+        pub digest: Cell<Bytes<32>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct BytesCellWitnesses {
+        pub new_digest: Bytes<32>,
+    }
+
+    impl BytesCellState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                digest: Cell::new(Bytes::<32>::zeroed()),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn rotate_digest(&mut self, witnesses: &BytesCellWitnesses) {
+            self.digest.set(witnesses.new_digest.clone());
+        }
+    }
+}
+
+#[midnight::contract]
 mod bytes_witness {
     use super::*;
 
@@ -303,6 +332,34 @@ fn build_read_stored_ir() -> midnight_zkir::IrSource {
         .circuits
         .into_iter()
         .find(|c| c.circuit_name == "read_stored")
+        .unwrap()
+        .ir_source
+}
+
+fn build_rotate_digest_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod bytes_cell {
+            #[midnight(ledger)]
+            pub struct BytesCellState { digest: Cell<Bytes<32>> }
+            #[midnight(witnesses)]
+            pub struct BytesCellWitnesses { pub new_digest: Bytes<32> }
+            impl BytesCellState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { digest: Cell::new(Bytes::<32>::zeroed()) } }
+                #[midnight(circuit)]
+                pub fn rotate_digest(&mut self, witnesses: &BytesCellWitnesses) {
+                    self.digest.set(witnesses.new_digest.clone());
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "rotate_digest")
         .unwrap()
         .ir_source
 }
@@ -1061,4 +1118,56 @@ async fn bytes32_witness_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for the Bytes<32>-witness circuit");
+}
+
+/// Confirms `Cell<Bytes<32>>::set(v)` produces an on-chain compatible
+/// transcript: the value Push declares 2 Fr chunks per the Bytes<32>
+/// alignment, matching what the transcript runtime computes via
+/// `AlignedValue::from(*v.as_bytes())`.
+///
+/// Validates multi-Fr Phase B: emit_push_cell now takes the full chunked
+/// `value_vars` and emits one DeclarePubInput per Fr the value occupies.
+#[tokio::test]
+async fn cell_bytes32_set_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_rotate_digest_ir();
+    let witnesses = bytes_cell::BytesCellWitnesses {
+        new_digest: Bytes::<32>::from([0x77u8; 32]),
+    };
+    let nocturne_transcript = bytes_cell::transcript::build_rotate_digest_transcript(&witnesses);
+
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            [0x77u8; 32],
+        )];
+    let preimage = canonical_preimage(
+        "rotate_digest",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Cell<Bytes<32>>::set"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<Bytes<32>>::set");
 }

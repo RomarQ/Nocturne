@@ -528,16 +528,11 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
 /// Emit the runtime ops for `Cell<T>::set(v)` — see comment in the
 /// `set`/`insert` arm above for the on-chain pattern.
 fn generate_cell_set(field_idx: u8, args: &[ExprIR], field_ty: Option<&syn::Type>) -> TokenStream {
-    let value_expr = args
-        .first()
-        .map(arg_to_runtime_expr)
-        .unwrap_or_else(|| quote! { () });
     let t_ty = field_ty.and_then(extract_cell_inner_type);
-    let value_cast = t_ty
-        .as_ref()
-        .and_then(primitive_cast_for_type)
-        .map(|cast| quote! { (#value_expr) #cast })
-        .unwrap_or_else(|| quote! { #value_expr });
+    let value_aligned = args
+        .first()
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
     quote! {
         ops.push(Op::Push {
             storage: false,
@@ -545,9 +540,33 @@ fn generate_cell_set(field_idx: u8, args: &[ExprIR], field_ty: Option<&syn::Type
         });
         ops.push(Op::Push {
             storage: true,
-            value: StateValue::Cell(Sp::new(AlignedValue::from(#value_cast))),
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#value_aligned))),
         });
         ops.push(Op::Ins { cached: false, n: 1 });
+    }
+}
+
+/// Produce a runtime Rust expression suitable for passing into
+/// `AlignedValue::from(_)` for a value of the given expected type.
+///
+/// - `Bytes<N>` → unwrap to `[u8; N]` via `*<raw>.as_bytes()`.
+/// - Single-Fr primitives (Boolean / Uint<N> / u8..u128) → `.value()` if
+///   the expression is a witness/wrapper, then apply the primitive cast
+///   from `primitive_cast_for_type`.
+/// - Unknown type → fall back to the raw `.value()`-style expression.
+fn aligned_value_arg_expr(expr: &ExprIR, ty: Option<&syn::Type>) -> TokenStream {
+    if let Some(t) = ty {
+        let ty_str = quote!(#t).to_string().replace(' ', "");
+        if ty_str.starts_with("Bytes<") {
+            // Bytes<N>: need [u8; N] for AlignedValue::from.
+            let raw = arg_to_runtime_raw_expr(expr);
+            return quote! { *(#raw).as_bytes() };
+        }
+    }
+    let value_expr = arg_to_runtime_expr(expr);
+    match ty.and_then(primitive_cast_for_type) {
+        Some(cast) => quote! { (#value_expr) #cast },
+        None => value_expr,
     }
 }
 
@@ -878,13 +897,35 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
             // `Clone` is fine for the small types we currently support
-            // (Boolean, Uint<N>) — they're all `Copy + Hash + Eq`.
+            // (Boolean, Uint<N>, Bytes<N>) — they're all `Clone`.
             quote! { witnesses.#field_ident.clone() }
         }
         ExprIR::Disclose { value, .. } => arg_to_runtime_raw_expr(value),
         ExprIR::Var { name, .. } => {
             let ident = format_ident!("{}", name.to_string());
             quote! { #ident.clone() }
+        }
+        // Preserve method chains (e.g. `.clone()`, `.into_inner()`) on the
+        // raw wrapper. Without this, MethodCall falls through to
+        // `arg_to_runtime_expr` which unwraps to `.value()` — wrong for
+        // wrapper types like `Bytes<N>` that don't expose `value()`.
+        ExprIR::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } => {
+            let m = method.to_string();
+            match m.as_str() {
+                "into" | "value" => arg_to_runtime_raw_expr(receiver),
+                _ => {
+                    let r = arg_to_runtime_raw_expr(receiver);
+                    let m_ident = format_ident!("{}", m);
+                    let arg_exprs: Vec<TokenStream> =
+                        args.iter().map(arg_to_runtime_raw_expr).collect();
+                    quote! { #r.#m_ident(#(#arg_exprs),*) }
+                }
+            }
         }
         // For anything else, fall back to the value-unwrapped form.
         other => arg_to_runtime_expr(other),

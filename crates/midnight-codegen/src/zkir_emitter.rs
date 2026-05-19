@@ -241,12 +241,20 @@ impl ZkirEmitter {
                         self.emit_ledger_read(field_idx, result_ty.as_ref())
                     }
                     "set" => {
-                        let val = args.first().and_then(|a| self.emit_expr(a));
-                        self.emit_ledger_write(field_idx, val)
+                        // Resolve Cell<T> → T, then compute how many Frs T
+                        // occupies so we can collect the contiguous range of
+                        // PrivateInputs the WitnessAccess emitted. For
+                        // single-Fr T this collapses to one element; for
+                        // multi-Fr (e.g. Bytes<32>) we pass the full chunked
+                        // index list to emit_push_cell.
+                        let val_first = args.first().and_then(|a| self.emit_expr(a));
+                        let value_vars = self.gather_value_vars(field_idx, val_first);
+                        self.emit_ledger_write(field_idx, &value_vars)
                     }
                     "insert" => {
-                        let val = args.first().and_then(|a| self.emit_expr(a));
-                        self.emit_ledger_write(field_idx, val)
+                        let val_first = args.first().and_then(|a| self.emit_expr(a));
+                        let value_vars = self.gather_value_vars(field_idx, val_first);
+                        self.emit_ledger_write(field_idx, &value_vars)
                     }
                     _ => {
                         for arg in args {
@@ -768,10 +776,10 @@ impl ZkirEmitter {
         });
 
         // Push { storage: false, value: Cell(key) } — the K side.
-        self.emit_push_cell(key_var, Some(key_encoding), /* storage = */ false);
+        self.emit_push_cell(&[key_var], Some(key_encoding), /* storage = */ false);
 
         // Push { storage: true, value: Cell(value) } — the V side.
-        self.emit_push_cell(val_var, Some(val_encoding), /* storage = */ true);
+        self.emit_push_cell(&[val_var], Some(val_encoding), /* storage = */ true);
 
         // Ins { cached: false, n: 1 } → 0x91 — first Ins: (k, v) into Map.
         let ins1_op = self.emit_load_imm(Fr::from(0x91u64));
@@ -841,7 +849,7 @@ impl ZkirEmitter {
         // Uses emit_push_cell which handles the [opcode, Cell disc, alignment,
         // value] structure. Only single-Fr key values are supported here
         // today; multi-Fr keys (e.g. Bytes<32>) need extended encoding work.
-        self.emit_push_cell(key_var, Some(key_encoding), /* storage = */ false);
+        self.emit_push_cell(&[key_var], Some(key_encoding), /* storage = */ false);
 
         // Member → 0x18.
         let member_op = self.emit_load_imm(Fr::from(0x18u64));
@@ -995,7 +1003,7 @@ impl ZkirEmitter {
         });
 
         // Push { storage: false, value: Cell(key) }.
-        self.emit_push_cell(key_var, Some(key_encoding), /* storage = */ false);
+        self.emit_push_cell(&[key_var], Some(key_encoding), /* storage = */ false);
 
         // Rem { cached: false } → 0x19.
         let rem_op = self.emit_load_imm(Fr::from(0x19u64));
@@ -1033,20 +1041,47 @@ impl ZkirEmitter {
     /// `Weak` vs `Strong` strength (`onchain-vm/src/vm.rs:631`); `Ins`
     /// pops `[value, key, container]` and inserts. No `Idx` is needed —
     /// the array `Ins` indexes by the key directly.
-    fn emit_ledger_write(&mut self, field_idx: u8, value: Option<Index>) -> Option<Index> {
+    /// Given the first var index for a Cell::set/Map::insert value and the
+    /// field's outer type (`Cell<T>` or `Map<K, V>` — we only care about T
+    /// here), gather the contiguous range of var indices that hold the
+    /// value's multi-Fr representation.
+    ///
+    /// Relies on the invariant that `WitnessAccess` for a multi-Fr witness
+    /// emits its `ceil(N/31)` PrivateInputs contiguously and uninterrupted.
+    fn gather_value_vars(&self, field_idx: u8, first: Option<Index>) -> Vec<Index> {
+        let Some(first) = first else {
+            return Vec::new();
+        };
+        let inner_ty = self
+            .field_types
+            .get(field_idx as usize)
+            .and_then(extract_cell_inner_type);
+        let n_fr = inner_ty
+            .as_ref()
+            .and_then(aligned_value_encoding)
+            .map(|e| e.value_field_count)
+            .unwrap_or(1);
+        (first..first + n_fr as Index).collect()
+    }
+
+    fn emit_ledger_write(&mut self, field_idx: u8, value_vars: &[Index]) -> Option<Index> {
         // The KEY: Push(storage: false, Cell(Bytes<1>(field_idx))).
         let key_var = self.emit_load_imm(Fr::from(field_idx as u64));
         let key_encoding = aligned_value_encoding_bytes(1);
-        self.emit_push_cell(key_var, Some(&key_encoding), /* storage = */ false);
+        self.emit_push_cell(&[key_var], Some(&key_encoding), /* storage = */ false);
 
         // The VALUE: Push(storage: true, Cell(<value-typed AlignedValue>)).
-        if let Some(val_idx) = value {
+        if !value_vars.is_empty() {
             let inner_ty = self
                 .field_types
                 .get(field_idx as usize)
                 .and_then(extract_cell_inner_type);
             let value_encoding = inner_ty.as_ref().and_then(aligned_value_encoding);
-            self.emit_push_cell(val_idx, value_encoding.as_ref(), /* storage = */ true);
+            self.emit_push_cell(
+                value_vars,
+                value_encoding.as_ref(),
+                /* storage = */ true,
+            );
         }
 
         // The Ins: Ins { cached: false, n: 1 } → opcode 0x91.
@@ -1057,7 +1092,7 @@ impl ZkirEmitter {
             count: 1,
         });
 
-        value
+        value_vars.first().copied()
     }
 
     /// Emit a `Push { storage, value: StateValue::Cell(AlignedValue) }` group.
@@ -1076,7 +1111,7 @@ impl ZkirEmitter {
     /// this preserves behavior for types the encoding table doesn't yet cover.
     fn emit_push_cell(
         &mut self,
-        value_var: Index,
+        value_vars: &[Index],
         encoding: Option<&AlignedValueEncoding>,
         storage: bool,
     ) {
@@ -1085,18 +1120,19 @@ impl ZkirEmitter {
         self.push_declare_pub_input(push_op);
 
         match encoding {
-            Some(enc) if enc.value_field_count == 1 => {
-                // Cell discriminant (1) + alignment.field_repr + 1-Fr value.
+            Some(enc) if value_vars.len() == enc.value_field_count => {
+                // Cell discriminant (1) + alignment.field_repr + N-Fr value.
                 let cell_disc = self.emit_load_imm(Fr::from(1u64));
                 self.push_declare_pub_input(cell_disc);
                 for atom in &enc.alignment_atoms {
                     let v = self.emit_load_imm(Fr::from(*atom as u64));
                     self.push_declare_pub_input(v);
                 }
-                self.push_declare_pub_input(value_var);
-                // Total: Push opcode (1) + Cell disc (1) + alignment (1 + N atoms) + value (1)
-                //      = 4 + alignment_atoms.len()
-                let count = 3 + enc.alignment_atoms.len();
+                for &var in value_vars {
+                    self.push_declare_pub_input(var);
+                }
+                // Push opcode (1) + Cell disc (1) + alignment.len + value_vars.len
+                let count = 2 + enc.alignment_atoms.len() + value_vars.len();
                 self.instructions.push(Instruction::PiSkip {
                     guard: Some(g),
                     count: count as u32,
@@ -1104,10 +1140,11 @@ impl ZkirEmitter {
             }
             _ => {
                 // Fallback: legacy 2-declare emission. Used when the value
-                // type isn't in the encoding table yet (e.g., multi-Fr types
-                // like Bytes<N>). Not on-chain compatible — a TODO until the
-                // encoding table covers all supported value types.
-                self.push_declare_pub_input(value_var);
+                // type isn't in the encoding table or the caller didn't
+                // supply enough Frs. Not on-chain compatible.
+                if let Some(&v) = value_vars.first() {
+                    self.push_declare_pub_input(v);
+                }
                 self.instructions.push(Instruction::PiSkip {
                     guard: Some(g),
                     count: 2,
@@ -1264,6 +1301,21 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
                 value_field_count: 1,
             });
         }
+    }
+
+    // Bytes<N>: alignment `[1, N]`, multi-Fr value when N > 31.
+    // `value_field_count = ceil(N / FR_BYTES_STORED)`. Compatible with
+    // single-Fr Bytes<N> (N ≤ 31) too.
+    if let Some(n) = ty_str
+        .strip_prefix("Bytes<")
+        .and_then(|s| s.strip_suffix('>'))
+        .and_then(|s| s.parse::<u32>().ok())
+        && n > 0
+    {
+        return Some(AlignedValueEncoding {
+            alignment_atoms: vec![1, n],
+            value_field_count: n.div_ceil(FR_BYTES_STORED) as usize,
+        });
     }
 
     // Field: encoded as AlignmentAtom::Field (-2 in two's complement, but

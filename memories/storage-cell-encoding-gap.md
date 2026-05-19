@@ -59,6 +59,27 @@ the IR's encoding for each type.
 End-to-end verified by `cell_get_proves_and_verifies` and
 `counter_value_proves_and_verifies` in `ledger_integration_test.rs`.
 
+### Cell<Bytes<N>>::set also landed (multi-Fr Push)
+
+`emit_push_cell` now takes `value_vars: &[Index]` instead of a single
+`Index`, so multi-Fr values flow through it correctly:
+
+- `aligned_value_encoding(Bytes<N>)` returns
+  `{ alignment_atoms: [1, N], value_field_count: ceil(N / 31) }`.
+- The Cell::set dispatcher uses `gather_value_vars` to collect the
+  contiguous PrivateInput indices the WitnessAccess emitted (relies on
+  the invariant that multi-Fr witnesses emit their `ceil(N/31)`
+  PrivateInputs contiguously and uninterrupted).
+- The transcript codegen `aligned_value_arg_expr` produces
+  `*(witness.<f>.clone()...).as_bytes()` for `Bytes<N>` values so
+  `AlignedValue::from([u8; N])` runs the same alignment-and-chunking
+  the IR's Push declares expect.
+- `arg_to_runtime_raw_expr` now handles `MethodCall` directly (was
+  falling through to the unwrapping `.value()` path), so chains like
+  `.clone()` on a `Bytes<N>` witness preserve the wrapper.
+
+E2E test: `ledger_integration_test::cell_bytes32_set_proves_and_verifies`.
+
 ## What still needs work
 
 1. **Multi-Fr value types**: `Bytes<N>` for `N*8 > 64`, custom ADTs, and `Field` (which uses `AlignmentAtom::Field`, not `Bytes{N}`) fall back to 2-declare emission. They are NOT on-chain compatible. To support: extend `aligned_value_encoding` to return a `value_field_count > 1`, and update `emit_push_cell` to emit one declare per Fr in the value.
