@@ -133,6 +133,25 @@ impl ZkirEmitter {
         }
     }
 
+    /// Guard for `PrivateInput`/`PublicInput` when inside a conditional
+    /// branch. Returns `Some(branch_guard)` so the zkir VM skips the
+    /// transcript-consuming read when the branch is inactive (pushing 0
+    /// to memory instead — see `zkir/src/ir_vm.rs:325-355`). Outside
+    /// conditionals, returns `None` so the read is unconditional.
+    ///
+    /// Without this, the IR's `PrivateInput`/`PublicInput` would try to
+    /// consume an entry from the corresponding transcript even on an
+    /// inactive branch — but the transcript builder only writes those
+    /// entries for the active branch, so prove fails with "Ran out of
+    /// {private,public} transcript outputs".
+    fn current_io_guard(&self) -> Option<Index> {
+        if self.in_conditional {
+            Some(self.guard)
+        } else {
+            None
+        }
+    }
+
     /// Emit (or reuse a cached) `LoadImm 0`.
     fn emit_load_zero(&mut self) -> Index {
         if let Some(z) = self.zero_var {
@@ -286,7 +305,9 @@ impl ZkirEmitter {
                     .unwrap_or_else(|| vec![None]);
                 let mut first_idx = None;
                 for bits in layout {
-                    let var = self.emit_instruction(Instruction::PrivateInput { guard: None });
+                    let var = self.emit_instruction(Instruction::PrivateInput {
+                        guard: self.current_io_guard(),
+                    });
                     if first_idx.is_none() {
                         first_idx = Some(var);
                     }
@@ -664,7 +685,9 @@ impl ZkirEmitter {
                     .map(read_result_fr_layout)
                     .unwrap_or_else(|| vec![None; enc.value_field_count]);
                 for bits in value_layout.iter().take(enc.value_field_count) {
-                    let pi = self.emit_instruction(Instruction::PublicInput { guard: None });
+                    let pi = self.emit_instruction(Instruction::PublicInput {
+                        guard: self.current_io_guard(),
+                    });
                     if first_value.is_none() {
                         first_value = Some(pi);
                     }
@@ -685,7 +708,9 @@ impl ZkirEmitter {
                 // Legacy 1-declare fallback. Not on-chain compatible — only
                 // for unknown result types. Emits one PublicInput so the
                 // existing internal-consistency tests keep working.
-                let pi = self.emit_instruction(Instruction::PublicInput { guard: None });
+                let pi = self.emit_instruction(Instruction::PublicInput {
+                        guard: self.current_io_guard(),
+                    });
                 self.instructions.push(Instruction::PiSkip {
                     guard: Some(g),
                     count: 1,
@@ -870,7 +895,9 @@ impl ZkirEmitter {
         // from the transcript outputs into memory; that same value is then
         // declared as the fourth field of the Popeq encoding.
         let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
-        let result_var = self.emit_instruction(Instruction::PublicInput { guard: None });
+        let result_var = self.emit_instruction(Instruction::PublicInput {
+                        guard: self.current_io_guard(),
+                    });
         self.push_declare_pub_input(popeq_op);
         let align_one = self.emit_load_imm(Fr::from(1u64));
         self.push_declare_pub_input(align_one);
@@ -973,7 +1000,9 @@ impl ZkirEmitter {
         let value_layout = read_result_fr_layout(v_ty);
         let mut first_value: Option<Index> = None;
         for bits in value_layout.iter().take(val_encoding.value_field_count) {
-            let pi = self.emit_instruction(Instruction::PublicInput { guard: None });
+            let pi = self.emit_instruction(Instruction::PublicInput {
+                        guard: self.current_io_guard(),
+                    });
             if first_value.is_none() {
                 first_value = Some(pi);
             }

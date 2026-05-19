@@ -1514,3 +1514,670 @@ async fn map_bytes_remove_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map<Bytes<32>, _>::remove");
 }
+
+/// Mirror of `voting_verifies_with_ledger_shape_pis` but with `choice=false`
+/// — exercises the **else-active** path of the cast_vote conditional. With
+/// cond_select zeroing, the then-branch's DeclarePubInputs should be zero
+/// and match the Op::Noop padding the ledger inserts for the inactive
+/// (then) branch.
+#[tokio::test]
+async fn voting_verifies_else_active() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_cast_vote_ir();
+    let witnesses = ballot::BallotWitnesses {
+        choice: Boolean::from(false),
+    };
+    let nocturne_transcript = ballot::transcript::build_cast_vote_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(false)];
+    let preimage = canonical_preimage(
+        "cast_vote",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for the else-active path"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for the else-active path");
+}
+
+#[midnight::contract]
+mod cond_writer {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct CondWriterState {
+        pub raised: Cell<bool>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct CondWriterWitnesses {
+        pub do_it: Boolean,
+    }
+
+    impl CondWriterState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                raised: Cell::new(false),
+            }
+        }
+
+        // Conditional write — only one branch's Cell::set ops are in the
+        // active transcript; the other branch's IR-declared PIs must zero out
+        // via cond_select to match Op::Noop padding.
+        #[midnight(circuit)]
+        pub fn maybe_raise(&mut self, witnesses: &CondWriterWitnesses) {
+            if witnesses.do_it.value() {
+                self.raised.set(true);
+            } else {
+                self.raised.set(false);
+            }
+        }
+    }
+}
+
+fn build_maybe_raise_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod cond_writer {
+            #[midnight(ledger)]
+            pub struct CondWriterState { raised: Cell<bool> }
+            #[midnight(witnesses)]
+            pub struct CondWriterWitnesses { pub do_it: Boolean }
+            impl CondWriterState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { raised: Cell::new(false) } }
+                #[midnight(circuit)]
+                pub fn maybe_raise(&mut self, witnesses: &CondWriterWitnesses) {
+                    if witnesses.do_it.value() {
+                        self.raised.set(true);
+                    } else {
+                        self.raised.set(false);
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "maybe_raise")
+        .unwrap()
+        .ir_source
+}
+
+/// Confirms a circuit with `Cell::set` inside both arms of an `if-else`
+/// proves+verifies through the canonical ledger path. The active branch's
+/// Push+Push+Ins ops go into the transcript; the inactive branch's
+/// DeclarePubInputs must cond_select to zero to match the Op::Noop padding
+/// the ledger inserts for inactive segments.
+#[tokio::test]
+async fn conditional_cell_set_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_maybe_raise_ir();
+    let witnesses = cond_writer::CondWriterWitnesses {
+        do_it: Boolean::from(true),
+    };
+    let nocturne_transcript = cond_writer::transcript::build_maybe_raise_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(true)];
+    let preimage = canonical_preimage(
+        "maybe_raise",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for conditional Cell::set"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for conditional Cell::set");
+}
+
+#[midnight::contract]
+mod nested_cond {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct NestedCondState {
+        pub a: Counter,
+        pub b: Counter,
+        pub c: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct NestedCondWitnesses {
+        pub outer: Boolean,
+        pub inner: Boolean,
+    }
+
+    impl NestedCondState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                a: Counter::zero(),
+                b: Counter::zero(),
+                c: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn tick(&mut self, witnesses: &NestedCondWitnesses) {
+            if witnesses.outer.value() {
+                if witnesses.inner.value() {
+                    self.a.increment();
+                } else {
+                    self.b.increment();
+                }
+            } else {
+                self.c.increment();
+            }
+        }
+    }
+}
+
+fn build_tick_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod nested_cond {
+            #[midnight(ledger)]
+            pub struct NestedCondState { a: Counter, b: Counter, c: Counter }
+            #[midnight(witnesses)]
+            pub struct NestedCondWitnesses { pub outer: Boolean, pub inner: Boolean }
+            impl NestedCondState {
+                #[midnight(constructor)]
+                pub fn new() -> Self {
+                    Self { a: Counter::zero(), b: Counter::zero(), c: Counter::zero() }
+                }
+                #[midnight(circuit)]
+                pub fn tick(&mut self, witnesses: &NestedCondWitnesses) {
+                    if witnesses.outer.value() {
+                        if witnesses.inner.value() {
+                            self.a.increment();
+                        } else {
+                            self.b.increment();
+                        }
+                    } else {
+                        self.c.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "tick")
+        .unwrap()
+        .ir_source
+}
+
+/// Nested `if-else`: outer guard composes with inner via cond_select
+/// (see `conditional-branch-cond-select-zeroing.md`). Exercise the deepest
+/// path (outer=true, inner=true) and verify the prove PIs match the
+/// Noop-interleaved transcript field_repr.
+#[tokio::test]
+async fn nested_conditional_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_tick_ir();
+    let witnesses = nested_cond::NestedCondWitnesses {
+        outer: Boolean::from(true),
+        inner: Boolean::from(true),
+    };
+    let nocturne_transcript = nested_cond::transcript::build_tick_transcript(&witnesses);
+
+    // IR PrivateInput order matches witness-access order in the body:
+    // outer first (the outer guard), then inner.
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(true), AlignedValue::from(true)];
+    let preimage = canonical_preimage("tick", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for nested if-else"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for nested if-else");
+}
+
+#[midnight::contract]
+mod no_else {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct NoElseState {
+        pub count: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct NoElseWitnesses {
+        pub do_it: Boolean,
+    }
+
+    impl NoElseState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn maybe_tick(&mut self, witnesses: &NoElseWitnesses) {
+            if witnesses.do_it.value() {
+                self.count.increment();
+            }
+        }
+    }
+}
+
+fn build_maybe_tick_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod no_else {
+            #[midnight(ledger)]
+            pub struct NoElseState { count: Counter }
+            #[midnight(witnesses)]
+            pub struct NoElseWitnesses { pub do_it: Boolean }
+            impl NoElseState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { count: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn maybe_tick(&mut self, witnesses: &NoElseWitnesses) {
+                    if witnesses.do_it.value() {
+                        self.count.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "maybe_tick")
+        .unwrap()
+        .ir_source
+}
+
+/// No-else `if`: only the then-branch emits DeclarePubInputs. When the
+/// condition is false, no ops go into the transcript but the IR's
+/// DeclarePubInputs still execute — they must cond_select to zero so the
+/// Op::Noop padding the ledger inserts matches.
+#[tokio::test]
+async fn no_else_conditional_false_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_maybe_tick_ir();
+    let witnesses = no_else::NoElseWitnesses {
+        do_it: Boolean::from(false),
+    };
+    let nocturne_transcript = no_else::transcript::build_maybe_tick_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(false)];
+    let preimage = canonical_preimage(
+        "maybe_tick",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for no-else conditional (false)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for no-else conditional (false)");
+}
+
+#[midnight::contract]
+mod cond_read {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct CondReadState {
+        pub members: Map<Uint<64>, Boolean>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct CondReadWitnesses {
+        pub do_check: Boolean,
+        pub user_id: Uint<64>,
+    }
+
+    impl CondReadState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                members: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn maybe_check(&self, witnesses: &CondReadWitnesses) {
+            if witnesses.do_check.value() {
+                let _exists = self.members.contains(&witnesses.user_id);
+            }
+        }
+    }
+}
+
+fn build_maybe_check_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod cond_read {
+            #[midnight(ledger)]
+            pub struct CondReadState { members: Map<Uint<64>, Boolean> }
+            #[midnight(witnesses)]
+            pub struct CondReadWitnesses { pub do_check: Boolean, pub user_id: Uint<64> }
+            impl CondReadState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { members: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn maybe_check(&self, witnesses: &CondReadWitnesses) {
+                    if witnesses.do_check.value() {
+                        let _exists = self.members.contains(&witnesses.user_id);
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "maybe_check")
+        .unwrap()
+        .ir_source
+}
+
+/// Conditional Map::contains — the IR emits a PublicInput inside the
+/// conditional branch (to read the Member result). When the branch is
+/// inactive, the transcript builder omits the Op::Popeq, so the prover's
+/// public_transcript_outputs vector has one fewer entry than there are
+/// PublicInput ops in the IR. This test exercises the active-branch case
+/// (do_check=true) to confirm the basic structure proves and verifies.
+#[tokio::test]
+async fn conditional_map_contains_active_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_maybe_check_ir();
+    let state = cond_read::CondReadState::new();
+    let witnesses = cond_read::CondReadWitnesses {
+        do_check: Boolean::from(true),
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        cond_read::transcript::build_maybe_check_transcript(&state, &witnesses);
+
+    // do_check first, user_id second — IR-emission order.
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(true), AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "maybe_check",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for conditional Map::contains (active)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for conditional Map::contains (active)");
+}
+
+/// Inactive-branch version of `conditional_map_contains_active`. The IR
+/// emits a PublicInput inside the conditional branch (for the Map::contains
+/// result), but the transcript builder omits the entire Popeq op when the
+/// branch is inactive. This puts the IR's PublicInput count > the
+/// transcript's Popeq count — and tests whether prove handles that mismatch
+/// or fails.
+#[tokio::test]
+async fn conditional_map_contains_inactive_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_maybe_check_ir();
+    let state = cond_read::CondReadState::new();
+    let witnesses = cond_read::CondReadWitnesses {
+        do_check: Boolean::from(false),
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        cond_read::transcript::build_maybe_check_transcript(&state, &witnesses);
+
+    // do_check=false → the user_id witness read is gated behind the
+    // inactive branch, so its `PrivateInput` consumes nothing (guard=0
+    // path in `zkir/src/ir_vm.rs:343`). Only the do_check Fr lands in
+    // private_transcript.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(false)];
+    let preimage = canonical_preimage(
+        "maybe_check",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for conditional Map::contains (inactive)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for conditional Map::contains (inactive)");
+}
