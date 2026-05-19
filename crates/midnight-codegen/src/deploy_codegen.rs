@@ -1,27 +1,53 @@
 //! Deployment codegen: generates Rust code for constructing the initial
 //! contract state (StateValue tree) for deployment.
+//!
+//! The strategy is to call the user's constructor at runtime (no arguments;
+//! constructor args aren't propagated yet) and then encode each ledger field
+//! into a `StateValue` using the field's declared Rust type. This sidesteps
+//! the complexity of statically lowering arbitrary constructor body
+//! expressions — anything that compiles as plain Rust on the host side
+//! works as a Cell initializer.
 
 use std::collections::HashMap;
 
-use midnight_ir::expr::{ExprIR, LiteralIR};
 use midnight_ir::{ContractIR, LedgerTypeKind, UserEnumVariant};
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
 /// Generate the deployment module for a contract.
 pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
-    let init_map = collect_constructor_field_inits(contract);
+    let ledger_name = &contract.ledger.name;
+    let constructor_name = contract
+        .constructors
+        .first()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| format_ident!("new"));
+
     let user_enums = &contract.user_enums;
 
-    let field_inits: Vec<TokenStream> = contract
+    let field_pushes: Vec<TokenStream> = contract
         .ledger
         .fields
         .iter()
         .map(|field| {
-            let init_expr = init_map.get(&field.name.to_string()).copied();
+            let field_ident = field.name.clone();
             match &field.type_kind {
-                LedgerTypeKind::Counter => counter_state_value(init_expr),
-                LedgerTypeKind::Cell => cell_state_value(&field.ty, init_expr, user_enums),
+                LedgerTypeKind::Counter => quote! {
+                    fields.push(StateValue::from(__state.#field_ident.value()));
+                },
+                LedgerTypeKind::Cell => {
+                    let inner = extract_cell_inner_type(&field.ty);
+                    let accessor = quote! { __state.#field_ident.get() };
+                    let aligned = cell_aligned_value_expr(inner.as_ref(), &accessor, user_enums);
+                    quote! {
+                        {
+                            use midnight::runtime::base_crypto::fab::AlignedValue;
+                            use midnight::runtime::onchain_state::state::StateValue;
+                            use midnight::runtime::storage::arena::Sp;
+                            fields.push(StateValue::Cell(Sp::new(AlignedValue::from(#aligned))));
+                        }
+                    }
+                }
                 LedgerTypeKind::Map | LedgerTypeKind::Set => quote! {
                     fields.push(StateValue::Map(Default::default()));
                 },
@@ -30,8 +56,8 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                     // StateValue::Array of `[BoundedMerkleTree<()>, Cell<u64>(0)]`
                     // — first the height-H blank tree (rehashed), then the
                     // next-index counter starting at 0. This matches compactc
-                    // 0.30.0's emission (`/tmp/mt-experiments/out/contract/index.js:191-195`)
-                    // and what `MerkleTree::insert` operates on at runtime.
+                    // 0.30.0's emission and what `MerkleTree::insert` operates
+                    // on at runtime.
                     let height = parse_merkle_tree_height(&field.ty)
                         .expect("MerkleTree<H, T> field must declare H as a const literal");
                     quote! {
@@ -63,14 +89,18 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
     quote! {
         /// Generated deployment helpers.
         pub mod deploy {
+            #[allow(unused_imports)]
+            use midnight::types::*;
             use midnight::runtime::onchain_state::state::StateValue;
 
-            /// Construct the initial contract state as a StateValue::Array
-            /// containing one entry per ledger field.
+            /// Construct the initial contract state by calling the user
+            /// constructor and encoding each ledger field as a
+            /// `StateValue::Array` entry, in declaration order.
             pub fn initial_state() -> StateValue {
+                let __state = super::#ledger_name::#constructor_name();
                 let mut fields: Vec<StateValue> = Vec::with_capacity(#num_fields);
 
-                #(#field_inits)*
+                #(#field_pushes)*
 
                 StateValue::Array(fields.into_iter().collect())
             }
@@ -78,134 +108,71 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
     }
 }
 
-/// Walk the (first) constructor body looking for a `Self { f: init, ... }`
-/// expression and return a map from each named field to its initializer.
-/// Constructors that don't end with a struct-init expression (e.g. they
-/// build via `let` bindings and return a name) get a best-effort empty
-/// map, falling back to the per-kind defaults.
-fn collect_constructor_field_inits(contract: &ContractIR) -> HashMap<String, &ExprIR> {
-    let mut out = HashMap::new();
-    let Some(constructor) = contract.constructors.first() else {
-        return out;
-    };
-    let struct_init = constructor.body.iter().find_map(|e| match e {
-        ExprIR::StructInit { fields, .. } => Some(fields),
-        // `return Self { .. }` wraps the StructInit; peek through.
-        ExprIR::Return { value: Some(v), .. } => match v.as_ref() {
-            ExprIR::StructInit { fields, .. } => Some(fields),
-            _ => None,
-        },
-        _ => None,
-    });
-    if let Some(fields) = struct_init {
-        for (name, expr) in fields {
-            out.insert(name.to_string(), expr);
-        }
-    }
-    out
-}
-
-/// Generate the `StateValue::Cell(_)` push for a `Counter` ledger field.
-/// Today we only support `Counter::zero()` and missing initializers (both
-/// emit a zero counter); anything else compile-errors so the user can't
-/// silently get an off-by-one initial value.
-fn counter_state_value(init: Option<&ExprIR>) -> TokenStream {
-    let is_zero = match init {
-        None => true,
-        Some(ExprIR::FnCall { name, args, .. }) => name == "zero" && args.is_empty(),
-        _ => false,
-    };
-    if is_zero {
-        return quote! { fields.push(StateValue::from(0u64)); };
-    }
-    let msg = format!(
-        "Counter initial value not supported yet: {:?} \
-         (only `Counter::zero()` works)",
-        init.unwrap()
-    );
-    quote! { compile_error!(#msg); }
-}
-
-/// Generate the `StateValue::Cell(_)` push for a `Cell<T>` ledger field.
-/// Recognizes `Cell::new(<const-literal-or-enum-variant>)` and lowers the
-/// literal to its on-chain AlignedValue. Falls back to a zero Cell when
-/// the initializer is missing or unrecognized, matching the previous
-/// always-zero behavior.
-fn cell_state_value(
-    field_ty: &syn::Type,
-    init: Option<&ExprIR>,
+/// Build the expression passed to `AlignedValue::from(_)` for a Cell field's
+/// inner value. `accessor` is the token expression for the runtime value
+/// (typically `__state.<field>.get()`). Returns a token that, when wrapped
+/// in `AlignedValue::from(_)`, produces the same wire shape Cell::set would
+/// push at runtime.
+fn cell_aligned_value_expr(
+    inner: Option<&syn::Type>,
+    accessor: &TokenStream,
     user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
-    let aligned_arg = match init {
-        Some(ExprIR::FnCall { name, args, .. }) if name == "new" && args.len() == 1 => {
-            cell_init_aligned_arg(&args[0], field_ty, user_enums)
-        }
-        _ => None,
+    let Some(t) = inner else {
+        return quote! { (#accessor) };
     };
-    match aligned_arg {
-        Some(arg) => quote! {
-            {
-                use midnight::runtime::base_crypto::fab::AlignedValue;
-                use midnight::runtime::onchain_state::state::StateValue;
-                use midnight::runtime::storage::arena::Sp;
-                fields.push(StateValue::Cell(Sp::new(AlignedValue::from(#arg))));
-            }
-        },
-        None => quote! { fields.push(StateValue::from(0u64)); },
+    let s = quote!(#t).to_string().replace(' ', "");
+    if s.starts_with("Bytes<") {
+        return quote! { *(#accessor).as_bytes() };
     }
-}
-
-/// Lower a `Cell::new(<init>)` argument into an expression suitable for
-/// `AlignedValue::from(_)`. Returns `None` if we don't recognize the
-/// shape so the caller can fall back to the zero default.
-fn cell_init_aligned_arg(
-    expr: &ExprIR,
-    field_ty: &syn::Type,
-    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> Option<TokenStream> {
-    match expr {
-        ExprIR::Literal { value, .. } => match value {
-            LiteralIR::Int(n) => {
-                // Match the inner type's wire shape so the AlignedValue we
-                // build matches what `Cell::set` would push at runtime.
-                let inner = extract_cell_inner_type(field_ty);
-                let cast = inner
-                    .as_ref()
-                    .and_then(int_cell_init_cast)
-                    .unwrap_or_else(|| quote! { as u64 });
-                let n = *n as u64;
-                Some(quote! { (#n #cast) })
-            }
-            LiteralIR::Bool(b) => Some(quote! { #b }),
-            LiteralIR::Str(_) => None,
-        },
-        ExprIR::Path { path, .. } => {
-            // Enum variant literal: `Cell::new(Status::Open)`.
-            // Resolve via user_enums; emit the variant's u8 discriminant.
-            let segs: Vec<String> = path
-                .segments
-                .iter()
-                .map(|s| s.ident.to_string())
-                .collect();
-            if segs.len() < 2 {
-                return None;
-            }
-            let enum_name = &segs[segs.len() - 2];
-            let variant_name = &segs[segs.len() - 1];
-            let variants = user_enums.get(enum_name)?;
-            let disc = variants.iter().position(|v| v.name == *variant_name)? as u8;
-            Some(quote! { #disc })
+    if s == "Field" {
+        return quote! { midnight::runtime::transient_crypto::curve::Fr::from((#accessor).value()) };
+    }
+    if s == "MerkleTreeDigest" {
+        return quote! {
+            midnight::runtime::transient_crypto::curve::Fr::from_le_bytes(&(#accessor).as_le_bytes())
+                .expect("MerkleTreeDigest bytes round-trip through Fr")
+        };
+    }
+    if s == "Boolean" {
+        return quote! { (#accessor).value() };
+    }
+    if s == "bool" {
+        return quote! { (#accessor) };
+    }
+    // User enum: encode as its u8 discriminant.
+    if let syn::Type::Path(tp) = t
+        && tp.qself.is_none()
+        && let Some(seg) = tp.path.segments.last()
+        && user_enums.contains_key(&seg.ident.to_string())
+    {
+        return quote! { (#accessor).discriminant() };
+    }
+    // `Uint<N>` is a wrapper exposing `.value()`; raw `u*` primitives don't
+    // have `.value()`. Branch on which we're looking at so the cast applies
+    // to the right base expression.
+    if s.starts_with("Uint<") {
+        if let Some(cast) = primitive_cast_for_type(t) {
+            return quote! { ((#accessor).value() #cast) };
         }
-        _ => None,
+        return quote! { (#accessor).value() };
     }
+    if matches!(s.as_str(), "u8" | "u16" | "u32" | "u64") {
+        if let Some(cast) = primitive_cast_for_type(t) {
+            return quote! { ((#accessor) #cast) };
+        }
+        return quote! { (#accessor) };
+    }
+    quote! { (#accessor) }
 }
 
-/// Pick the integer cast (`as u8`, `as u32`, ...) appropriate for a
-/// `Cell<T>` whose `T` is a fixed-width integer wrapper, so the
-/// `AlignedValue::from` we emit matches the wire alignment the contract
-/// expects.
-fn int_cell_init_cast(inner: &syn::Type) -> Option<TokenStream> {
-    let s = quote!(#inner).to_string().replace(' ', "");
+/// Pick the `as u<N>` cast appropriate for fixed-width integer Cell types so
+/// the emitted `AlignedValue::from(_)` chooses the matching `Bytes<N>` atom
+/// width. Mirrors `primitive_cast_for_type` in `transcript_codegen.rs` —
+/// kept local here to avoid a cross-crate visibility shuffle for one
+/// helper.
+fn primitive_cast_for_type(ty: &syn::Type) -> Option<TokenStream> {
+    let s = quote!(#ty).to_string().replace(' ', "");
     if let Some(bits) = s.strip_prefix("Uint<").and_then(|t| t.strip_suffix(">")) {
         let bits: u32 = bits.parse().ok()?;
         return Some(match bits {

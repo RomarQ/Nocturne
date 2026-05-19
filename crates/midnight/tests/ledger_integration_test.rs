@@ -6940,6 +6940,7 @@ mod init_values {
     pub struct InitState {
         pub limit: Cell<u64>,
         pub phase: Cell<Phase>,
+        pub tag: Cell<Bytes<32>>,
         pub seen: Counter,
     }
 
@@ -6949,6 +6950,7 @@ mod init_values {
             Self {
                 limit: Cell::new(42u64),
                 phase: Cell::new(Phase::Running),
+                tag: Cell::new(Bytes::<32>::from_slice("nocturne:v1".as_bytes())),
                 seen: Counter::zero(),
             }
         }
@@ -6971,7 +6973,7 @@ fn constructor_initial_values_flow_into_state_value() {
         panic!("expected StateValue::Array root");
     };
     let collected: Vec<StateValue> = fields.iter().map(|v| (*v).clone()).collect();
-    assert_eq!(collected.len(), 3);
+    assert_eq!(collected.len(), 4);
 
     // Field 0: Cell<u64>(42)
     assert_eq!(
@@ -6987,9 +6989,17 @@ fn constructor_initial_values_flow_into_state_value() {
         "Cell<Phase>::new(Phase::Running) must deploy the variant's discriminant"
     );
 
-    // Field 2: Counter starting at 0.
+    // Field 2: Cell<Bytes<32>>("nocturne:v1" padded with zeros)
+    let expected_tag = midnight::types::Bytes::<32>::from_slice("nocturne:v1".as_bytes());
     assert_eq!(
         collected[2],
+        StateValue::Cell(Sp::new(AlignedValue::from(*expected_tag.as_bytes()))),
+        "Cell<Bytes<32>>::new(Bytes::from_slice(...)) must deploy the padded bytes"
+    );
+
+    // Field 3: Counter starting at 0.
+    assert_eq!(
+        collected[3],
         StateValue::from(0u64),
         "Counter::zero() must deploy as 0"
     );
