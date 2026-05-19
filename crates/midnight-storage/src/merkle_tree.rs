@@ -2,7 +2,9 @@ use crate::LedgerType;
 use midnight_transient_crypto::merkle_tree::{
     self as upstream, MerkleTreeDigest as UpstreamDigest,
 };
-use midnight_types::{Bytes, Field, MerkleTreeDigest};
+use midnight_types::{
+    Boolean, Bytes, MerkleTreeDigest, MerkleTreePath, MerkleTreePathEntry,
+};
 use std::marker::PhantomData;
 
 /// Marker trait for types that can be hashed as Merkle tree leaves.
@@ -123,6 +125,64 @@ impl<const HEIGHT: usize, T: MerkleLeaf> MerkleTree<HEIGHT, T> {
     }
 }
 
+impl<const HEIGHT: usize, T: MerkleLeaf + Clone> MerkleTree<HEIGHT, T> {
+    /// Produce a Merkle inclusion path for the leaf at `index`. The
+    /// returned [`MerkleTreePath`] has exactly `HEIGHT` entries, ordered
+    /// from leaf upward, with sibling digests carrying the full Fr
+    /// representation (the same form the on-chain Root opcode produces).
+    /// Pair this with [`merkle_tree_path_root`](crate::merkle_tree_path_root)
+    /// off-chain or use it directly as a witness in a circuit that
+    /// calls the on-chain `merkle_tree_path_root` primitive.
+    ///
+    /// Panics if `index` is out of bounds for `HEIGHT`. The caller must
+    /// have inserted at least `index + 1` leaves before requesting a
+    /// path for index `index`.
+    pub fn path_for_leaf(&self, index: u64, leaf: T) -> MerkleTreePath<HEIGHT, T> {
+        let bytes = leaf.leaf_bytes().to_vec();
+        let upstream_path = self
+            .inner
+            .path_for_leaf(index, LeafBytes(&bytes))
+            .expect("path_for_leaf: index out of range");
+        assert_eq!(
+            upstream_path.path.len(),
+            HEIGHT,
+            "path_for_leaf: upstream path length must match HEIGHT"
+        );
+
+        let mut entries: Vec<MerkleTreePathEntry> = Vec::with_capacity(HEIGHT);
+        for entry in upstream_path.path {
+            let mut sibling_bytes = [0u8; 32];
+            let le = entry.sibling.0.as_le_bytes();
+            let n = le.len().min(32);
+            sibling_bytes[..n].copy_from_slice(&le[..n]);
+            entries.push(MerkleTreePathEntry::new(
+                MerkleTreeDigest::from_le_bytes(sibling_bytes),
+                Boolean::from(entry.goes_left),
+            ));
+        }
+        let path_arr: [MerkleTreePathEntry; HEIGHT] = entries
+            .try_into()
+            .map_err(|v: Vec<_>| v.len())
+            .expect("path_for_leaf: length already asserted");
+        MerkleTreePath::new(leaf, path_arr)
+    }
+}
+
+/// Adapter that lets `upstream::MerkleTree::path_for_leaf` accept an
+/// owned slice without requiring the leaf type to be `[u8; N]`. Upstream
+/// only impls `BinaryHashRepr` for `[u8]` and `[u8; N]`, so this thin
+/// newtype lets us pass a `Vec<u8>` borrowed as a slice.
+struct LeafBytes<'a>(&'a [u8]);
+
+impl<'a> midnight_base_crypto::repr::BinaryHashRepr for LeafBytes<'a> {
+    fn binary_repr<W: midnight_base_crypto::repr::MemWrite<u8>>(&self, writer: &mut W) {
+        writer.write(self.0);
+    }
+    fn binary_len(&self) -> usize {
+        self.0.len()
+    }
+}
+
 impl<const HEIGHT: usize, T> LedgerType for MerkleTree<HEIGHT, T> {
     /// MerkleTree is the first ledger primitive that requires explicit
     /// constructor emission — its initial state is a non-Null Array, not
@@ -135,25 +195,21 @@ impl<const HEIGHT: usize, T> LedgerType for MerkleTree<HEIGHT, T> {
 }
 
 /// Convert the upstream `MerkleTreeDigest(Fr)` to our user-facing
-/// `MerkleTreeDigest { field: Field }`. The `Field` newtype currently
-/// stores a `u128` (see `midnight-types/src/field.rs`), so this only
-/// preserves the low 128 bits of the Fr. For Phase B that's an accepted
-/// limitation — the user passes their own `MerkleTreeDigest` into
-/// `check_root` so the comparison is consistent off-chain. Phase C and
-/// later will use the full Fr through the on-chain `Root` opcode.
+/// `MerkleTreeDigest`. We preserve the full 32-byte LE Fr representation
+/// so chained computations (`merkle_tree_path_root` + `check_root`,
+/// digest-as-witness) round-trip through the on-chain `Root` opcode.
 fn upstream_digest_to_user(upstream: UpstreamDigest) -> MerkleTreeDigest {
-    // Take the low 16 bytes of the Fr's little-endian encoding.
-    let mut le = upstream.0.as_le_bytes();
-    // `as_le_bytes` returns a Vec<u8>; pad/truncate to 16 bytes for u128.
-    le.resize(16, 0);
-    let mut low = [0u8; 16];
-    low.copy_from_slice(&le[..16]);
-    MerkleTreeDigest::new(Field::from(u128::from_le_bytes(low)))
+    let mut buf = [0u8; 32];
+    let le = upstream.0.as_le_bytes();
+    let n = le.len().min(32);
+    buf[..n].copy_from_slice(&le[..n]);
+    MerkleTreeDigest::from_le_bytes(buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use midnight_types::Field;
 
     #[test]
     fn empty_tree_has_consistent_root() {

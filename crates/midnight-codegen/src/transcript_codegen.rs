@@ -383,15 +383,15 @@ fn generate_op_stmt(
         }
 
         ExprIR::Let { name, value, .. } => {
-            // Strip leading underscores from the user-side name before
-            // prefixing with `_let_`, otherwise `let _v = ...` becomes the
-            // identifier `_let__v` and trips the `non_snake_case` lint with
-            // its double underscore.
-            let stripped = name.to_string();
-            let stripped = stripped.trim_start_matches('_');
-            let var_name = format_ident!("_let_{}", stripped);
+            // Preserve the user-side binding name verbatim so a later
+            // `ExprIR::Var { name }` reference (which lowers to the raw
+            // ident) can find this binding. A user-chosen `_v` keeps the
+            // leading underscore so the `unused_variables` lint is
+            // already satisfied for ignored bindings.
+            let var_name = format_ident!("{}", name.to_string());
             let val_stmt = generate_op_stmt(value, field_names, field_types, witness_types);
             quote! {
+                #[allow(non_snake_case, unused_variables)]
                 let #var_name = {
                     #val_stmt
                 };
@@ -400,17 +400,15 @@ fn generate_op_stmt(
 
         ExprIR::WitnessAccess { field, .. } => {
             // Read the witness value and add it to the private transcript.
+            // The pushed Frs must match the IR's PrivateInputs in count
+            // AND order — see `witness_fr_layout` in zkir_emitter.rs.
             //
-            // Single-Fr witnesses (Boolean/Field/Uint) push `Fr::from(value())`
-            // directly. Multi-Fr witnesses (`Bytes<N>`) build an AlignedValue
-            // from the underlying [u8; N] and use
-            // `AlignedValueExt::value_only_field_repr` to push the right
-            // number of Frs in the same order the IR's PrivateInputs expect
-            // (high-bytes chunk first, then full 31-byte chunks).
-            //
-            // `MerkleTreeDigest` is a thin newtype around `Field`; reach
-            // through `.field().value()` to get the underlying u128 and
-            // lift it to Fr the same way Cell<Field>::set does.
+            // Single-Fr witnesses (Boolean/Field/Uint) push
+            // `Fr::from(value())` directly. Multi-Fr witnesses (`Bytes<N>`)
+            // build an AlignedValue from the underlying [u8; N] and use
+            // `AlignedValueExt::value_only_field_repr`. `MerkleTreeDigest`
+            // is a newtype around `Field` so reach through `.field().value()`.
+            // `MerkleTreePath<H, T>` deconstructs into leaf + path entries.
             let field_ident = format_ident!("{}", field.to_string());
             let field_str = field.to_string();
             let witness_ty = witness_types.get(&field_str);
@@ -423,8 +421,35 @@ fn generate_op_stmt(
                     }
                 }
             } else if witness_ty.map(is_merkle_tree_digest).unwrap_or(false) {
+                // Reconstruct the full Fr from the digest's 32-byte LE
+                // representation. Truncating through `.field().value()`
+                // would discard the upper bits and break proof
+                // verification when the digest came from a real Merkle
+                // computation (e.g. `MerkleTree::root()`).
                 quote! {
-                    private_transcript.push(Fr::from(witnesses.#field_ident.field().value()));
+                    private_transcript.push(
+                        Fr::from_le_bytes(&witnesses.#field_ident.as_le_bytes())
+                            .expect("MerkleTreeDigest bytes round-trip through Fr"),
+                    );
+                }
+            } else if witness_ty.map(is_merkle_tree_path).unwrap_or(false) {
+                quote! {
+                    {
+                        use midnight::runtime::transient_crypto::fab::AlignedValueExt;
+                        // Leaf: same multi-Fr push as a Bytes<N> witness.
+                        let __av = AlignedValue::from(
+                            *witnesses.#field_ident.leaf.as_bytes()
+                        );
+                        __av.value_only_field_repr(&mut private_transcript);
+                        // Each entry: full-Fr sibling + 1 Fr goes_left.
+                        for __entry in witnesses.#field_ident.path.iter() {
+                            private_transcript.push(
+                                Fr::from_le_bytes(&__entry.sibling.as_le_bytes())
+                                    .expect("MerkleTreeDigest bytes round-trip through Fr"),
+                            );
+                            private_transcript.push(Fr::from(__entry.goes_left.value() as u64));
+                        }
+                    }
                 }
             } else {
                 quote! {
@@ -448,6 +473,42 @@ fn generate_op_stmt(
             // behavior is generated elsewhere; this arm is just about
             // side effects on the transcript builder's state.
             generate_op_stmt(receiver, field_names, field_types, witness_types)
+        }
+
+        // Free-function calls used as RHS of `let` or as standalone
+        // statements. The transcript side must:
+        //   (a) emit private-transcript pushes for any witness args, and
+        //   (b) yield a runtime Rust expression that evaluates to the
+        //       same value the IR computes — so the resulting `let` binds
+        //       a real value the surrounding code can pass into ledger
+        //       method calls (e.g. `check_root(&computed)`).
+        ExprIR::FnCall { name, args, .. } => {
+            // Emit witness pushes from any path-typed args first.
+            let witness_emits: Vec<TokenStream> = args
+                .iter()
+                .map(|a| generate_op_stmt(a, field_names, field_types, witness_types))
+                .collect();
+            let name_str = name.to_string();
+            let value_expr = match name_str.as_str() {
+                "merkle_tree_path_root" => {
+                    let arg = args
+                        .first()
+                        .map(arg_to_runtime_raw_expr)
+                        .unwrap_or_else(|| quote! { () });
+                    quote! { midnight::types::merkle_tree_path_root(&#arg) }
+                }
+                _ => quote! { () },
+            };
+            quote! {
+                #(#witness_emits)*
+                #value_expr
+            }
+        }
+
+        // Reference (`&expr`) forwards to its inner so side effects
+        // bubble up through `&witnesses.path` etc.
+        ExprIR::Reference { expr: inner, .. } => {
+            generate_op_stmt(inner, field_names, field_types, witness_types)
         }
 
         _ => quote! {},
@@ -816,12 +877,20 @@ fn is_bytes_witness(ty: &syn::Type) -> bool {
     ty_str.starts_with("Bytes<")
 }
 
-/// True if `ty` is `MerkleTreeDigest`. The witness push has to reach
-/// through `.field().value()` instead of the usual `.value()` because
-/// `MerkleTreeDigest` is a thin newtype around `Field`.
+/// True if `ty` is `MerkleTreeDigest`. The witness push reaches through
+/// `.as_le_bytes()` (canonical 32-byte LE Fr) so the in-circuit
+/// PrivateInput sees the full 254-bit Fr, not a u128 truncation.
 fn is_merkle_tree_digest(ty: &syn::Type) -> bool {
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     ty_str == "MerkleTreeDigest"
+}
+
+/// True if `ty` is `MerkleTreePath<H, T>` for some H, T. The witness push
+/// deconstructs into the leaf's Fr stream followed by H × (sibling Fr +
+/// goes_left Fr) — matching the IR's `witness_fr_layout` expansion.
+fn is_merkle_tree_path(ty: &syn::Type) -> bool {
+    let ty_str = quote!(#ty).to_string().replace(' ', "");
+    ty_str.starts_with("MerkleTreePath<")
 }
 
 /// Map a Rust type that flows into `AlignedValue::from(_)` to the primitive
@@ -993,12 +1062,14 @@ fn generate_merkle_tree_check_root(
         .first()
         .map(arg_to_runtime_raw_expr)
         .unwrap_or_else(|| quote! { () });
-    // Convert the user's `&MerkleTreeDigest` to the Fr the Push needs.
-    // `(&digest).field().value()` gives a u128; `Fr::from(u128)` lifts it
-    // to a Field-aligned Fr — same path Cell<Field>::set uses.
+    // Push the user's `&MerkleTreeDigest` as the full 254-bit Fr (NOT
+    // the u128 truncation), so the on-chain `Eq` compares the same
+    // value the verifier reconstructs from the Root opcode.
     quote! {
         {
             let __digest = #raw_digest;
+            let __digest_fr = Fr::from_le_bytes(&(&__digest).as_le_bytes())
+                .expect("MerkleTreeDigest bytes round-trip through Fr");
             ops.push(Op::Dup { n: 0 });
             ops.push(Op::Idx {
                 cached: false,
@@ -1013,9 +1084,7 @@ fn generate_merkle_tree_check_root(
             ops.push(Op::Root);
             ops.push(Op::Push {
                 storage: false,
-                value: StateValue::Cell(Sp::new(AlignedValue::from(
-                    Fr::from((&__digest).field().value()),
-                ))),
+                value: StateValue::Cell(Sp::new(AlignedValue::from(__digest_fr))),
             });
             ops.push(Op::Eq);
             let __result: bool = state.#field_ident.check_root(&__digest);
@@ -1203,6 +1272,24 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
                         args.iter().map(arg_to_runtime_raw_expr).collect();
                     quote! { #r.#m_ident(#(#arg_exprs),*) }
                 }
+            }
+        }
+        // Free-function calls — map known builtins to their Rust form.
+        // `merkle_tree_path_root` returns a `MerkleTreeDigest` that
+        // ledger methods like `check_root` can accept as `&MerkleTreeDigest`.
+        ExprIR::FnCall { name, args, .. } => {
+            let name_str = name.to_string();
+            match name_str.as_str() {
+                "merkle_tree_path_root" => {
+                    let arg = args
+                        .first()
+                        .map(arg_to_runtime_raw_expr)
+                        .unwrap_or_else(|| quote! { () });
+                    // The off-chain helper lives in midnight-storage; the
+                    // umbrella crate re-exports it via `midnight::types`.
+                    quote! { midnight::types::merkle_tree_path_root(&#arg) }
+                }
+                _ => quote! { () },
             }
         }
         // For anything else, fall back to the value-unwrapped form.

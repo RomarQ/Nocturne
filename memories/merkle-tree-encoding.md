@@ -156,7 +156,7 @@ A reasonable phased implementation, smallest first:
 | **B** | `MerkleTree<H, T>` storage type + `MerkleTreeDigest` type | `MerkleTree<H, T>: LedgerType { requires_init = true, ... }`; off-chain root() that matches on-chain Root opcode semantics | **landed** (see below) |
 | **C** | `MerkleTree::checkRoot` end-to-end | Phase A + B; `Root` and `Eq` opcodes in zkir_emitter / transcript_codegen; e2e test with empty tree | **landed** (see below) |
 | **D** | `MerkleTree::insert` end-to-end | `Dup{n:k}` for arbitrary k; `Ins{cached:true, n:2}`; `persistent_hash` with `"mdn:lh"` domain separator; multi-level Idx chains; e2e test | **landed** (see below) |
-| **E** | `MerkleTreePath<H, T>` + `merkleTreePathRoot` | Pure circuit primitive; uses existing `persistent_hash` machinery; user-side witness type | pending |
+| **E** | `MerkleTreePath<H, T>` + `merkleTreePathRoot` | Pure circuit primitive; uses existing `persistent_hash` machinery; user-side witness type | **landed** (see below) |
 
 Each phase is roughly the scope of the Set or Cell::set work we've already shipped — together they're 3-5 sessions of focused work.
 
@@ -202,6 +202,26 @@ Implemented 2026-05-19:
 E2E test: `mt_insert_proves_and_verifies` — inserts a single `Bytes<32>` leaf into an empty `MerkleTree<10, Bytes<32>>` and confirms the 10-op transcript proves and verifies via the canonical ledger preimage path.
 
 Constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` state is still deferred — the e2e tests build state through Rust's `MerkleTree::empty()` (which mirrors the on-chain initial shape via the upstream `MerkleTree<()>` wrapper), and `construct_proof` doesn't execute on-chain VM ops, so insert proves+verifies against the canonical preimage path without explicit constructor emission.
+
+### Phase E notes
+
+Implemented 2026-05-19:
+
+- **Storage types**: `MerkleTreePath<H, T>`, `MerkleTreePathEntry { sibling, goes_left }` in `midnight-types`. Off-chain helper `merkle_tree_path_root` in `midnight-storage` mirrors the upstream `MerklePath::root()` (`transient-crypto/src/merkle_tree.rs:138-149`). `MerkleTree::path_for_leaf(index, leaf)` wraps upstream's `path_for_leaf` and converts to `MerkleTreePath<H, T>`.
+
+- **Full-Fr digest representation**. `MerkleTreeDigest` was refactored from `{ field: Field }` (u128-truncated) to `{ bytes: [u8; 32] }` — canonical 32-byte LE Fr. `.field()` still returns the low 128 bits for ergonomic equality against `Field::from(0xDEAD)` style synthetic test digests. The truncation was load-bearing for the chained `merkle_tree_path_root → check_root` flow: the in-circuit Push and the in-circuit Root opcode operate on full Frs, so the witness side has to transmit the full Fr or `Eq` rejects.
+
+- **Witness expansion** in `transcript_codegen.rs::generate_op_stmt::WitnessAccess`: a `MerkleTreePath<H, Bytes<N>>` witness deconstructs into the leaf's `value_only_field_repr` (multi-Fr) followed by `H * (sibling Fr, goes_left Fr)`. `MerkleTreeDigest` witnesses push the full Fr via `Fr::from_le_bytes(&digest.as_le_bytes()).unwrap()` (NOT `.field().value()`).
+
+- **IR codegen** (`zkir_emitter.rs::emit_merkle_tree_path_root`): emits the compactc 0.30.0 shape from `/tmp/mt-experiments/out2/zkir/check_path.zkir` — `persistent_hash` with the `"mdn:lh"` domain separator + `degrade_to_transient` (pick `field_vec()[1]` of the 2-Fr persistent hash) + unrolled `cond_select` swap + `transient_hash` per entry. The IR's accumulator stays a full Fr; the resulting Index is returned as the digest value the user-side `let computed = merkle_tree_path_root(&w.path)` binding evaluates to.
+
+- **Transcript Let binding**: dropped the `_let_<name>` prefix on `let` lowering — both `ExprIR::Let` and `ExprIR::Var` now use the raw user-side identifier, so `let computed = ...; foo(&computed)` actually finds the binding. The previous `_let_` prefix was a stale leftover from before `Var` lookups were exercised by any e2e test. `#[allow(non_snake_case, unused_variables)]` covers the user-chosen name surface (e.g. `let _ok = ...`).
+
+- **`check_root` digest Push** (transcript codegen): pushes `Fr::from_le_bytes(&digest.as_le_bytes()).unwrap()` instead of `Fr::from(digest.field().value())`. Existing `mt_check_root_matches_empty_tree` and `mt_check_root_mismatch` still pass because the test-side `private_outputs` now carries the same full-Fr representation through `AlignedValue::from(Fr::from(...))` paths that round-trip correctly.
+
+E2E test: `mt_verify_path_proves_and_verifies` — inserts a leaf, asks the tree for its inclusion path, witnesses the path, computes the path root in-circuit, compares against the on-chain `Root` opcode result via `check_root`. Popeq result is `true`. Prove + verify succeed end-to-end.
+
+Limitation: today the IR codegen for `merkle_tree_path_root` only supports `Bytes<32>` leaves (`leaf_fr_count != 2` returns None). Other `Bytes<N>` sizes would work mechanically but the persistent_hash alignment hasn't been validated.
 
 ## Files implicated for any implementation
 

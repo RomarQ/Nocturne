@@ -9,12 +9,14 @@ mod boolean;
 mod bytes;
 mod field;
 mod merkle_tree_digest;
+mod merkle_tree_path;
 mod uint;
 
 pub use boolean::Boolean;
 pub use bytes::Bytes;
 pub use field::Field;
 pub use merkle_tree_digest::MerkleTreeDigest;
+pub use merkle_tree_path::{MerkleTreePath, MerkleTreePathEntry};
 pub use uint::Uint;
 
 /// Marker trait for types that can be represented in a ZK circuit.

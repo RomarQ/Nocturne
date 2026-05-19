@@ -301,33 +301,32 @@ impl ZkirEmitter {
                 }
                 let ty = self.witness_types.get(&field.to_string()).cloned();
 
-                // Multi-Fr witnesses (currently just `Bytes<N>` for N>0)
-                // expand to one PrivateInput per Fr the value's
-                // `value_only_field_repr` emits, with a per-chunk ConstrainBits
-                // that matches the corresponding byte width. The chunk order
-                // mirrors `field_repr_unchecked` for `Bytes{N}` (which
-                // reverses 31-byte chunks), so the IR's PrivateInputs and the
-                // transcript's `value_only_field_repr` output land in the
-                // same order.
+                // Each Fr of the witness gets its own PrivateInput plus a
+                // per-Fr constraint. Mixed-shape witnesses (e.g.
+                // `MerkleTreePath<H, T>`) emit a different constraint per
+                // Fr — bits for the leaf chunks, none for sibling fields,
+                // boolean for goes_left flags — so the layout describes
+                // each Fr's constraint type rather than a uniform width.
                 let layout = ty
                     .as_ref()
                     .map(witness_fr_layout)
-                    .unwrap_or_else(|| vec![None]);
+                    .unwrap_or_else(|| vec![FrLayout::Field]);
                 let mut first_idx = None;
-                for bits in layout {
+                for entry in layout {
                     let var = self.emit_instruction(Instruction::PrivateInput {
                         guard: self.current_io_guard(),
                     });
                     if first_idx.is_none() {
                         first_idx = Some(var);
                     }
-                    if let Some(b) = bits {
-                        self.instructions
-                            .push(Instruction::ConstrainBits { var, bits: b });
-                    } else if let Some(t) = &ty {
-                        // Fall back to type-dispatched constraint for single-Fr
-                        // types (Boolean → ConstrainToBoolean, etc.).
-                        self.emit_type_constraint(var, t);
+                    match entry {
+                        FrLayout::Bits(b) => self
+                            .instructions
+                            .push(Instruction::ConstrainBits { var, bits: b }),
+                        FrLayout::Boolean => self
+                            .instructions
+                            .push(Instruction::ConstrainToBoolean { var }),
+                        FrLayout::Field => {}
                     }
                 }
                 let first = first_idx.expect("at least one PrivateInput per witness");
@@ -488,6 +487,16 @@ impl ZkirEmitter {
 
             ExprIR::FnCall { name, args, .. } => {
                 let name_str = name.to_string();
+
+                // `merkle_tree_path_root(&path)` must inspect args[0]
+                // BEFORE evaluating it, because the unrolled fold needs
+                // to know the path height (H) from the witness type.
+                // Evaluating args[0] only yields the first var Index;
+                // it doesn't carry the type.
+                if name_str == "merkle_tree_path_root" {
+                    return self.emit_merkle_tree_path_root(args);
+                }
+
                 let arg_indices: Vec<Index> =
                     args.iter().filter_map(|a| self.emit_expr(a)).collect();
 
@@ -1179,6 +1188,105 @@ impl ZkirEmitter {
         None
     }
 
+    /// Emit ZKIR for `merkle_tree_path_root(&witnesses.path)`. Pure
+    /// circuit primitive (no ledger ops, no transcript declares) — just
+    /// computes the Merkle root from the path's leaf and sibling chain.
+    ///
+    /// Matches compactc 0.30.0's emission for `merkleTreePathRoot<H, T>`
+    /// (see `/tmp/mt-experiments/out2/zkir/check_path.zkir`):
+    ///
+    /// ```text
+    /// persistent_hash([Bytes{6}, Bytes{32}], [domain_sep, leaf_0, leaf_1])  // → 2 Frs
+    /// acc = persistent_hash_result[1]                                        // degrade_to_transient
+    /// for i in 0..H:
+    ///   left  = cond_select(goes_left[i], acc, sibling[i])
+    ///   right = cond_select(goes_left[i], sibling[i], acc)
+    ///   acc   = transient_hash(left, right)
+    /// // acc is the root
+    /// ```
+    ///
+    /// Today this is specialized to `Bytes<32>` leaves — same as
+    /// `emit_merkle_tree_insert`. The argument must be a witness of
+    /// type `MerkleTreePath<H, Bytes<N>>` whose layout the IR can
+    /// parse from `self.witness_types`.
+    fn emit_merkle_tree_path_root(
+        &mut self,
+        args: &[midnight_ir::ExprIR],
+    ) -> Option<Index> {
+        use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment};
+
+        // Drill through `Reference` to find the WitnessAccess.
+        let arg = args.first()?;
+        let path_witness_field = find_witness_field(arg)?;
+        let path_ty = self
+            .witness_types
+            .get(&path_witness_field)
+            .cloned()?;
+        let path_ty_str = quote::quote!(#path_ty).to_string().replace(' ', "");
+        let (height, leaf_ty_str) = parse_merkle_tree_path_type(&path_ty_str)?;
+        // Today only Bytes<N> leaves are supported by the IR codegen;
+        // the storage helper accepts any MerkleLeaf.
+        let leaf_n = parse_bytes_n_type(&leaf_ty_str)?;
+        let leaf_fr_count = leaf_n.div_ceil(FR_BYTES_STORED) as usize;
+        if leaf_fr_count != 2 {
+            // Only Bytes<32> (= 2 Fr leaf) is exercised by the e2e
+            // tests. Other Bytes<N> sizes would work mechanically but
+            // we haven't validated the persistent_hash alignment for
+            // them; punt for now.
+            return None;
+        }
+
+        // Emit the witness PrivateInputs by evaluating the arg.
+        let first_var = self.emit_expr(arg)?;
+        // Layout (matching `witness_fr_layout`):
+        //   first_var + 0..2     → leaf chunks
+        //   first_var + 2 + 2i   → sibling i (Field, no constraint)
+        //   first_var + 2 + 2i+1 → goes_left i (Boolean)
+        let leaf_chunks = gather_n_vars(first_var, leaf_fr_count);
+        let mut entry_vars = Vec::with_capacity(height as usize);
+        for i in 0..(height as usize) {
+            let base = first_var + (leaf_fr_count as u32) + 2 * (i as u32);
+            entry_vars.push((base, base + 1)); // (sibling, goes_left)
+        }
+
+        // persistent_hash with the "mdn:lh" domain separator.
+        // Alignment [Bytes{6}, Bytes{32}], inputs [domain_sep, leaf...].
+        let domain_sep = self.emit_load_imm(domain_sep_fr_mdn_lh());
+        let alignment = Alignment(vec![
+            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 6 }),
+            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
+        ]);
+        let mut hash_inputs = vec![domain_sep];
+        hash_inputs.extend(leaf_chunks.iter().copied());
+        let hash_first = self.emit_instruction(Instruction::PersistentHash {
+            alignment,
+            inputs: hash_inputs,
+        });
+        // PersistentHash outputs 2 Frs; degrade_to_transient picks the
+        // SECOND one (`persistent.field_vec()[1]`, see
+        // `transient-crypto/src/hash.rs:71-73`).
+        let mut acc = hash_first + 1;
+
+        // Unrolled fold: for each entry, cond_select-swap then transient_hash.
+        for (sibling, goes_left) in entry_vars {
+            let left = self.emit_instruction(Instruction::CondSelect {
+                bit: goes_left,
+                a: acc,
+                b: sibling,
+            });
+            let right = self.emit_instruction(Instruction::CondSelect {
+                bit: goes_left,
+                a: sibling,
+                b: acc,
+            });
+            acc = self.emit_instruction(Instruction::TransientHash {
+                inputs: vec![left, right],
+            });
+        }
+
+        Some(acc)
+    }
+
     /// Emit a `Push { storage, value: StateValue::Null }` group — used by
     /// Set::insert for the value slot. `Null` encodes as a single field
     /// element `0` (`state.rs::field_repr` line 176), so the group is
@@ -1806,42 +1914,134 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
 /// (must mirror `transient_crypto::curve::FR_BYTES_STORED` = `FR_BYTES - 1`).
 const FR_BYTES_STORED: u32 = 31;
 
-/// Per-Fr bit layout for a witness type, in the order PrivateInputs are
-/// emitted (matching `AlignedValueExt::value_only_field_repr`).
+/// Per-Fr constraint kind for one PrivateInput in a witness's expansion.
 ///
-/// Returns `Some(bits)` to apply `ConstrainBits { var, bits }` to that Fr.
-/// Returns `None` to use the generic type-dispatched constraint (for
-/// Boolean/Field/Uint).
+/// Multi-Fr witnesses with non-uniform constraints (e.g.
+/// `MerkleTreePath<H, T>`) interleave these — bits for leaf bytes,
+/// nothing for sibling Fields, boolean for goes_left flags.
+#[derive(Debug, Clone, Copy)]
+enum FrLayout {
+    /// Apply `ConstrainBits { var, bits }`.
+    Bits(u32),
+    /// Apply `ConstrainToBoolean { var }`.
+    Boolean,
+    /// No constraint (native field element — `Field`, `MerkleTreeDigest`).
+    Field,
+}
+
+/// Per-Fr layout for a witness type, in the order PrivateInputs are
+/// emitted (matching `AlignedValueExt::value_only_field_repr` on the
+/// runtime side).
 ///
 /// `Bytes<N>` uses `FieldRepr` chunk-and-reverse semantics: `chunks(31)`
-/// then `.rev()`. The first emitted Fr is the high-bytes chunk (the tail
-/// of the original byte string), whose size is `N % 31` if that's
+/// then `.rev()`. The first emitted Fr is the high-bytes chunk (the
+/// tail of the original byte string), whose size is `N % 31` if that's
 /// non-zero, otherwise `31`. Each subsequent Fr is a full 31-byte chunk.
-fn witness_fr_layout(ty: &syn::Type) -> Vec<Option<u32>> {
+///
+/// `MerkleTreePath<H, T>` expands as `T`'s leaf layout followed by H
+/// repetitions of `[Field, Boolean]` (one sibling + one goes_left per
+/// path entry).
+fn witness_fr_layout(ty: &syn::Type) -> Vec<FrLayout> {
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
-    if let Some(n) = ty_str
-        .strip_prefix("Bytes<")
-        .and_then(|s| s.strip_suffix('>'))
-        .and_then(|s| s.parse::<u32>().ok())
-    {
-        let mut layout = Vec::new();
-        let chunks = n.div_ceil(FR_BYTES_STORED);
-        // First chunk (high portion after .rev()).
-        let first_bytes = n % FR_BYTES_STORED;
-        let first_bytes = if first_bytes == 0 {
-            FR_BYTES_STORED
-        } else {
-            first_bytes
-        };
-        layout.push(Some(first_bytes * 8));
-        // Remaining chunks are always full FR_BYTES_STORED bytes.
-        for _ in 1..chunks {
-            layout.push(Some(FR_BYTES_STORED * 8));
+
+    if let Some(n) = parse_bytes_n_type(&ty_str) {
+        return bytes_n_layout(n);
+    }
+
+    if ty_str == "Boolean" || ty_str == "bool" {
+        return vec![FrLayout::Boolean];
+    }
+
+    if ty_str == "Field" || ty_str == "MerkleTreeDigest" {
+        return vec![FrLayout::Field];
+    }
+
+    if let Some(bits) = parse_uint_type(&ty_str) {
+        return vec![FrLayout::Bits(bits)];
+    }
+
+    if let Some((h, t)) = parse_merkle_tree_path_type(&ty_str) {
+        let mut layout = witness_fr_layout_for_leaf_type(&t);
+        // Each path entry: 1 sibling Field + 1 goes_left Boolean.
+        for _ in 0..h {
+            layout.push(FrLayout::Field);
+            layout.push(FrLayout::Boolean);
         }
         return layout;
     }
-    // Single-Fr fallback: delegate to emit_type_constraint via None.
-    vec![None]
+
+    if ty_str == "MerkleTreePathEntry" {
+        return vec![FrLayout::Field, FrLayout::Boolean];
+    }
+
+    // Unknown type → single Fr with no constraint. Callers can still
+    // emit something, but the prover side likely won't agree.
+    vec![FrLayout::Field]
+}
+
+/// Layout for a `Bytes<N>` value used as a Merkle tree leaf.
+fn witness_fr_layout_for_leaf_type(t_str: &str) -> Vec<FrLayout> {
+    if let Some(n) = parse_bytes_n_type(t_str) {
+        bytes_n_layout(n)
+    } else {
+        vec![FrLayout::Field]
+    }
+}
+
+fn bytes_n_layout(n: u32) -> Vec<FrLayout> {
+    let mut layout = Vec::new();
+    let chunks = n.div_ceil(FR_BYTES_STORED);
+    let first_bytes = n % FR_BYTES_STORED;
+    let first_bytes = if first_bytes == 0 {
+        FR_BYTES_STORED
+    } else {
+        first_bytes
+    };
+    layout.push(FrLayout::Bits(first_bytes * 8));
+    for _ in 1..chunks {
+        layout.push(FrLayout::Bits(FR_BYTES_STORED * 8));
+    }
+    layout
+}
+
+fn parse_bytes_n_type(ty_str: &str) -> Option<u32> {
+    ty_str
+        .strip_prefix("Bytes<")
+        .and_then(|s| s.strip_suffix('>'))
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+}
+
+fn parse_uint_type(ty_str: &str) -> Option<u32> {
+    if let Some(n) = ty_str
+        .strip_prefix("Uint<")
+        .and_then(|s| s.strip_suffix('>'))
+    {
+        return n.parse::<u32>().ok();
+    }
+    match ty_str {
+        "u8" => Some(8),
+        "u16" => Some(16),
+        "u32" => Some(32),
+        "u64" => Some(64),
+        "u128" => Some(128),
+        _ => None,
+    }
+}
+
+/// Parse `MerkleTreePath<H, T>` → `(H, T_str)`. Returns `None` if `ty_str`
+/// doesn't have that shape.
+fn parse_merkle_tree_path_type(ty_str: &str) -> Option<(u32, String)> {
+    let inner = ty_str
+        .strip_prefix("MerkleTreePath<")
+        .and_then(|s| s.strip_suffix('>'))?;
+    // Inner is "H,T" where T may itself contain commas (e.g. for nested
+    // generics). For our cases T is `Bytes<N>` which has angle brackets
+    // but no top-level commas, so a simple find-first works.
+    let comma_pos = inner.find(',')?;
+    let h: u32 = inner[..comma_pos].trim().parse().ok()?;
+    let t = inner[comma_pos + 1..].trim().to_string();
+    Some((h, t))
 }
 
 /// Build a contiguous `[first, first + n)` slice of var indices. Used by
@@ -1969,6 +2169,18 @@ fn extract_map_kv_types(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
         return Some((k, v));
     }
     None
+}
+
+/// Drill through `ExprIR::Reference` wrappers to find the `WitnessAccess`
+/// field name. Used by `emit_merkle_tree_path_root` to look up the
+/// witness's declared type and parse the path height.
+fn find_witness_field(expr: &midnight_ir::ExprIR) -> Option<String> {
+    use midnight_ir::ExprIR;
+    match expr {
+        ExprIR::WitnessAccess { field, .. } => Some(field.to_string()),
+        ExprIR::Reference { expr: inner, .. } => find_witness_field(inner),
+        _ => None,
+    }
 }
 
 /// The Fr immediate compactc emits for the `"mdn:lh"` leaf-hash domain

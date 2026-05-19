@@ -4100,3 +4100,154 @@ async fn mt_insert_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for MerkleTree::insert");
 }
+
+// ---------------------------------------------------------------------------
+// Phase E.3: `merkle_tree_path_root` as a circuit primitive — chained with
+// `check_root` so the verifier sees a single bool publicly committing to
+// "the witnessed path is a valid inclusion proof for the on-chain tree
+// root". Exercises the full pipeline:
+//   - `MerkleTreePath<H, Bytes<32>>` witness expansion (leaf bytes + H
+//     entries of (sibling Fr, goes_left Fr))
+//   - PersistentHash with the "mdn:lh" domain separator
+//   - Unrolled cond_select + transient_hash fold over H entries
+//   - The full-Fr digest representation: siblings travel as 32-byte LE
+//     Fr through the witness so the in-circuit and on-chain accumulators
+//     agree on every chunk.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod mt_verify_path {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MtVerifyPathState {
+        pub entries: MerkleTree<3, Bytes<32>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MtVerifyPathWitnesses {
+        pub path: MerkleTreePath<3, Bytes<32>>,
+    }
+
+    impl MtVerifyPathState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                entries: MerkleTree::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn verify_path(&self, witnesses: &MtVerifyPathWitnesses) {
+            let computed = merkle_tree_path_root(&witnesses.path);
+            let _ok = self.entries.check_root(&computed);
+        }
+    }
+}
+
+fn build_mt_verify_path_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod mt_verify_path {
+            #[midnight(ledger)]
+            pub struct MtVerifyPathState { entries: MerkleTree<3, Bytes<32>> }
+            #[midnight(witnesses)]
+            pub struct MtVerifyPathWitnesses {
+                pub path: MerkleTreePath<3, Bytes<32>>,
+            }
+            impl MtVerifyPathState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
+                #[midnight(circuit)]
+                pub fn verify_path(&self, witnesses: &MtVerifyPathWitnesses) {
+                    let computed = merkle_tree_path_root(&witnesses.path);
+                    let _ok = self.entries.check_root(&computed);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "verify_path")
+        .unwrap()
+        .ir_source
+}
+
+/// Path verification end-to-end: insert a leaf at index 0, ask the
+/// tree for the inclusion path, then prove the witnessed path roots up
+/// to the same digest the on-chain `Root` opcode produces. The popeq
+/// result is `true`.
+#[tokio::test]
+async fn mt_verify_path_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_mt_verify_path_ir();
+
+    // Build a tree with one leaf at index 0 and extract its inclusion
+    // path. The path's `root()` (off-chain) must equal `tree.root()`
+    // (off-chain), and the in-circuit computation must agree with both.
+    let mut state = mt_verify_path::MtVerifyPathState::new();
+    let leaf = Bytes::<32>::from([0x42u8; 32]);
+    state.entries.insert(&leaf);
+    let path = state.entries.path_for_leaf(0, leaf.clone());
+
+    // Sanity: off-chain helper agrees with the tree's own root.
+    assert_eq!(
+        midnight::types::merkle_tree_path_root(&path),
+        state.entries.root(),
+        "off-chain merkle_tree_path_root must match tree.root() for the inserted leaf",
+    );
+
+    let witnesses = mt_verify_path::MtVerifyPathWitnesses {
+        path: path.clone(),
+    };
+    let nocturne_transcript =
+        mt_verify_path::transcript::build_verify_path_transcript(&state, &witnesses);
+
+    // The IR consumes the path as PrivateInputs in the same order the
+    // transcript builder pushes them: leaf bytes first (Bytes<32> → 2
+    // Frs), then for each entry (sibling Fr, goes_left bool). Each
+    // AlignedValue is value_only_field_repr'd into preimage.private_transcript
+    // by ContractCallPrototype::construct_proof.
+    let mut private_outputs: Vec<AlignedValue> = Vec::new();
+    private_outputs.push(AlignedValue::from([0x42u8; 32]));
+    for entry in path.path.iter() {
+        let sibling_fr = Fr::from_le_bytes(&entry.sibling.as_le_bytes())
+            .expect("sibling digest bytes round-trip through Fr");
+        private_outputs.push(AlignedValue::from(sibling_fr));
+        private_outputs.push(AlignedValue::from(entry.goes_left.value()));
+    }
+    let preimage = canonical_preimage(
+        "verify_path",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for merkle_tree_path_root + check_root"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for merkle_tree_path_root + check_root");
+}
