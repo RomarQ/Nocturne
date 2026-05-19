@@ -102,6 +102,11 @@ mod bytes_cell {
         pub fn rotate_digest(&mut self, witnesses: &BytesCellWitnesses) {
             self.digest.set(witnesses.new_digest.clone());
         }
+
+        #[midnight(circuit)]
+        pub fn peek_digest(&self) {
+            let _d = self.digest.get();
+        }
     }
 }
 
@@ -336,7 +341,7 @@ fn build_read_stored_ir() -> midnight_zkir::IrSource {
         .ir_source
 }
 
-fn build_rotate_digest_ir() -> midnight_zkir::IrSource {
+fn build_bytes_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use midnight_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_cell {
@@ -351,6 +356,10 @@ fn build_rotate_digest_ir() -> midnight_zkir::IrSource {
                 pub fn rotate_digest(&mut self, witnesses: &BytesCellWitnesses) {
                     self.digest.set(witnesses.new_digest.clone());
                 }
+                #[midnight(circuit)]
+                pub fn peek_digest(&self) {
+                    let _d = self.digest.get();
+                }
             }
         }
     };
@@ -359,9 +368,17 @@ fn build_rotate_digest_ir() -> midnight_zkir::IrSource {
     output
         .circuits
         .into_iter()
-        .find(|c| c.circuit_name == "rotate_digest")
+        .find(|c| c.circuit_name == circuit_name)
         .unwrap()
         .ir_source
+}
+
+fn build_rotate_digest_ir() -> midnight_zkir::IrSource {
+    build_bytes_cell_circuit_ir("rotate_digest")
+}
+
+fn build_peek_digest_ir() -> midnight_zkir::IrSource {
+    build_bytes_cell_circuit_ir("peek_digest")
 }
 
 fn build_take_digest_ir() -> midnight_zkir::IrSource {
@@ -1170,4 +1187,49 @@ async fn cell_bytes32_set_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell<Bytes<32>>::set");
+}
+
+/// Confirms `Cell<Bytes<32>>::get()` produces an on-chain compatible
+/// transcript: the Popeq emits the full multi-Fr result encoding
+/// `[0x0d, 1, 32, fr_high, fr_low]`. The state's stored Bytes<32> is
+/// seeded via `Cell::set` off-chain and the transcript builder reads it
+/// back through `state.digest.get()` for the Popeq result.
+#[tokio::test]
+async fn cell_bytes32_get_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_peek_digest_ir();
+    let mut state = bytes_cell::BytesCellState::new();
+    // Seed the Cell so the read returns a non-trivial value.
+    state.digest.set(Bytes::<32>::from([0xCDu8; 32]));
+    let nocturne_transcript = bytes_cell::transcript::build_peek_digest_transcript(&state);
+
+    // No witnesses — the read result comes back through
+    // public_transcript_outputs, populated automatically from each
+    // Op::Popeq's `result` by construct_proof.
+    let preimage = canonical_preimage("peek_digest", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Cell<Bytes<32>>::get"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<Bytes<32>>::get");
 }

@@ -253,11 +253,26 @@ fn generate_op_stmt(
                         // surfaces because the verifier will reject the proof.
                         _ => (quote! { 0u8 }, None),
                     };
-                    let cast = result_ty
-                        .as_ref()
-                        .and_then(primitive_cast_for_type)
-                        .map(|c| quote! { (#accessor) #c })
-                        .unwrap_or_else(|| quote! { #accessor });
+                    // Choose the AlignedValue construction expression based
+                    // on whether T is a multi-Fr `Bytes<N>` or a single-Fr
+                    // primitive. Same logic as Cell::set's value side, but
+                    // here the input is `state.<f>.get()` (a wrapper) rather
+                    // than a user argument.
+                    let aligned_arg = match result_ty.as_ref() {
+                        Some(t)
+                            if {
+                                let s = quote!(#t).to_string().replace(' ', "");
+                                s.starts_with("Bytes<")
+                            } =>
+                        {
+                            quote! { *(#accessor).as_bytes() }
+                        }
+                        Some(t) => match primitive_cast_for_type(t) {
+                            Some(c) => quote! { (#accessor) #c },
+                            None => quote! { #accessor },
+                        },
+                        None => quote! { #accessor },
+                    };
                     quote! {
                         ops.push(Op::Dup { n: 0 });
                         ops.push(Op::Idx {
@@ -267,7 +282,7 @@ fn generate_op_stmt(
                         });
                         ops.push(Op::Popeq {
                             cached: true,
-                            result: AlignedValue::from(#cast),
+                            result: AlignedValue::from(#aligned_arg),
                         });
                     }
                 }

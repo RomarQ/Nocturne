@@ -642,40 +642,57 @@ impl ZkirEmitter {
         // Popeq { cached: true, result: AlignedValue<T> } → 0x0d. Reads use
         // the cached form because the value the prover claims is in the
         // transcript; the VM just verifies it matches the slot it walked to.
+        //
+        // For multi-Fr results (e.g. Bytes<32> → 2 Frs), the Popeq value
+        // field is itself multi-Fr: one PublicInput + DeclarePubInput per
+        // chunk. The chunks come back from `public_transcript_outputs` in
+        // the same order `AlignedValueExt::value_only_field_repr` writes
+        // them on the construct_proof side, which mirrors the IR's
+        // sequential PublicInput consumption.
         let result_enc = result_ty.and_then(aligned_value_encoding);
-        let read_value = self.emit_instruction(Instruction::PublicInput { guard: None });
         let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
         self.push_declare_pub_input(popeq_op);
 
         match result_enc {
-            Some(enc) if enc.value_field_count == 1 => {
-                // [opcode, ..alignment_atoms, result] — alignment.field_repr
-                // for a single-segment Bytes{N} is [segment_count=1, N], so
-                // the full Popeq is [0x0c, 1, N, value].
+            Some(enc) if enc.value_field_count >= 1 => {
                 for atom in &enc.alignment_atoms {
                     let v = self.emit_load_imm(Fr::from(*atom as u64));
                     self.push_declare_pub_input(v);
                 }
-                self.push_declare_pub_input(read_value);
-                // opcode (1) + alignment atoms (N) + value (1)
-                let count = 2 + enc.alignment_atoms.len();
+                let mut first_value: Option<Index> = None;
+                let value_layout = result_ty
+                    .map(read_result_fr_layout)
+                    .unwrap_or_else(|| vec![None; enc.value_field_count]);
+                for bits in value_layout.iter().take(enc.value_field_count) {
+                    let pi = self.emit_instruction(Instruction::PublicInput { guard: None });
+                    if first_value.is_none() {
+                        first_value = Some(pi);
+                    }
+                    if let Some(b) = bits {
+                        self.instructions
+                            .push(Instruction::ConstrainBits { var: pi, bits: *b });
+                    }
+                    self.push_declare_pub_input(pi);
+                }
+                let count = 1 + enc.alignment_atoms.len() + enc.value_field_count;
                 self.instructions.push(Instruction::PiSkip {
                     guard: Some(g),
                     count: count as u32,
                 });
+                first_value
             }
             _ => {
                 // Legacy 1-declare fallback. Not on-chain compatible — only
-                // for unknown / multi-Fr result types. Logged in the memory
-                // file alongside the Cell::set work.
+                // for unknown result types. Emits one PublicInput so the
+                // existing internal-consistency tests keep working.
+                let pi = self.emit_instruction(Instruction::PublicInput { guard: None });
                 self.instructions.push(Instruction::PiSkip {
                     guard: Some(g),
                     count: 1,
                 });
+                Some(pi)
             }
         }
-
-        Some(read_value)
     }
 
     /// Dispatch a method call on a `Map<K, V>` ledger field to the
@@ -1364,6 +1381,35 @@ fn witness_fr_layout(ty: &syn::Type) -> Vec<Option<u32>> {
         return layout;
     }
     // Single-Fr fallback: delegate to emit_type_constraint via None.
+    vec![None]
+}
+
+/// Like `witness_fr_layout` but for Popeq read-result types. Returns
+/// per-Fr `ConstrainBits` widths in the order
+/// `AlignedValueExt::value_only_field_repr` emits them (high-bytes chunk
+/// first after `.rev()`). Single-Fr types get `Some(bits)` matching
+/// `aligned_value_encoding`'s `atoms[1] * 8`.
+fn read_result_fr_layout(ty: &syn::Type) -> Vec<Option<u32>> {
+    let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
+    if let Some(n) = ty_str
+        .strip_prefix("Bytes<")
+        .and_then(|s| s.strip_suffix('>'))
+        .and_then(|s| s.parse::<u32>().ok())
+        && n > 0
+    {
+        let chunks = n.div_ceil(FR_BYTES_STORED);
+        let mut layout = Vec::with_capacity(chunks as usize);
+        let first_bytes = if n % FR_BYTES_STORED == 0 {
+            FR_BYTES_STORED
+        } else {
+            n % FR_BYTES_STORED
+        };
+        layout.push(Some(first_bytes * 8));
+        for _ in 1..chunks {
+            layout.push(Some(FR_BYTES_STORED * 8));
+        }
+        return layout;
+    }
     vec![None]
 }
 

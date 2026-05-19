@@ -80,6 +80,24 @@ End-to-end verified by `cell_get_proves_and_verifies` and
 
 E2E test: `ledger_integration_test::cell_bytes32_set_proves_and_verifies`.
 
+### Cell<Bytes<N>>::get also landed (multi-Fr Popeq)
+
+The read side now mirrors the multi-Fr Push:
+
+- `emit_ledger_read` emits one `PublicInput` per Fr the result occupies
+  (driven by `aligned_value_encoding(T).value_field_count`), with
+  per-chunk `ConstrainBits` from a new `read_result_fr_layout(ty)`
+  helper that mirrors `witness_fr_layout` for read-result types.
+- Transcript codegen `get`/`value` arm produces the right
+  `AlignedValue::from(...)` expression for the read result: for
+  `Bytes<N>` it uses `*(state.<f>.get()).as_bytes()`, otherwise the
+  primitive-cast path.
+
+E2E test: `ledger_integration_test::cell_bytes32_get_proves_and_verifies`.
+
+Cell<Bytes<N>> is now fully on-chain compatible end-to-end. Map<Bytes<N>, _>
+(multi-Fr key/value through Idx + Push) is the remaining gap.
+
 ## What still needs work
 
 1. **Multi-Fr value types**: `Bytes<N>` for `N*8 > 64`, custom ADTs, and `Field` (which uses `AlignmentAtom::Field`, not `Bytes{N}`) fall back to 2-declare emission. They are NOT on-chain compatible. To support: extend `aligned_value_encoding` to return a `value_field_count > 1`, and update `emit_push_cell` to emit one declare per Fr in the value.
