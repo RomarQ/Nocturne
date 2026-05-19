@@ -670,6 +670,50 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
             })
         }
 
+        // Sugar: `match self.<map>.get(&k) { Some(v) => some_body, None|_ => none_body }`
+        // rewrites to the same contains+lookup if-else the if-let-Some
+        // matcher produces. Both arms must be present; arm order doesn't
+        // matter (Some-first and None-first both work).
+        Expr::Match(expr_match) => {
+            if let Some((var_name, map_field, key_expr, some_body, none_body)) =
+                match_match_on_get(expr_match)
+            {
+                let contains = ExprIR::LedgerAccess {
+                    span: Span::call_site(),
+                    field: map_field.clone(),
+                    method: syn::Ident::new("contains", Span::call_site()),
+                    args: vec![parse_expr(key_expr)?],
+                };
+                let lookup = ExprIR::LedgerAccess {
+                    span: Span::call_site(),
+                    field: map_field,
+                    method: syn::Ident::new("lookup", Span::call_site()),
+                    args: vec![parse_expr(key_expr)?],
+                };
+                let let_stmt = ExprIR::Let {
+                    span: Span::call_site(),
+                    name: var_name,
+                    value: Box::new(lookup),
+                };
+                let mut then_branch = vec![let_stmt];
+                then_branch.extend(parse_arm_body(some_body)?);
+                let else_branch = Some(parse_arm_body(none_body)?);
+
+                return Ok(ExprIR::If {
+                    span: Span::call_site(),
+                    cond: Box::new(contains),
+                    then_branch,
+                    else_branch,
+                });
+            }
+            Ok(ExprIR::Unsupported {
+                span: Span::call_site(),
+                description: "match scrutinee must be `self.<map_field>.get(<key>)` with \
+                              exactly Some(v) and None|_ arms"
+                    .to_string(),
+            })
+        }
+
         Expr::Struct(s) => {
             let name = s
                 .path
@@ -819,35 +863,24 @@ fn is_self_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Path(ExprPath { path, .. }) if path.is_ident("self"))
 }
 
-/// Match `if let Some(v) = self.<map>.get(&k)`-style conditions. Returns
-/// `(v_ident, map_field_ident, key_expr)` on a hit, `None` otherwise. The
-/// callee rewrites the surrounding `if` into the contains+lookup pattern.
-fn match_if_let_some_get(cond: &Expr) -> Option<(syn::Ident, syn::Ident, &Expr)> {
-    let Expr::Let(syn::ExprLet { pat, expr, .. }) = cond else {
-        return None;
-    };
-    // Match `Some(<ident>)` pattern.
-    let Pat::TupleStruct(pat_ts) = &**pat else {
-        return None;
-    };
-    if pat_ts.path.segments.last()?.ident != "Some" {
-        return None;
+/// Parse a match arm's body, which is either a block or a bare expression.
+fn parse_arm_body(body: &Expr) -> MidnightResult<Vec<ExprIR>> {
+    match body {
+        Expr::Block(b) => parse_block_stmts(&b.block),
+        other => Ok(vec![parse_expr(other)?]),
     }
-    if pat_ts.elems.len() != 1 {
-        return None;
-    }
-    let Pat::Ident(var_pat) = pat_ts.elems.first()? else {
-        return None;
-    };
-    let var_name = var_pat.ident.clone();
+}
 
-    // Match scrutinee: `self.<field>.get(<key>)`.
+/// Decompose the scrutinee `self.<field>.get(<key>)` of an if-let cond or
+/// match expression. Returns the map-field ident and the (unparsed) key
+/// expression for the caller to parse.
+fn match_self_field_get_scrutinee(expr: &Expr) -> Option<(syn::Ident, &Expr)> {
     let Expr::MethodCall(ExprMethodCall {
         receiver,
         method,
         args,
         ..
-    }) = &**expr
+    }) = expr
     else {
         return None;
     };
@@ -863,6 +896,90 @@ fn match_if_let_some_get(cond: &Expr) -> Option<(syn::Ident, syn::Ident, &Expr)>
     let syn::Member::Named(field_name) = member else {
         return None;
     };
+    Some((field_name.clone(), args.first()?))
+}
 
-    Some((var_name, field_name.clone(), args.first()?))
+/// Match `match self.<map>.get(&k) { Some(v) => some_body, None|_ => none_body }`
+/// or with the arms reversed. Returns the variable bound by `Some(v)`, the
+/// map-field ident, the key expression, and the bodies of the Some and None
+/// arms (in canonical Some-then-None order). The caller rewrites to the
+/// contains+lookup if-else.
+fn match_match_on_get(
+    expr_match: &syn::ExprMatch,
+) -> Option<(syn::Ident, syn::Ident, &Expr, &Expr, &Expr)> {
+    if expr_match.arms.len() != 2 {
+        return None;
+    }
+    let (map_field, key_expr) = match_self_field_get_scrutinee(&expr_match.expr)?;
+
+    // Classify each arm as Some(v), None, or wildcard.
+    enum Kind {
+        Some(syn::Ident),
+        NoneOrWild,
+        Other,
+    }
+    let classify = |pat: &Pat| -> Kind {
+        match pat {
+            Pat::TupleStruct(pt)
+                if pt
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|s| s.ident == "Some")
+                    && pt.elems.len() == 1 =>
+            {
+                if let Pat::Ident(pi) = pt.elems.first().unwrap() {
+                    return Kind::Some(pi.ident.clone());
+                }
+                Kind::Other
+            }
+            Pat::Path(pp)
+                if pp.path.segments.last().is_some_and(|s| s.ident == "None") =>
+            {
+                Kind::NoneOrWild
+            }
+            // `None` as an Ident path falls through to here in some syn versions.
+            Pat::Ident(pi) if pi.ident == "None" => Kind::NoneOrWild,
+            Pat::Wild(_) => Kind::NoneOrWild,
+            _ => Kind::Other,
+        }
+    };
+
+    let arm0 = &expr_match.arms[0];
+    let arm1 = &expr_match.arms[1];
+    // Arms must have no guard for the rewrite to be sound (a guard could
+    // refuse the lookup despite contains=true).
+    if arm0.guard.is_some() || arm1.guard.is_some() {
+        return None;
+    }
+    let (var, some_body, none_body) = match (classify(&arm0.pat), classify(&arm1.pat)) {
+        (Kind::Some(v), Kind::NoneOrWild) => (v, &*arm0.body, &*arm1.body),
+        (Kind::NoneOrWild, Kind::Some(v)) => (v, &*arm1.body, &*arm0.body),
+        _ => return None,
+    };
+
+    Some((var, map_field, key_expr, some_body, none_body))
+}
+
+/// Match `if let Some(v) = self.<map>.get(&k)`-style conditions. Returns
+/// `(v_ident, map_field_ident, key_expr)` on a hit, `None` otherwise. The
+/// callee rewrites the surrounding `if` into the contains+lookup pattern.
+fn match_if_let_some_get(cond: &Expr) -> Option<(syn::Ident, syn::Ident, &Expr)> {
+    let Expr::Let(syn::ExprLet { pat, expr, .. }) = cond else {
+        return None;
+    };
+    // Match `Some(<ident>)` pattern.
+    let Pat::TupleStruct(pat_ts) = &**pat else {
+        return None;
+    };
+    if pat_ts.path.segments.last()?.ident != "Some" || pat_ts.elems.len() != 1 {
+        return None;
+    }
+    let Pat::Ident(var_pat) = pat_ts.elems.first()? else {
+        return None;
+    };
+    let var_name = var_pat.ident.clone();
+
+    let (field_name, key_expr) = match_self_field_get_scrutinee(expr)?;
+    Some((var_name, field_name, key_expr))
 }

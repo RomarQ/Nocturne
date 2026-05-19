@@ -2580,3 +2580,482 @@ async fn map_get_sugar_absent_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for `if let Some(v) = map.get(&k)` (absent)");
 }
+
+#[midnight::contract]
+mod if_let_else {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct IfLetElseState {
+        pub records: Map<Uint<64>, Uint<64>>,
+        pub fallback_hits: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct IfLetElseWitnesses {
+        pub user_id: Uint<64>,
+    }
+
+    impl IfLetElseState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+                fallback_hits: Counter::zero(),
+            }
+        }
+
+        // `if let Some(v) = ... { ... } else { ... }`. The else branch
+        // increments a counter when the key is absent — exercises both
+        // arms of the rewrite (then = lookup, else = preserved verbatim).
+        #[midnight(circuit)]
+        pub fn read_or_count_miss(&mut self, witnesses: &IfLetElseWitnesses) {
+            if let Some(_v) = self.records.get(&witnesses.user_id) {
+                let _hold = _v;
+            } else {
+                self.fallback_hits.increment();
+            }
+        }
+    }
+}
+
+fn build_read_or_count_miss_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod if_let_else {
+            #[midnight(ledger)]
+            pub struct IfLetElseState {
+                records: Map<Uint<64>, Uint<64>>,
+                fallback_hits: Counter,
+            }
+            #[midnight(witnesses)]
+            pub struct IfLetElseWitnesses { pub user_id: Uint<64> }
+            impl IfLetElseState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn read_or_count_miss(&mut self, witnesses: &IfLetElseWitnesses) {
+                    if let Some(_v) = self.records.get(&witnesses.user_id) {
+                        let _hold = _v;
+                    } else {
+                        self.fallback_hits.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "read_or_count_miss")
+        .unwrap()
+        .ir_source
+}
+
+/// `if let Some(v) = self.map.get(&k) { ... } else { ... }` — exercises
+/// the else branch of the Map::get sugar. Key absent → counter increment
+/// runs; the lookup branch is inactive (no Popeq consumption).
+#[tokio::test]
+async fn if_let_else_absent_runs_else_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_or_count_miss_ir();
+    let state = if_let_else::IfLetElseState::new(); // empty
+    let witnesses = if_let_else::IfLetElseWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        if_let_else::transcript::build_read_or_count_miss_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "read_or_count_miss",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for if-let-Some-with-else (else-active)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for if-let-Some-with-else (else-active)");
+}
+
+#[midnight::contract]
+mod match_get {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MatchGetState {
+        pub records: Map<Uint<64>, Uint<64>>,
+        pub fallback_hits: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MatchGetWitnesses {
+        pub user_id: Uint<64>,
+    }
+
+    impl MatchGetState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+                fallback_hits: Counter::zero(),
+            }
+        }
+
+        // `match self.map.get(&k) { Some(v) => ..., None => ... }`. The
+        // parser rewrites to the same contains+lookup if-else the if-let
+        // sugar produces.
+        #[midnight(circuit)]
+        pub fn pick(&mut self, witnesses: &MatchGetWitnesses) {
+            match self.records.get(&witnesses.user_id) {
+                Some(_v) => {
+                    let _hold = _v;
+                }
+                None => {
+                    self.fallback_hits.increment();
+                }
+            }
+        }
+    }
+}
+
+fn build_pick_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod match_get {
+            #[midnight(ledger)]
+            pub struct MatchGetState {
+                records: Map<Uint<64>, Uint<64>>,
+                fallback_hits: Counter,
+            }
+            #[midnight(witnesses)]
+            pub struct MatchGetWitnesses { pub user_id: Uint<64> }
+            impl MatchGetState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn pick(&mut self, witnesses: &MatchGetWitnesses) {
+                    match self.records.get(&witnesses.user_id) {
+                        Some(_v) => { let _hold = _v; }
+                        None => { self.fallback_hits.increment(); }
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "pick")
+        .unwrap()
+        .ir_source
+}
+
+/// `match self.map.get(&k) { Some(v) => ..., None => ... }` rewrites to
+/// the contains+lookup if-else, same shape as the if-let-Some sugar. Key
+/// present → Some arm fires; lookup runs.
+#[tokio::test]
+async fn match_get_present_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_pick_ir();
+    let mut state = match_get::MatchGetState::new();
+    state
+        .records
+        .insert(Uint::<64>::from(7u64), Uint::<64>::from(42u64));
+    let witnesses = match_get::MatchGetWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript = match_get::transcript::build_pick_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "pick",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for `match map.get(&k) {{ Some, None }}` (present)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for `match map.get(&k) { Some, None }` (present)");
+}
+
+/// `match self.map.get(&k)` — None arm fires, fallback counter increments.
+#[tokio::test]
+async fn match_get_absent_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_pick_ir();
+    let state = match_get::MatchGetState::new(); // empty
+    let witnesses = match_get::MatchGetWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript = match_get::transcript::build_pick_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "pick",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for `match map.get(&k) {{ Some, None }}` (absent)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for `match map.get(&k) { Some, None }` (absent)");
+}
+
+#[midnight::contract]
+mod match_get_reversed {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MatchGetReversedState {
+        pub records: Map<Uint<64>, Uint<64>>,
+        pub fallback_hits: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MatchGetReversedWitnesses {
+        pub user_id: Uint<64>,
+    }
+
+    impl MatchGetReversedState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+                fallback_hits: Counter::zero(),
+            }
+        }
+
+        // Arms in reverse order — None first, Some second. The match
+        // matcher accepts both orderings.
+        #[midnight(circuit)]
+        pub fn pick_reversed(&mut self, witnesses: &MatchGetReversedWitnesses) {
+            match self.records.get(&witnesses.user_id) {
+                None => {
+                    self.fallback_hits.increment();
+                }
+                Some(_v) => {
+                    let _hold = _v;
+                }
+            }
+        }
+    }
+}
+
+fn build_pick_reversed_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod match_get_reversed {
+            #[midnight(ledger)]
+            pub struct MatchGetReversedState {
+                records: Map<Uint<64>, Uint<64>>,
+                fallback_hits: Counter,
+            }
+            #[midnight(witnesses)]
+            pub struct MatchGetReversedWitnesses { pub user_id: Uint<64> }
+            impl MatchGetReversedState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn pick_reversed(&mut self, witnesses: &MatchGetReversedWitnesses) {
+                    match self.records.get(&witnesses.user_id) {
+                        None => { self.fallback_hits.increment(); }
+                        Some(_v) => { let _hold = _v; }
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "pick_reversed")
+        .unwrap()
+        .ir_source
+}
+
+/// Reverse arm order (None first, Some second). The match matcher
+/// normalizes ordering so both shapes lower to the same IR.
+#[tokio::test]
+async fn match_get_reversed_arms_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_pick_reversed_ir();
+    let mut state = match_get_reversed::MatchGetReversedState::new();
+    state
+        .records
+        .insert(Uint::<64>::from(7u64), Uint::<64>::from(42u64));
+    let witnesses = match_get_reversed::MatchGetReversedWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        match_get_reversed::transcript::build_pick_reversed_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "pick_reversed",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for `match` with reversed arms"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for `match` with reversed arms");
+}

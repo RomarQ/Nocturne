@@ -30,9 +30,19 @@ This sugar only works because both halves of the conditional-branch story are in
 
 Without either, the `lookup`-inside-conditional pattern fails: either the verifier rejects (PI mismatch) or the prover panics ("Ran out of transcript outputs" / "Transcripts not fully consumed").
 
+## Supported shapes
+
+- `if let Some(v) = self.<map>.get(&k) { ... }` (no else).
+- `if let Some(v) = self.<map>.get(&k) { ... } else { ... }` (else branch preserved verbatim).
+- `match self.<map>.get(&k) { Some(v) => ..., None => ... }` (arms in either order, `None` arm can also be `_`).
+
+All four shapes lower to the same `if contains(k) { let v = lookup(k); ... } else { ... }` IR.
+
 ## Limitations
 
-- The matcher only recognizes `if let Some(v) = ...`; `match` and `let-else` aren't supported yet.
+- `let-else` (`let Some(v) = self.map.get(&k) else { return; }`) isn't supported yet.
 - The scrutinee must be exactly `self.<field>.get(<key>)` — chained or wrapped calls (`(self.map.get(&k)).clone()`) won't trigger the rewrite.
-- The else-branch can't access `v` (it's only bound inside the then-branch).
+- The else / None arm can't access `v` (it's only bound inside the Some/then branch).
+- Match arms with guards (`Some(v) if pred(v) =>`) aren't recognized — a guard could refuse the lookup despite contains=true, breaking the soundness of the rewrite.
+- Only the binary Some+None match is supported; richer patterns (`Some(0) => ..., Some(_) => ..., None => ...`) fall through to `Unsupported`.
 - The user-source still needs the storage-layer `Map::get` method (`crates/midnight-storage/src/map.rs`) so the Rust type check passes; we deliberately don't strip it.
