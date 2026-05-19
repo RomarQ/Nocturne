@@ -5337,3 +5337,341 @@ async fn map_b48_contains_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map<Bytes<48>, _>::contains");
 }
+
+// ---------------------------------------------------------------------------
+// MerkleTree<H, Bytes<N != 32>> coverage: lift the Bytes<32>-only restriction
+// on the leafHash persistent_hash alignment. Two boundary cases:
+//   - Bytes<16>: single-Fr leaf (1 chunk, alignment [Bytes{6}, Bytes{16}]).
+//   - Bytes<64>: 3-chunk leaf (chunks=2 + 1 trailing byte → bytes_n_layout
+//                splits as [Bits(16), Bits(248), Bits(248)], 3 Fr inputs to
+//                persistent_hash with alignment [Bytes{6}, Bytes{64}]).
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod mt_b16_insert {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MtB16InsertState {
+        pub entries: MerkleTree<10, Bytes<16>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MtB16InsertWitnesses {
+        pub leaf: Bytes<16>,
+    }
+
+    impl MtB16InsertState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                entries: MerkleTree::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn add(&mut self, witnesses: &MtB16InsertWitnesses) {
+            self.entries.insert(&witnesses.leaf);
+        }
+    }
+}
+
+fn build_mt_b16_add_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod mt_b16_insert {
+            #[midnight(ledger)]
+            pub struct MtB16InsertState { entries: MerkleTree<10, Bytes<16>> }
+            #[midnight(witnesses)]
+            pub struct MtB16InsertWitnesses { pub leaf: Bytes<16> }
+            impl MtB16InsertState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
+                #[midnight(circuit)]
+                pub fn add(&mut self, witnesses: &MtB16InsertWitnesses) {
+                    self.entries.insert(&witnesses.leaf);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "add")
+        .unwrap()
+        .ir_source
+}
+
+/// `MerkleTree<10, Bytes<16>>::insert(&leaf)` — single-Fr leaf path.
+/// leafHash persistent_hash uses alignment [Bytes{6}, Bytes{16}] with
+/// 2 Fr inputs (domain_sep + 1 leaf chunk).
+#[tokio::test]
+async fn mt_b16_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_mt_b16_add_ir();
+    let leaf_bytes = [0xA5u8; 16];
+    let witnesses = mt_b16_insert::MtB16InsertWitnesses {
+        leaf: Bytes::<16>::from(leaf_bytes),
+    };
+    let nocturne_transcript = mt_b16_insert::transcript::build_add_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(leaf_bytes)];
+    let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for MerkleTree<_, Bytes<16>>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for MerkleTree<_, Bytes<16>>::insert");
+}
+
+#[midnight::contract]
+mod mt_b64_insert {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MtB64InsertState {
+        pub entries: MerkleTree<10, Bytes<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MtB64InsertWitnesses {
+        pub leaf: Bytes<64>,
+    }
+
+    impl MtB64InsertState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                entries: MerkleTree::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn add(&mut self, witnesses: &MtB64InsertWitnesses) {
+            self.entries.insert(&witnesses.leaf);
+        }
+    }
+}
+
+fn build_mt_b64_add_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod mt_b64_insert {
+            #[midnight(ledger)]
+            pub struct MtB64InsertState { entries: MerkleTree<10, Bytes<64>> }
+            #[midnight(witnesses)]
+            pub struct MtB64InsertWitnesses { pub leaf: Bytes<64> }
+            impl MtB64InsertState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
+                #[midnight(circuit)]
+                pub fn add(&mut self, witnesses: &MtB64InsertWitnesses) {
+                    self.entries.insert(&witnesses.leaf);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "add")
+        .unwrap()
+        .ir_source
+}
+
+/// `MerkleTree<10, Bytes<64>>::insert(&leaf)` — 3-chunk leaf path.
+/// `bytes_n_layout(64)` splits the leaf as (2, 31, 31) bytes per Fr;
+/// leafHash persistent_hash uses alignment [Bytes{6}, Bytes{64}] with
+/// 4 Fr inputs (domain_sep + 3 leaf chunks).
+#[tokio::test]
+async fn mt_b64_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_mt_b64_add_ir();
+    let leaf_bytes = [0xBBu8; 64];
+    let witnesses = mt_b64_insert::MtB64InsertWitnesses {
+        leaf: Bytes::<64>::from(leaf_bytes),
+    };
+    let nocturne_transcript = mt_b64_insert::transcript::build_add_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(leaf_bytes)];
+    let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for MerkleTree<_, Bytes<64>>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for MerkleTree<_, Bytes<64>>::insert");
+}
+
+// Same path-verification end-to-end as mt_verify_path but with a
+// single-Fr Bytes<16> leaf, exercising the lifted alignment in
+// `emit_merkle_tree_path_root`.
+
+#[midnight::contract]
+mod mt_b16_verify_path {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MtB16VerifyPathState {
+        pub entries: MerkleTree<3, Bytes<16>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MtB16VerifyPathWitnesses {
+        pub path: MerkleTreePath<3, Bytes<16>>,
+    }
+
+    impl MtB16VerifyPathState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                entries: MerkleTree::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn verify_path(&self, witnesses: &MtB16VerifyPathWitnesses) {
+            let computed = merkle_tree_path_root(&witnesses.path);
+            let _ok = self.entries.check_root(&computed);
+        }
+    }
+}
+
+fn build_mt_b16_verify_path_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod mt_b16_verify_path {
+            #[midnight(ledger)]
+            pub struct MtB16VerifyPathState { entries: MerkleTree<3, Bytes<16>> }
+            #[midnight(witnesses)]
+            pub struct MtB16VerifyPathWitnesses {
+                pub path: MerkleTreePath<3, Bytes<16>>,
+            }
+            impl MtB16VerifyPathState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
+                #[midnight(circuit)]
+                pub fn verify_path(&self, witnesses: &MtB16VerifyPathWitnesses) {
+                    let computed = merkle_tree_path_root(&witnesses.path);
+                    let _ok = self.entries.check_root(&computed);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "verify_path")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn mt_b16_verify_path_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_mt_b16_verify_path_ir();
+    let mut state = mt_b16_verify_path::MtB16VerifyPathState::new();
+    let leaf = Bytes::<16>::from([0x99u8; 16]);
+    state.entries.insert(&leaf);
+    let path = state.entries.path_for_leaf(0, leaf.clone());
+
+    assert_eq!(
+        midnight::types::merkle_tree_path_root(&path),
+        state.entries.root(),
+        "off-chain merkle_tree_path_root must match tree.root() for Bytes<16> leaf",
+    );
+
+    let witnesses = mt_b16_verify_path::MtB16VerifyPathWitnesses {
+        path: path.clone(),
+    };
+    let nocturne_transcript =
+        mt_b16_verify_path::transcript::build_verify_path_transcript(&state, &witnesses);
+
+    // private_transcript order: leaf (1 Fr) + 3 * (sibling, goes_left).
+    let mut private_outputs: Vec<AlignedValue> = Vec::new();
+    private_outputs.push(AlignedValue::from([0x99u8; 16]));
+    for entry in path.path.iter() {
+        let sibling_fr = Fr::from_le_bytes(&entry.sibling.as_le_bytes())
+            .expect("sibling digest bytes round-trip through Fr");
+        private_outputs.push(AlignedValue::from(sibling_fr));
+        private_outputs.push(AlignedValue::from(entry.goes_left.value()));
+    }
+    let preimage = canonical_preimage(
+        "verify_path",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for path_root + check_root with Bytes<16> leaf"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for path_root + check_root with Bytes<16> leaf");
+}

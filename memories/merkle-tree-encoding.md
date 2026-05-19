@@ -221,7 +221,7 @@ Implemented 2026-05-19:
 
 E2E test: `mt_verify_path_proves_and_verifies` — inserts a leaf, asks the tree for its inclusion path, witnesses the path, computes the path root in-circuit, compares against the on-chain `Root` opcode result via `check_root`. Popeq result is `true`. Prove + verify succeed end-to-end.
 
-Limitation: today the IR codegen for `merkle_tree_path_root` only supports `Bytes<32>` leaves (`leaf_fr_count != 2` returns None). Other `Bytes<N>` sizes would work mechanically but the persistent_hash alignment hasn't been validated.
+Limitation (lifted 2026-05-19): `merkle_tree_path_root` and `MerkleTree::insert` now accept any `Bytes<N>` leaf. The IR pulls `leaf_n` from the field type / witness type and emits the leafHash `persistent_hash` with alignment `[Bytes{6}, Bytes{leaf_n}]` plus `ceil(leaf_n/31)` Fr inputs. E2E coverage: `MerkleTree<10, Bytes<16>>::insert` (single-Fr leaf), `MerkleTree<10, Bytes<64>>::insert` (3-chunk leaf, `(2, 31, 31)` byte split), `MerkleTree<3, Bytes<16>>` verify_path. The hash output is always Bytes<32>, independent of leaf size, so the downstream insert Push and check_root Eq stay unchanged.
 
 ## Files implicated for any implementation
 

@@ -1224,24 +1224,19 @@ impl ZkirEmitter {
             .cloned()?;
         let path_ty_str = quote::quote!(#path_ty).to_string().replace(' ', "");
         let (height, leaf_ty_str) = parse_merkle_tree_path_type(&path_ty_str)?;
-        // Today only Bytes<N> leaves are supported by the IR codegen;
-        // the storage helper accepts any MerkleLeaf.
+        // Any `Bytes<N>` leaf is supported. The leaf is hashed with
+        // `persistent_hash` under alignment `[Bytes{6}, Bytes{N}]`,
+        // matching upstream's `leaf_hash` byte-stream concatenation. The
+        // storage helper accepts any `MerkleLeaf` (broader than Bytes<N>).
         let leaf_n = parse_bytes_n_type(&leaf_ty_str)?;
         let leaf_fr_count = leaf_n.div_ceil(FR_BYTES_STORED) as usize;
-        if leaf_fr_count != 2 {
-            // Only Bytes<32> (= 2 Fr leaf) is exercised by the e2e
-            // tests. Other Bytes<N> sizes would work mechanically but
-            // we haven't validated the persistent_hash alignment for
-            // them; punt for now.
-            return None;
-        }
 
         // Emit the witness PrivateInputs by evaluating the arg.
         let first_var = self.emit_expr(arg)?;
         // Layout (matching `witness_fr_layout`):
-        //   first_var + 0..2     → leaf chunks
-        //   first_var + 2 + 2i   → sibling i (Field, no constraint)
-        //   first_var + 2 + 2i+1 → goes_left i (Boolean)
+        //   first_var + 0..leaf_fr_count             → leaf chunks
+        //   first_var + leaf_fr_count + 2i           → sibling i (Field, no constraint)
+        //   first_var + leaf_fr_count + 2i + 1       → goes_left i (Boolean)
         let leaf_chunks = gather_n_vars(first_var, leaf_fr_count);
         let mut entry_vars = Vec::with_capacity(height as usize);
         for i in 0..(height as usize) {
@@ -1250,11 +1245,11 @@ impl ZkirEmitter {
         }
 
         // persistent_hash with the "mdn:lh" domain separator.
-        // Alignment [Bytes{6}, Bytes{32}], inputs [domain_sep, leaf...].
+        // Alignment [Bytes{6}, Bytes{leaf_n}], inputs [domain_sep, leaf...].
         let domain_sep = self.emit_load_imm(domain_sep_fr_mdn_lh());
         let alignment = Alignment(vec![
             AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 6 }),
-            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
+            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: leaf_n }),
         ]);
         let mut hash_inputs = vec![domain_sep];
         hash_inputs.extend(leaf_chunks.iter().copied());
@@ -1323,12 +1318,19 @@ impl ZkirEmitter {
                 self.emit_merkle_tree_check_root(field_idx, digest_var)
             }
             "insert" => {
-                // The argument is `Bytes<32>` (the leaf). emit_expr
-                // returns the first PrivateInput var; we gather the
-                // contiguous 2 Frs via gather_n_vars and feed them into
-                // the leafHash persistent_hash call.
+                // The argument is `Bytes<N>` (the leaf). emit_expr returns
+                // the first PrivateInput var; we gather the contiguous
+                // `ceil(N/31)` Frs and feed them into the leafHash
+                // persistent_hash call. Pull N from the field type so
+                // emission tracks the user-declared leaf size.
+                let leaf_ty = self
+                    .field_types
+                    .get(field_idx as usize)
+                    .and_then(extract_merkle_tree_type)?;
+                let leaf_ty_str = quote::quote!(#leaf_ty).to_string().replace(' ', "");
+                let leaf_n = parse_bytes_n_type(&leaf_ty_str)?;
                 let leaf_first = args.first().and_then(|a| self.emit_expr(a))?;
-                self.emit_merkle_tree_insert(field_idx, leaf_first)
+                self.emit_merkle_tree_insert(field_idx, leaf_first, leaf_n)
             }
             _ => {
                 for arg in args {
@@ -1361,14 +1363,17 @@ impl ZkirEmitter {
     /// leaf_chunk_0, leaf_chunk_1]`. The result is 2 Frs (the 32-byte
     /// hash chunked) that flow into the Push as the Bytes<32> value.
     ///
-    /// Today this is specialized to `Bytes<32>` leaves — matches the
-    /// only Compact use case we've encountered. Generalizing to other
-    /// leaf types means parameterizing both the leaf alignment and the
-    /// persistent_hash alignment on `T`.
+    /// Supports any `Bytes<N>` leaf type: `leaf_n` is the byte length of
+    /// the leaf and `leaf_fr_count = ceil(leaf_n / FR_BYTES_STORED)` is
+    /// the number of Fr chunks the witness expands into. The leafHash
+    /// `persistent_hash` uses alignment `[Bytes{6}, Bytes{leaf_n}]`
+    /// (matching upstream's `leaf_hash`-as-byte-stream); the resulting
+    /// hash is always Bytes<32> regardless of leaf size.
     fn emit_merkle_tree_insert(
         &mut self,
         field_idx: u8,
         leaf_first: Index,
+        leaf_n: u32,
     ) -> Option<Index> {
         use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment};
         let g = self.guard;
@@ -1415,10 +1420,11 @@ impl ZkirEmitter {
         // big-endian byte order; our LoadImm parses Fr in whichever
         // direction the value flows through.)
         let domain_sep = self.emit_load_imm(domain_sep_fr_mdn_lh());
-        let leaf_chunks = gather_n_vars(leaf_first, 2);
+        let leaf_fr_count = leaf_n.div_ceil(FR_BYTES_STORED) as usize;
+        let leaf_chunks = gather_n_vars(leaf_first, leaf_fr_count);
         let hash_align = Alignment(vec![
             AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 6 }),
-            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
+            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: leaf_n }),
         ]);
         let mut hash_inputs = vec![domain_sep];
         hash_inputs.extend(leaf_chunks);
