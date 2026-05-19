@@ -235,6 +235,30 @@ above the staging table. The next Map-related work is therefore either
 that Option<V> expansion or moving on to other ledger primitives
 (Set/MerkleTree, Field cells, custom ADT alignment).
 
+### Wider key types (2026-05-19)
+
+`Map<Field, V>` and `Map<MerkleTreeDigest, V>` now work end-to-end.
+Both share `AlignmentAtom::Field` (`[1, -2]`, 1 Fr) — `MerkleTreeDigest`
+is a Field-aligned newtype that carries the full 32-byte LE Fr (Phase E).
+
+Two narrow gaps fixed:
+
+- `aligned_value_encoding` in `zkir_emitter.rs` extended to recognize
+  `MerkleTreeDigest` as the same encoding as `Field`.
+- `aligned_value_arg_expr` in `transcript_codegen.rs` extended with a
+  `MerkleTreeDigest` arm: lifts the digest to `Fr` via
+  `Fr::from_le_bytes(&d.as_le_bytes()).unwrap()` (NOT through
+  `.field().value()`, which would truncate to u128).
+
+E2E coverage: `Map<Field, Uint<64>>::{insert, contains}`,
+`Map<MerkleTreeDigest, Uint<64>>::{insert, contains}`.
+
+Other key shapes still untested: tuple/struct keys (compactc supports
+record-typed keys), `Map<Boolean, V>` (technically legal but unusual).
+`Bytes<N>` keys for `N != 32` compile but lack dedicated e2e tests —
+the encoding is the same shape so single-Fr `Bytes<N>` (N ≤ 31) should
+work mechanically.
+
 ## References
 
 - VM opcodes: `reference-repos/midnight-ledger/onchain-vm/src/ops.rs:95-462`

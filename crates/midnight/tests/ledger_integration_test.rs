@@ -4251,3 +4251,352 @@ async fn mt_verify_path_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for merkle_tree_path_root + check_root");
 }
+
+// ---------------------------------------------------------------------------
+// Wider Map key audit — probe contracts to identify gaps in our Map<K, _>
+// support beyond the existing Uint<64> / Bytes<32> coverage.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod map_field_key {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MapFieldState {
+        pub records: Map<Field, Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MapFieldWitnesses {
+        pub key: Field,
+        pub amount: Uint<64>,
+    }
+
+    impl MapFieldState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn record(&mut self, witnesses: &MapFieldWitnesses) {
+            self.records.insert(witnesses.key, witnesses.amount);
+        }
+
+        #[midnight(circuit)]
+        pub fn check_member(&self, witnesses: &MapFieldWitnesses) {
+            let _exists = self.records.contains(&witnesses.key);
+        }
+    }
+}
+
+fn build_map_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod map_field_key {
+            #[midnight(ledger)]
+            pub struct MapFieldState { records: Map<Field, Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct MapFieldWitnesses { pub key: Field, pub amount: Uint<64> }
+            impl MapFieldState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn record(&mut self, witnesses: &MapFieldWitnesses) {
+                    self.records.insert(witnesses.key, witnesses.amount);
+                }
+                #[midnight(circuit)]
+                pub fn check_member(&self, witnesses: &MapFieldWitnesses) {
+                    let _exists = self.records.contains(&witnesses.key);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+/// `Map<Field, Uint<64>>::insert(k, v)` end-to-end. Field key uses
+/// `AlignmentAtom::Field` (`[1, -2]`), value uses `Bytes<8>` for the
+/// 64-bit width — same opcode shape as Map<Uint<64>, Uint<64>> but with
+/// a Field-aligned key Push.
+#[tokio::test]
+async fn map_field_key_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_map_field_ir("record");
+    let key = Field::from(0xC0FFEEu64);
+    let witnesses = map_field_key::MapFieldWitnesses {
+        key,
+        amount: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        map_field_key::transcript::build_record_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(Fr::from(key.value())),
+        AlignedValue::from(7u64),
+    ];
+    let preimage =
+        canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Map<Field, _>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Field, _>::insert");
+}
+
+/// `Map<Field, Uint<64>>::contains(&k)` end-to-end. Field-keyed lookup
+/// matches the on-chain Member opcode against a Field-aligned key Push.
+#[tokio::test]
+async fn map_field_key_contains_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_map_field_ir("check_member");
+    let state = map_field_key::MapFieldState::new();
+    let key = Field::from(0xABCDu64);
+    let witnesses = map_field_key::MapFieldWitnesses {
+        key,
+        amount: Uint::<64>::from(0u64),
+    };
+    let nocturne_transcript =
+        map_field_key::transcript::build_check_member_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(Fr::from(key.value()))];
+    let preimage = canonical_preimage(
+        "check_member",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Map<Field, _>::contains"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Field, _>::contains");
+}
+
+#[midnight::contract]
+mod map_digest_key {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MapDigestState {
+        pub records: Map<MerkleTreeDigest, Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MapDigestWitnesses {
+        pub key: MerkleTreeDigest,
+        pub amount: Uint<64>,
+    }
+
+    impl MapDigestState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn record(&mut self, witnesses: &MapDigestWitnesses) {
+            self.records.insert(witnesses.key, witnesses.amount);
+        }
+
+        #[midnight(circuit)]
+        pub fn check_member(&self, witnesses: &MapDigestWitnesses) {
+            let _exists = self.records.contains(&witnesses.key);
+        }
+    }
+}
+
+fn build_map_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod map_digest_key {
+            #[midnight(ledger)]
+            pub struct MapDigestState { records: Map<MerkleTreeDigest, Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct MapDigestWitnesses {
+                pub key: MerkleTreeDigest,
+                pub amount: Uint<64>,
+            }
+            impl MapDigestState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn record(&mut self, witnesses: &MapDigestWitnesses) {
+                    self.records.insert(witnesses.key, witnesses.amount);
+                }
+                #[midnight(circuit)]
+                pub fn check_member(&self, witnesses: &MapDigestWitnesses) {
+                    let _exists = self.records.contains(&witnesses.key);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+/// `Map<MerkleTreeDigest, Uint<64>>::insert(k, v)` end-to-end. The digest
+/// key travels through the IR's Push as a full-Fr Cell(Field(digest_fr)) and
+/// through the transcript builder's AlignedValue construction without
+/// truncation.
+#[tokio::test]
+async fn map_digest_key_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_map_digest_ir("record");
+    let key = MerkleTreeDigest::new(Field::from(0xCAFEu64));
+    let witnesses = map_digest_key::MapDigestWitnesses {
+        key,
+        amount: Uint::<64>::from(42u64),
+    };
+    let nocturne_transcript =
+        map_digest_key::transcript::build_record_transcript(&witnesses);
+
+    // Witness layout: 1 Fr (digest as full Fr) + 1 Fr (Uint<64> as u64).
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(
+            Fr::from_le_bytes(&key.as_le_bytes())
+                .expect("digest round-trips through Fr"),
+        ),
+        AlignedValue::from(42u64),
+    ];
+    let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Map<MerkleTreeDigest, _>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<MerkleTreeDigest, _>::insert");
+}
+
+/// `Map<MerkleTreeDigest, Uint<64>>::contains(&k)` end-to-end. Popeq result
+/// is `false` for an empty map.
+#[tokio::test]
+async fn map_digest_key_contains_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_map_digest_ir("check_member");
+    let state = map_digest_key::MapDigestState::new();
+    let key = MerkleTreeDigest::new(Field::from(0xBEEFu64));
+    let witnesses = map_digest_key::MapDigestWitnesses {
+        key,
+        amount: Uint::<64>::from(0u64),
+    };
+    let nocturne_transcript =
+        map_digest_key::transcript::build_check_member_transcript(&state, &witnesses);
+
+    // The circuit only reads `witnesses.key`, so the IR emits exactly
+    // one PrivateInput. Empty map → contains returns false.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
+        Fr::from_le_bytes(&key.as_le_bytes())
+            .expect("digest round-trips through Fr"),
+    )];
+    let preimage = canonical_preimage(
+        "check_member",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Map<MerkleTreeDigest, _>::contains"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<MerkleTreeDigest, _>::contains");
+}

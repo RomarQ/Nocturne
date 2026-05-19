@@ -684,6 +684,17 @@ fn aligned_value_arg_expr(expr: &ExprIR, ty: Option<&syn::Type>) -> TokenStream 
             let raw = arg_to_runtime_raw_expr(expr);
             return quote! { Fr::from((#raw).value()) };
         }
+        if ty_str == "MerkleTreeDigest" {
+            // MerkleTreeDigest is Field-aligned but carries the full
+            // 32-byte LE Fr (so chained Merkle computations round-trip
+            // through Root). Reconstruct the Fr via from_le_bytes — never
+            // through `.field().value()` (that's the u128 truncation).
+            let raw = arg_to_runtime_raw_expr(expr);
+            return quote! {
+                Fr::from_le_bytes(&(#raw).as_le_bytes())
+                    .expect("MerkleTreeDigest bytes round-trip through Fr")
+            };
+        }
     }
     let value_expr = arg_to_runtime_expr(expr);
     match ty.and_then(primitive_cast_for_type) {

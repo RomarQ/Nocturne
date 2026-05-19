@@ -1850,7 +1850,10 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
 
     // Field: encoded with `AlignmentAtom::Field` (`-2` after field_repr).
     // The value occupies a single Fr — no bit-width chunking.
-    if ty_str == "Field" {
+    //
+    // `MerkleTreeDigest` is a Field-aligned newtype (canonical 32-byte LE
+    // Fr backing); same encoding as `Field` from the on-chain VM's view.
+    if ty_str == "Field" || ty_str == "MerkleTreeDigest" {
         return Some(AlignedValueEncoding {
             alignment_atoms: vec![1, -2],
             value_field_count: 1,
