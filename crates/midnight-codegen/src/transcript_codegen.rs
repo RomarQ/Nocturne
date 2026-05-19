@@ -7,7 +7,7 @@
 //! - Only emits ops for the active branch (matching ZKIR's pi_skip behavior)
 //! - Converts witness values to `Fr` for the private transcript
 
-use midnight_ir::{CircuitIR, ContractIR, ExprIR, WitnessIR};
+use midnight_ir::{CircuitIR, ContractIR, ExprIR, UserStructField, WitnessIR};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::HashMap;
@@ -47,6 +47,7 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
                 witnesses_name,
                 ledger_name,
                 &witness_types,
+                &contract.user_structs,
             )
         })
         .collect();
@@ -93,6 +94,7 @@ fn generate_circuit_transcript_fn(
     witnesses_name: Option<&syn::Ident>,
     ledger_name: &syn::Ident,
     witness_types: &HashMap<String, syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let fn_name = format_ident!("build_{}_transcript", circuit.name);
     let doc = format!("Build the transcript for the `{}` circuit.", circuit.name);
@@ -100,7 +102,7 @@ fn generate_circuit_transcript_fn(
     let body_stmts: Vec<TokenStream> = circuit
         .body
         .iter()
-        .map(|expr| generate_op_stmt(expr, field_names, field_types, witness_types))
+        .map(|expr| generate_op_stmt(expr, field_names, field_types, witness_types, user_structs))
         .collect();
 
     let needs_state = circuit_needs_state(&circuit.body);
@@ -208,6 +210,7 @@ fn generate_op_stmt(
     field_names: &[String],
     field_types: &[syn::Type],
     witness_types: &HashMap<String, syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     match expr {
         ExprIR::LedgerAccess {
@@ -302,7 +305,7 @@ fn generate_op_stmt(
                     // (via `generate_runtime_cond`), the bool drives branching.
                     // Works for both Map and Set fields (same Member opcode,
                     // K type resolved via extract_field_key_type).
-                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty);
+                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs);
                     quote! { let _ = #block; }
                 }
                 "insert" => {
@@ -310,33 +313,33 @@ fn generate_op_stmt(
                     // Set → Set::insert (k, Null), MerkleTree → 10-op
                     // append-and-rehash sequence, Cell → Cell::set (v).
                     if field_ty.and_then(extract_map_kv_types).is_some() {
-                        generate_map_insert(field_idx, args, field_ty)
+                        generate_map_insert(field_idx, args, field_ty, user_structs)
                     } else if field_ty.and_then(extract_set_inner_type).is_some() {
-                        generate_set_insert(field_idx, args, field_ty)
+                        generate_set_insert(field_idx, args, field_ty, user_structs)
                     } else if field_ty.and_then(extract_merkle_tree_type).is_some() {
                         generate_merkle_tree_insert(field_idx, args)
                     } else {
-                        generate_cell_set(field_idx, args, field_ty)
+                        generate_cell_set(field_idx, args, field_ty, user_structs)
                     }
                 }
                 "set" => {
                     // `set` is also used as an alias for Map::insert. Route
                     // based on the field type.
                     if field_ty.and_then(extract_map_kv_types).is_some() {
-                        generate_map_insert(field_idx, args, field_ty)
+                        generate_map_insert(field_idx, args, field_ty, user_structs)
                     } else {
-                        generate_cell_set(field_idx, args, field_ty)
+                        generate_cell_set(field_idx, args, field_ty, user_structs)
                     }
                 }
                 "remove" if field_ty.and_then(extract_map_kv_types).is_some() => {
-                    generate_map_remove(field_idx, args, field_ty)
+                    generate_map_remove(field_idx, args, field_ty, user_structs)
                 }
                 "remove" if field_ty.and_then(extract_set_inner_type).is_some() => {
                     // Set::remove has the same on-chain pattern as Map::remove.
-                    generate_set_remove(field_idx, args, field_ty)
+                    generate_set_remove(field_idx, args, field_ty, user_structs)
                 }
                 "lookup" if field_ty.and_then(extract_map_kv_types).is_some() => {
-                    generate_map_lookup(field_idx, &field_name, args, field_ty)
+                    generate_map_lookup(field_idx, &field_name, args, field_ty, user_structs)
                 }
                 "check_root" if field_ty.and_then(extract_merkle_tree_type).is_some() => {
                     generate_merkle_tree_check_root(field_idx, &field_name, args)
@@ -353,16 +356,16 @@ fn generate_op_stmt(
         } => {
             // Collect witness values used in the condition for private_transcript.
             let witness_adds = collect_witness_private_inputs(cond);
-            let cond_expr = generate_runtime_cond(cond, field_names, field_types);
+            let cond_expr = generate_runtime_cond(cond, field_names, field_types, user_structs);
             let then_stmts: Vec<TokenStream> = then_branch
                 .iter()
-                .map(|e| generate_op_stmt(e, field_names, field_types, witness_types))
+                .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs))
                 .collect();
 
             if let Some(else_exprs) = else_branch {
                 let else_stmts: Vec<TokenStream> = else_exprs
                     .iter()
-                    .map(|e| generate_op_stmt(e, field_names, field_types, witness_types))
+                    .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs))
                     .collect();
                 quote! {
                     #witness_adds
@@ -389,7 +392,7 @@ fn generate_op_stmt(
             // leading underscore so the `unused_variables` lint is
             // already satisfied for ignored bindings.
             let var_name = format_ident!("{}", name.to_string());
-            let val_stmt = generate_op_stmt(value, field_names, field_types, witness_types);
+            let val_stmt = generate_op_stmt(value, field_names, field_types, witness_types, user_structs);
             quote! {
                 #[allow(non_snake_case, unused_variables)]
                 let #var_name = {
@@ -451,6 +454,20 @@ fn generate_op_stmt(
                         }
                     }
                 }
+            } else if let Some(fields) = witness_ty.and_then(|t| user_struct_fields(t, user_structs)) {
+                // User-defined struct witness: project each field by
+                // name and push its per-component Fr in declaration
+                // order. Mirrors the tuple expansion in
+                // `aligned_value_arg_expr` but for named structs.
+                let pushes: Vec<TokenStream> = fields
+                    .iter()
+                    .map(|f| {
+                        let fname = f.name.clone();
+                        let accessor = quote! { witnesses.#field_ident.#fname };
+                        component_private_push(&f.ty, &accessor)
+                    })
+                    .collect();
+                quote! { #(#pushes)* }
             } else {
                 quote! {
                     private_transcript.push(Fr::from(witnesses.#field_ident.value()));
@@ -461,7 +478,7 @@ fn generate_op_stmt(
         ExprIR::Block { stmts, .. } => {
             let inner: Vec<TokenStream> = stmts
                 .iter()
-                .map(|s| generate_op_stmt(s, field_names, field_types, witness_types))
+                .map(|s| generate_op_stmt(s, field_names, field_types, witness_types, user_structs))
                 .collect();
             quote! { #(#inner)* }
         }
@@ -472,7 +489,7 @@ fn generate_op_stmt(
             // `private_transcript`) are emitted. Method-specific runtime
             // behavior is generated elsewhere; this arm is just about
             // side effects on the transcript builder's state.
-            generate_op_stmt(receiver, field_names, field_types, witness_types)
+            generate_op_stmt(receiver, field_names, field_types, witness_types, user_structs)
         }
 
         // Free-function calls used as RHS of `let` or as standalone
@@ -486,7 +503,7 @@ fn generate_op_stmt(
             // Emit witness pushes from any path-typed args first.
             let witness_emits: Vec<TokenStream> = args
                 .iter()
-                .map(|a| generate_op_stmt(a, field_names, field_types, witness_types))
+                .map(|a| generate_op_stmt(a, field_names, field_types, witness_types, user_structs))
                 .collect();
             let name_str = name.to_string();
             let value_expr = match name_str.as_str() {
@@ -508,7 +525,7 @@ fn generate_op_stmt(
         // Reference (`&expr`) forwards to its inner so side effects
         // bubble up through `&witnesses.path` etc.
         ExprIR::Reference { expr: inner, .. } => {
-            generate_op_stmt(inner, field_names, field_types, witness_types)
+            generate_op_stmt(inner, field_names, field_types, witness_types, user_structs)
         }
 
         _ => quote! {},
@@ -601,6 +618,7 @@ fn generate_map_contains_block(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
@@ -612,7 +630,7 @@ fn generate_map_contains_block(
     let k_ty = field_ty.and_then(extract_field_key_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -641,11 +659,16 @@ fn generate_map_contains_block(
 
 /// Emit the runtime ops for `Cell<T>::set(v)` — see comment in the
 /// `set`/`insert` arm above for the on-chain pattern.
-fn generate_cell_set(field_idx: u8, args: &[ExprIR], field_ty: Option<&syn::Type>) -> TokenStream {
+fn generate_cell_set(
+    field_idx: u8,
+    args: &[ExprIR],
+    field_ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
+) -> TokenStream {
     let t_ty = field_ty.and_then(extract_cell_inner_type);
     let value_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
     quote! {
         ops.push(Op::Push {
@@ -660,15 +683,73 @@ fn generate_cell_set(field_idx: u8, args: &[ExprIR], field_ty: Option<&syn::Type
     }
 }
 
+/// If `ty` is a user-defined struct registered in `user_structs`,
+/// return its fields. Otherwise None. Lets WitnessAccess and other
+/// arg helpers dispatch on struct shape the same way they dispatch on
+/// tuples.
+fn user_struct_fields<'a>(
+    ty: &syn::Type,
+    user_structs: &'a HashMap<String, Vec<UserStructField>>,
+) -> Option<&'a Vec<UserStructField>> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    if tp.qself.is_some() {
+        return None;
+    }
+    let ident = &tp.path.segments.last()?.ident;
+    user_structs.get(&ident.to_string())
+}
+
+/// Push the per-component Fr value of a struct field (or tuple
+/// component) onto `private_transcript`. Mirrors the per-type pushes in
+/// the `WitnessAccess` arm, but takes a token accessor (e.g.
+/// `witnesses.key.a`) instead of a witness ident.
+fn component_private_push(ty: &syn::Type, accessor: &TokenStream) -> TokenStream {
+    let ty_str = quote!(#ty).to_string().replace(' ', "");
+    if ty_str.starts_with("Bytes<") {
+        return quote! {
+            {
+                use midnight::runtime::transient_crypto::fab::AlignedValueExt;
+                let __av = AlignedValue::from(*(#accessor).as_bytes());
+                __av.value_only_field_repr(&mut private_transcript);
+            }
+        };
+    }
+    if ty_str == "Field" {
+        return quote! {
+            private_transcript.push(Fr::from((#accessor).value()));
+        };
+    }
+    if ty_str == "MerkleTreeDigest" {
+        return quote! {
+            private_transcript.push(
+                Fr::from_le_bytes(&(#accessor).as_le_bytes())
+                    .expect("MerkleTreeDigest bytes round-trip through Fr"),
+            );
+        };
+    }
+    if ty_str == "Boolean" || ty_str == "bool" {
+        return quote! {
+            private_transcript.push(Fr::from((#accessor).value() as u64));
+        };
+    }
+    // Uint<N> / primitive integer: cast to u64 for Fr::from.
+    quote! {
+        private_transcript.push(Fr::from((#accessor).value() as u64));
+    }
+}
+
 /// Produce a runtime Rust expression suitable for passing into
 /// `AlignedValue::from(_)` for a value of the given expected type.
-///
-/// - `Bytes<N>` → unwrap to `[u8; N]` via `*<raw>.as_bytes()`.
-/// - Single-Fr primitives (Boolean / Uint<N> / u8..u128) → `.value()` if
-///   the expression is a witness/wrapper, then apply the primitive cast
-///   from `primitive_cast_for_type`.
-/// - Unknown type → fall back to the raw `.value()`-style expression.
-fn aligned_value_arg_expr(expr: &ExprIR, ty: Option<&syn::Type>) -> TokenStream {
+/// Handles `Bytes<N>` (unwrap to `[u8; N]`), `Field` (lift to `Fr`),
+/// `MerkleTreeDigest` (full Fr via `as_le_bytes`), tuples, user
+/// structs, and single-Fr primitives via `primitive_cast_for_type`.
+fn aligned_value_arg_expr(
+    expr: &ExprIR,
+    ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
+) -> TokenStream {
     if let Some(t) = ty {
         // Tuple keys / values: build the upstream tuple shape that
         // `AlignedValue::from(_)` accepts via `Aligned for (T1, .., Tn)`.
@@ -723,6 +804,25 @@ fn aligned_value_arg_expr(expr: &ExprIR, ty: Option<&syn::Type>) -> TokenStream 
                     .expect("MerkleTreeDigest bytes round-trip through Fr")
             };
         }
+        // User-defined struct: same tuple-shape construction as
+        // syn::Type::Tuple, except components project by field name.
+        if let Some(fields) = user_struct_fields(t, user_structs) {
+            let raw = arg_to_runtime_raw_expr(expr);
+            let comps: Vec<TokenStream> = fields
+                .iter()
+                .map(|f| {
+                    let fname = f.name.clone();
+                    tuple_component_aligned_repr(&f.ty, &quote! { __t.#fname })
+                })
+                .collect();
+            let trailing = if fields.len() == 1 { quote! { , } } else { quote! {} };
+            return quote! {
+                {
+                    let __t = #raw;
+                    (#(#comps),* #trailing)
+                }
+            };
+        }
     }
     let value_expr = arg_to_runtime_expr(expr);
     match ty.and_then(primitive_cast_for_type) {
@@ -775,6 +875,7 @@ fn generate_map_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let kv = field_ty.and_then(extract_map_kv_types);
     let k_ty = kv.as_ref().map(|(k, _)| k.clone());
@@ -785,11 +886,11 @@ fn generate_map_insert(
     // while primitives still get the right `as u<N>` cast.
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
     let val_aligned = args
         .get(1)
-        .map(|a| aligned_value_arg_expr(a, v_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, v_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -824,6 +925,7 @@ fn generate_map_lookup(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
@@ -838,7 +940,7 @@ fn generate_map_lookup(
     // build as `Push` does — multi-Fr K must use `*<raw>.as_bytes()`.
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
 
     // Popeq result: V comes back from the runtime (a wrapper like Boolean
@@ -885,11 +987,12 @@ fn generate_map_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let k_ty = field_ty.and_then(extract_map_key_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1056,11 +1159,12 @@ fn generate_set_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1088,11 +1192,12 @@ fn generate_set_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref()))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1380,6 +1485,7 @@ fn generate_runtime_cond(
     expr: &ExprIR,
     field_names: &[String],
     field_types: &[syn::Type],
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     match expr {
         ExprIR::WitnessAccess { field, .. } => {
@@ -1400,7 +1506,7 @@ fn generate_runtime_cond(
                     .position(|f| f == &field_name)
                     .unwrap_or(0) as u8;
                 let field_ty = field_types.get(field_idx as usize);
-                return generate_map_contains_block(field_idx, &field_name, args, field_ty);
+                return generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs);
             }
             // Other LedgerAccess methods aren't bool-typed (lookup returns V,
             // get/value return T, increment returns nothing). Fall through to
@@ -1414,9 +1520,9 @@ fn generate_runtime_cond(
         } => {
             let method_name = method.to_string();
             match method_name.as_str() {
-                "into" | "value" => generate_runtime_cond(receiver, field_names, field_types),
+                "into" | "value" => generate_runtime_cond(receiver, field_names, field_types, user_structs),
                 _ => {
-                    let recv = generate_runtime_cond(receiver, field_names, field_types);
+                    let recv = generate_runtime_cond(receiver, field_names, field_types, user_structs);
                     let m = format_ident!("{}", method_name);
                     quote! { #recv.#m() }
                 }
@@ -1435,8 +1541,8 @@ fn generate_runtime_cond(
             _ => quote! { true },
         },
         ExprIR::BinaryOp { op, lhs, rhs, .. } => {
-            let l = generate_runtime_cond(lhs, field_names, field_types);
-            let r = generate_runtime_cond(rhs, field_names, field_types);
+            let l = generate_runtime_cond(lhs, field_names, field_types, user_structs);
+            let r = generate_runtime_cond(rhs, field_names, field_types, user_structs);
             match op {
                 syn::BinOp::Eq(_) => quote! { #l == #r },
                 syn::BinOp::Ne(_) => quote! { #l != #r },

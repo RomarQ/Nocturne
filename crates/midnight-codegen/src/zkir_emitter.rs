@@ -82,7 +82,12 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
         .circuits
         .iter()
         .map(|circuit| {
-            let mut emitter = ZkirEmitter::new(&field_names, &field_types, &witness_types);
+            let mut emitter = ZkirEmitter::new(
+                &field_names,
+                &field_types,
+                &witness_types,
+                &contract.user_structs,
+            );
             emitter.emit_circuit(circuit)
         })
         .collect();
@@ -111,6 +116,10 @@ struct ZkirEmitter {
     field_types: Vec<syn::Type>,
     /// Witness field name → type, for emitting type constraints on PrivateInput.
     witness_types: HashMap<String, syn::Type>,
+    /// User-defined struct definitions (name → fields in declaration
+    /// order). Lets `Map<MyStruct, _>` / `Set<MyStruct>` etc. layout the
+    /// struct as a tuple-of-fields for alignment + witness expansion.
+    user_structs: HashMap<String, Vec<midnight_ir::UserStructField>>,
 }
 
 impl ZkirEmitter {
@@ -118,6 +127,7 @@ impl ZkirEmitter {
         field_names: &[String],
         field_types: &[syn::Type],
         witness_types: &HashMap<String, syn::Type>,
+        user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
     ) -> Self {
         Self {
             instructions: Vec::new(),
@@ -130,6 +140,7 @@ impl ZkirEmitter {
             field_names: field_names.to_vec(),
             field_types: field_types.to_vec(),
             witness_types: witness_types.clone(),
+            user_structs: user_structs.clone(),
         }
     }
 
@@ -309,7 +320,7 @@ impl ZkirEmitter {
                 // each Fr's constraint type rather than a uniform width.
                 let layout = ty
                     .as_ref()
-                    .map(witness_fr_layout)
+                    .map(|t| witness_fr_layout(t, &self.user_structs))
                     .unwrap_or_else(|| vec![FrLayout::Field]);
                 let mut first_idx = None;
                 for entry in layout {
@@ -689,7 +700,7 @@ impl ZkirEmitter {
         // the same order `AlignedValueExt::value_only_field_repr` writes
         // them on the construct_proof side, which mirrors the IR's
         // sequential PublicInput consumption.
-        let result_enc = result_ty.and_then(aligned_value_encoding);
+        let result_enc = result_ty.and_then(|t| aligned_value_encoding(t, &self.user_structs));
         let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
         self.push_declare_pub_input(popeq_op);
 
@@ -751,7 +762,7 @@ impl ZkirEmitter {
         k_ty: &syn::Type,
         v_ty: &syn::Type,
     ) -> Option<Index> {
-        let key_enc = aligned_value_encoding(k_ty)?;
+        let key_enc = aligned_value_encoding(k_ty, &self.user_structs)?;
 
         match method_name {
             "contains" => {
@@ -760,7 +771,7 @@ impl ZkirEmitter {
                 self.emit_map_member(field_idx, &key_vars, &key_enc)
             }
             "insert" | "set" => {
-                let val_enc = aligned_value_encoding(v_ty)?;
+                let val_enc = aligned_value_encoding(v_ty, &self.user_structs)?;
                 let k_first = args.first().and_then(|a| self.emit_expr(a))?;
                 let v_first = args.get(1).and_then(|a| self.emit_expr(a))?;
                 let key_vars = gather_n_vars(k_first, key_enc.value_field_count);
@@ -773,7 +784,7 @@ impl ZkirEmitter {
                 self.emit_map_remove(field_idx, &key_vars, &key_enc)
             }
             "lookup" => {
-                let val_enc = aligned_value_encoding(v_ty)?;
+                let val_enc = aligned_value_encoding(v_ty, &self.user_structs)?;
                 let first = args.first().and_then(|a| self.emit_expr(a))?;
                 let key_vars = gather_n_vars(first, key_enc.value_field_count);
                 self.emit_map_lookup(field_idx, &key_vars, &key_enc, v_ty, &val_enc)
@@ -1109,7 +1120,7 @@ impl ZkirEmitter {
         args: &[midnight_ir::ExprIR],
         t_ty: &syn::Type,
     ) -> Option<Index> {
-        let key_enc = aligned_value_encoding(t_ty)?;
+        let key_enc = aligned_value_encoding(t_ty, &self.user_structs)?;
         match method_name {
             "contains" | "member" => {
                 let first = args.first().and_then(|a| self.emit_expr(a))?;
@@ -1565,7 +1576,8 @@ impl ZkirEmitter {
         // Push { storage:false, Cell(Field(user_digest)) }. Reuse
         // emit_push_cell with the Field encoding from Phase A.
         let field_ty: syn::Type = syn::parse_quote!(Field);
-        let enc = aligned_value_encoding(&field_ty).expect("Field encoding must exist");
+        let enc = aligned_value_encoding(&field_ty, &self.user_structs)
+            .expect("Field encoding must exist");
         self.emit_push_cell(&[digest_var], Some(&enc), /* storage = */ false);
 
         // Eq { 0x02 } compares the two Cells on the stack and pushes a bool.
@@ -1634,7 +1646,7 @@ impl ZkirEmitter {
             .and_then(extract_cell_inner_type);
         let n_fr = inner_ty
             .as_ref()
-            .and_then(aligned_value_encoding)
+            .and_then(|t| aligned_value_encoding(t, &self.user_structs))
             .map(|e| e.value_field_count)
             .unwrap_or(1);
         (first..first + n_fr as Index).collect()
@@ -1652,7 +1664,9 @@ impl ZkirEmitter {
                 .field_types
                 .get(field_idx as usize)
                 .and_then(extract_cell_inner_type);
-            let value_encoding = inner_ty.as_ref().and_then(aligned_value_encoding);
+            let value_encoding = inner_ty
+                .as_ref()
+                .and_then(|t| aligned_value_encoding(t, &self.user_structs));
             self.emit_push_cell(
                 value_vars,
                 value_encoding.as_ref(),
@@ -1843,30 +1857,47 @@ fn aligned_value_encoding_bytes(n: u32) -> AlignedValueEncoding {
 /// Returns `None` for types not yet handled (multi-Fr value layouts like
 /// large `Bytes<N>`, custom ADTs). Callers fall back to the legacy
 /// 2-declare emission path.
-fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
-    // Tuples concatenate component alignments (per upstream
-    // `Aligned for (T1, ..., Tn)`) and sum value field counts. The
-    // alignment_atoms vector loses the per-component grouping but the
-    // on-chain VM only sees a flat list of AlignmentAtoms anyway, so
-    // concatenation gives the same encoding as the upstream impl.
-    if let syn::Type::Tuple(tt) = ty {
+fn aligned_value_encoding(
+    ty: &syn::Type,
+    user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
+) -> Option<AlignedValueEncoding> {
+    // Compose a flat encoding from an ordered list of component types,
+    // mirroring upstream `Aligned for (T1, ..., Tn)`. Shared between
+    // tuples and user structs (whose named fields layout identically).
+    let compose = |comps: &[syn::Type]| -> Option<AlignedValueEncoding> {
         let mut atoms: Vec<i32> = Vec::new();
         let mut count: usize = 0;
-        for elem in &tt.elems {
-            let inner = aligned_value_encoding(elem)?;
+        for elem in comps {
+            let inner = aligned_value_encoding(elem, user_structs)?;
             atoms.extend(inner.alignment_atoms.iter().skip(1));
             count += inner.value_field_count;
         }
-        // Leading atom-count: total atom count across all components,
-        // mirroring how every other arm shapes alignment_atoms as
-        // [count, ..atoms].
         let total = atoms.len() as i32;
         let mut alignment_atoms = vec![total];
         alignment_atoms.extend(atoms);
-        return Some(AlignedValueEncoding {
+        Some(AlignedValueEncoding {
             alignment_atoms,
             value_field_count: count,
-        });
+        })
+    };
+
+    if let syn::Type::Tuple(tt) = ty {
+        let comps: Vec<syn::Type> = tt.elems.iter().cloned().collect();
+        return compose(&comps);
+    }
+
+    // User-defined named struct: look up its fields and treat as a
+    // named tuple. Match by the outer ident on the type path; the rest
+    // of the path is ignored (this is intentional for now —
+    // `module::path::MyKey` and bare `MyKey` should both resolve when
+    // they refer to the same user struct in scope).
+    if let syn::Type::Path(tp) = ty
+        && tp.qself.is_none()
+        && let Some(seg) = tp.path.segments.last()
+        && let Some(fields) = user_structs.get(&seg.ident.to_string())
+    {
+        let comps: Vec<syn::Type> = fields.iter().map(|f| f.ty.clone()).collect();
+        return compose(&comps);
     }
 
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
@@ -1975,7 +2006,10 @@ enum FrLayout {
 /// `MerkleTreePath<H, T>` expands as `T`'s leaf layout followed by H
 /// repetitions of `[Field, Boolean]` (one sibling + one goes_left per
 /// path entry).
-fn witness_fr_layout(ty: &syn::Type) -> Vec<FrLayout> {
+fn witness_fr_layout(
+    ty: &syn::Type,
+    user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
+) -> Vec<FrLayout> {
     // Tuples concatenate their components' layouts in declaration order.
     // Mirrors `Aligned for (T1, ..., Tn)` upstream
     // (base-crypto/src/fab/alignments.rs:49-53), and lets `Map<(K1, K2), V>`
@@ -1983,7 +2017,20 @@ fn witness_fr_layout(ty: &syn::Type) -> Vec<FrLayout> {
     if let syn::Type::Tuple(tt) = ty {
         let mut layout = Vec::new();
         for elem in &tt.elems {
-            layout.extend(witness_fr_layout(elem));
+            layout.extend(witness_fr_layout(elem, user_structs));
+        }
+        return layout;
+    }
+
+    // User-defined struct: same shape as a tuple of its fields.
+    if let syn::Type::Path(tp) = ty
+        && tp.qself.is_none()
+        && let Some(seg) = tp.path.segments.last()
+        && let Some(fields) = user_structs.get(&seg.ident.to_string())
+    {
+        let mut layout = Vec::new();
+        for f in fields {
+            layout.extend(witness_fr_layout(&f.ty, user_structs));
         }
         return layout;
     }

@@ -288,11 +288,37 @@ the Bytes<32>-only coverage left implicit.
 
 E2E coverage: `Map<(Field, Uint<64>), Uint<64>>::{insert, contains}`.
 
-Struct keys (named record types) are NOT yet supported — would need
-parser-level recognition of user-defined struct types as ledger field
-parameters plus field-by-field encoding/witness expansion. Tuples are
-the anonymous version of the same shape and cover most practical
-"compound key" use cases.
+### Struct keys (2026-05-19)
+
+`Map<MyKey, V>` and `Set<MyKey>` work for any user-defined named
+struct whose fields are made of primitives (Field, Uint<N>, Bytes<N>,
+Boolean, MerkleTreeDigest, or other supported types). On-chain
+encoding is identical to the equivalent anonymous tuple — only the
+runtime projection differs (`key.a` vs `key.0`).
+
+How it works:
+
+- The IR parser (`midnight-ir/src/parse.rs`) collects every plain
+  user struct (without `#[midnight(...)]`) into
+  `ContractIR.user_structs: HashMap<String, Vec<UserStructField>>`
+  during contract parsing.
+- `zkir_emitter::ZkirEmitter` and the transcript codegen thread that
+  map through their helpers. Both `aligned_value_encoding` and
+  `witness_fr_layout` recognize a `syn::Type::Path` whose ident is in
+  the map and treat its fields as if they were a tuple of the field
+  types, mirroring the existing tuple arms.
+- The transcript-side `WitnessAccess` arm grew a struct branch that
+  projects each field by name via `component_private_push`, and
+  `aligned_value_arg_expr` gained a parallel branch that builds the
+  tuple-shape AlignedValue argument by projecting fields by name
+  instead of by index.
+
+E2E coverage: `Map<MyKey, Uint<64>>::{insert, contains}` with
+`MyKey { a: Field, b: Uint<64> }`.
+
+Nested struct/tuple fields work in principle — `aligned_value_encoding`
+and `witness_fr_layout` recursively handle whatever the field types
+are — but the e2e tests only exercise the single-level case for now.
 
 ## References
 

@@ -22,6 +22,19 @@ pub struct ContractIR {
     pub queries: Vec<QueryIR>,
     /// All other items in the module (passed through unchanged).
     pub other_items: Vec<syn::Item>,
+    /// User-defined `struct` items in the contract module that don't
+    /// carry a `#[midnight(...)]` annotation. Indexed by the struct's
+    /// outer ident; each entry is the named-field list in declaration
+    /// order. Used by codegen to layout user structs as Map/Set keys
+    /// (treats them like a named tuple of their fields).
+    pub user_structs: std::collections::HashMap<String, Vec<UserStructField>>,
+}
+
+/// One field of a user-defined struct usable as a Map/Set key.
+#[derive(Debug, Clone)]
+pub struct UserStructField {
+    pub name: Ident,
+    pub ty: Type,
 }
 
 /// IR for the `#[midnight(ledger)]` struct.

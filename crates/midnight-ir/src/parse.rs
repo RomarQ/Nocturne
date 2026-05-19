@@ -22,6 +22,8 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
     let mut circuits: Vec<CircuitIR> = Vec::new();
     let mut queries: Vec<QueryIR> = Vec::new();
     let mut other_items: Vec<Item> = Vec::new();
+    let mut user_structs: std::collections::HashMap<String, Vec<UserStructField>> =
+        std::collections::HashMap::new();
     let mut diagnostics = Diagnostics::new();
 
     for item in items {
@@ -50,6 +52,22 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                     }
                 }
                 _ => {
+                    // Plain user struct — record its named fields if any
+                    // so codegen can treat it as a Map/Set key. Tuple
+                    // structs and unit structs are left as opaque.
+                    if let syn::Fields::Named(named) = &s.fields {
+                        let fields: Vec<UserStructField> = named
+                            .named
+                            .iter()
+                            .filter_map(|f| {
+                                Some(UserStructField {
+                                    name: f.ident.clone()?,
+                                    ty: f.ty.clone(),
+                                })
+                            })
+                            .collect();
+                        user_structs.insert(s.ident.to_string(), fields);
+                    }
                     other_items.push(item);
                 }
             },
@@ -103,6 +121,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
         circuits,
         queries,
         other_items,
+        user_structs,
     })
 }
 
