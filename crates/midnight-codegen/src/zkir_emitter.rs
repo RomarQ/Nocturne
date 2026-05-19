@@ -685,8 +685,19 @@ impl ZkirEmitter {
                 let key_var = args.first().and_then(|a| self.emit_expr(a))?;
                 self.emit_map_remove(field_idx, key_var, &key_enc)
             }
-            // `get` is the remaining stage. Leave it to fall through to the
-            // unsupported path until then.
+            "lookup" => {
+                // Value encoding requires V to fit in a single Fr today.
+                // Multi-Fr V is tracked alongside the Bytes<N>-as-value work.
+                let val_enc = aligned_value_encoding(v_ty)?;
+                if val_enc.value_field_count != 1 {
+                    return None;
+                }
+                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
+                self.emit_map_lookup(field_idx, key_var, &key_enc, &val_enc)
+            }
+            // `get` returns Option<V> and would require Option alignment
+            // encoding plus higher-level expansion (contains + conditional
+            // lookup); leave it to fall through until that work lands.
             _ => {
                 for arg in args {
                     self.emit_expr(arg);
@@ -838,6 +849,93 @@ impl ZkirEmitter {
             .push(Instruction::ConstrainToBoolean { var: result_var });
 
         Some(result_var)
+    }
+
+    /// Emit ZKIR for `Map::lookup(&k) -> V` at `field_idx`.
+    ///
+    /// Mirrors compactc 0.30.0 emission for `m.lookup(k)` (see
+    /// `/tmp/cond-experiments/map_out/zkir/lookup.zkir`):
+    ///
+    /// ```text
+    /// Dup  { n: 0 }                                          // [0x30]
+    /// Idx  { cached: false, push_path: false, [Bytes<1>(f)]} // [0x50, 1, 1, field_idx]
+    /// Idx  { cached: false, push_path: false, [Cell(key)]}   // [0x50, 1, K-align, K-value]
+    /// Popeq { cached: false, result: AlignedValue<V> }       // [0x0c, 1, V-align, value]
+    /// ```
+    ///
+    /// `lookup` is assert-exists: if the key is missing, the on-chain VM
+    /// puts `StateValue::Null` on the stack at the second `Idx`, then the
+    /// `Popeq` fails at `.as_cell()`. Callers that may not have the key
+    /// should `contains` first or use `Map::get` (Option<V>) when that
+    /// arrives.
+    ///
+    /// The second `Idx` (the one indexing by the user key) drops `push_path`
+    /// because we don't need to write back — `lookup` is read-only.
+    fn emit_map_lookup(
+        &mut self,
+        field_idx: u8,
+        key_var: Index,
+        key_encoding: &AlignedValueEncoding,
+        val_encoding: &AlignedValueEncoding,
+    ) -> Option<Index> {
+        let g = self.guard;
+
+        // Dup { n: 0 } → 0x30.
+        let dup_op = self.emit_load_imm(Fr::from(0x30u64));
+        self.push_declare_pub_input(dup_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Idx { cached: false, push_path: false, path: [Bytes<1>(field_idx)] }
+        // navigates into the contract Array to land on the Map slot.
+        let idx_op = self.emit_load_imm(Fr::from(0x50u64));
+        self.push_declare_pub_input(idx_op);
+        self.emit_key_field_repr(field_idx);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Second Idx: same opcode, but with the user-typed key as path. The
+        // emit path mirrors emit_push_cell's per-type alignment but the
+        // opcode is 0x50 (Idx) instead of 0x10 (Push), and there's no
+        // Cell-discriminant byte — the path entry is just `Key::Value(av)`
+        // whose field_repr is `av.field_repr` = [seg_count, ..atoms, value].
+        let idx_op2 = self.emit_load_imm(Fr::from(0x50u64));
+        self.push_declare_pub_input(idx_op2);
+        for atom in &key_encoding.alignment_atoms {
+            let v = self.emit_load_imm(Fr::from(*atom as u64));
+            self.push_declare_pub_input(v);
+        }
+        self.push_declare_pub_input(key_var);
+        // Total: opcode (1) + alignment atoms (N) + value (1)
+        let count2 = 2 + key_encoding.alignment_atoms.len();
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: count2 as u32,
+        });
+
+        // Popeq { cached: false, result: AlignedValue<V> } → 0x0c.
+        // Compactc uses 0x0c (cached:false) for lookup specifically —
+        // distinct from member's cached:true — because the actual read
+        // happens here.
+        let read_value = self.emit_instruction(Instruction::PublicInput { guard: None });
+        let popeq_op = self.emit_load_imm(Fr::from(0x0cu64));
+        self.push_declare_pub_input(popeq_op);
+        for atom in &val_encoding.alignment_atoms {
+            let v = self.emit_load_imm(Fr::from(*atom as u64));
+            self.push_declare_pub_input(v);
+        }
+        self.push_declare_pub_input(read_value);
+        let count3 = 2 + val_encoding.alignment_atoms.len();
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: count3 as u32,
+        });
+
+        Some(read_value)
     }
 
     /// Emit ZKIR for `Map::remove(&k)` at `field_idx`. The return value

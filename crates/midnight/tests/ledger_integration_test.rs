@@ -132,6 +132,11 @@ mod records {
         pub fn erase(&mut self, witnesses: &RecordsWitnesses) {
             self.records.remove(&witnesses.user_id);
         }
+
+        #[midnight(circuit)]
+        pub fn fetch(&self, witnesses: &RecordsWitnesses) {
+            let _v = self.records.lookup(&witnesses.user_id);
+        }
     }
 }
 
@@ -313,6 +318,10 @@ fn build_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
                 pub fn erase(&mut self, witnesses: &RecordsWitnesses) {
                     self.records.remove(&witnesses.user_id);
                 }
+                #[midnight(circuit)]
+                pub fn fetch(&self, witnesses: &RecordsWitnesses) {
+                    let _v = self.records.lookup(&witnesses.user_id);
+                }
             }
         }
     };
@@ -332,6 +341,10 @@ fn build_record_ir() -> midnight_zkir::IrSource {
 
 fn build_erase_ir() -> midnight_zkir::IrSource {
     build_records_circuit_ir("erase")
+}
+
+fn build_fetch_ir() -> midnight_zkir::IrSource {
+    build_records_circuit_ir("fetch")
 }
 
 fn build_check_member_ir() -> midnight_zkir::IrSource {
@@ -871,4 +884,63 @@ async fn counter_value_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Counter::value");
+}
+
+/// Confirms `Map<Uint<64>, Uint<64>>::lookup(&k) -> V` produces an on-chain
+/// compatible transcript: Dup + Idx(field) + Idx(key) + Popeq(V) matches
+/// between IR and runtime ops, the Popeq result is computed off-chain from
+/// the populated state, and the proof verifies through the canonical ledger
+/// path. Mirrors compactc 0.30.0's `lookup` emission.
+///
+/// `lookup` is assert-exists, so the test pre-populates the Map before
+/// building the transcript. A missing key would fail at construct_proof
+/// time when the IR's Popeq verify mismatched the on-chain Null vs. the
+/// claimed value.
+#[tokio::test]
+async fn map_lookup_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_fetch_ir();
+    let mut state = records::RecordsState::new();
+    // Pre-populate so lookup finds the key.
+    state
+        .records
+        .insert(Uint::<64>::from(7u64), Uint::<64>::from(42u64));
+
+    let witnesses = records::RecordsWitnesses {
+        user_id: Uint::<64>::from(7u64),
+        amount: Uint::<64>::from(0u64),
+    };
+    let nocturne_transcript = records::transcript::build_fetch_transcript(&state, &witnesses);
+
+    // PrivateInput reads only `user_id` for fetch.
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            7u64,
+        )];
+    let preimage = canonical_preimage("fetch", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Map::lookup"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map::lookup");
 }

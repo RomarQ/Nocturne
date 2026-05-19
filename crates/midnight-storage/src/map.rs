@@ -21,6 +21,19 @@ impl<K: Eq + Hash + Clone, V: Clone> Map<K, V> {
         self.inner.get(key).cloned()
     }
 
+    /// Compact-style `lookup`: returns the stored value, panicking if the
+    /// key is absent. The on-chain VM enforces the same invariant — its
+    /// `Popeq` requires the value popped from the stack to be a
+    /// `StateValue::Cell`, so a `Map::lookup` for a missing key fails at
+    /// proof construction with `ReadMismatch`. Use `contains` first if the
+    /// key might not be present.
+    pub fn lookup(&self, key: &K) -> V {
+        self.inner
+            .get(key)
+            .cloned()
+            .expect("Map::lookup on a missing key")
+    }
+
     pub fn set(&mut self, key: K, value: V) {
         self.inner.insert(key, value);
     }

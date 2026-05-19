@@ -84,9 +84,16 @@ Beyond per-operation emission, Map needs:
 |---|---|---|
 | Stage 0 | Generic key encoding (`emit_key_field_repr` for any `K`) + StateValue construction helpers | landed (alongside Cell::set) |
 | Stage 1 | `Map::contains(&k) -> bool` end-to-end with ledger integration test | **landed** |
-| Stage 2 | `Map::get(&k) -> Option<V>` end-to-end | pending |
+| Stage 2 | `Map::lookup(&k) -> V` end-to-end with ledger integration test | **landed** |
 | Stage 3 | `Map::insert(k, v)` end-to-end with ledger integration test | **landed** |
 | Stage 4 | `Map::remove(&k)` end-to-end with ledger integration test | **landed** |
+
+`Map::get(&k) -> Option<V>` (Rust HashMap idiom) is not on-chain
+representable as a single VM op — `Popeq.as_cell()` rejects
+`StateValue::Null`, so a missing key fails the proof rather than
+returning `None`. True Option-returning semantics would need a
+higher-level IR expansion (`contains` + conditional `lookup`), which is
+deferred to future work.
 
 ### Stage 1 status
 
@@ -135,6 +142,35 @@ Beyond per-operation emission, Map needs:
   through `ContractCallExt::construct_proof`. Insert returns no value
   so the test has no Popeq — purely the 5-op sequence.
 
+### Stage 2 status
+
+`Map<K, V>::lookup(&k) -> V` is on-chain compatible for single-Fr K and V.
+Matches compactc 0.30.0's emission for `m.lookup(k)`:
+
+```text
+Dup{n:0}                                                    → [0x30]
+Idx{cached:false, push_path:false, [Bytes<1>(field_idx)]}   → [0x50, 1, 1, field_idx]
+Idx{cached:false, push_path:false, [Key::Value(key)]}        → [0x50, 1, K-align, K-value]
+Popeq{cached:false, result: AlignedValue<V>}                 → [0x0c, 1, V-align, value]
+```
+
+`lookup` is **assert-exists**: missing keys land `StateValue::Null` on
+the stack at the second Idx, then `Popeq.as_cell()` fails. Callers that
+might not have the key should `contains` first.
+
+Empirical compactc reference: `/tmp/cond-experiments/map_out/zkir/lookup.zkir`.
+
+Implementation notes:
+- The second Idx is the key-by-value step (path entry is `Key::Value(AlignedValue::from(key))`).
+- Popeq uses `cached:false` (0x0c), not `cached:true` like Map::contains,
+  because the read actually happens here. (Compactc agrees.)
+- `unwrap_to_aligned_primitive` in `transcript_codegen.rs` unwraps the
+  V-type result for `AlignedValue::from`: `Boolean → .value()`,
+  `Uint<N> → .value() as u<N>`.
+- Runtime helper `Map::lookup` added in `crates/midnight-storage/src/map.rs`,
+  panicking if the key is absent (mirrors the VM behavior at proof time).
+- E2E test: `ledger_integration_test::map_lookup_proves_and_verifies`.
+
 ### Stage 4 status
 
 `Map<K, V>::remove(&k)` is on-chain compatible for single-Fr K. The
@@ -157,13 +193,14 @@ one step (vs. insert which needs Push(value) + first Ins). The trailing
 
 E2E test: `ledger_integration_test::map_remove_proves_and_verifies`.
 
-### Remaining stage
+### Stages remaining
 
-- **Stage 2 (`Map::get`)**: returns `Option<V>` which needs Option
-  alignment encoding (`Alignment::concat([bool, V])`). Likely needs a
-  new `aligned_value_encoding_option(v_ty)` variant and matching IR
-  emission for the Option discriminant + V slot. Unblocks plumbing the
-  return value of `remove` through too (both return `Option<V>`).
+All four primitives Compact exposes for Map (`member`/`lookup`/`insert`/
+`remove`) are now on-chain compatible end-to-end in Nocturne. The Rust
+HashMap-style `Map::get → Option<V>` is still missing — see the note
+above the staging table. The next Map-related work is therefore either
+that Option<V> expansion or moving on to other ledger primitives
+(Bytes<N> as Map keys/values, Set/MerkleTree).
 
 ## References
 

@@ -165,7 +165,7 @@ fn expr_needs_state(expr: &ExprIR) -> bool {
             let m = method.to_string();
             matches!(
                 m.as_str(),
-                "contains" | "member" | "get" | "value" | "__direct_access"
+                "contains" | "member" | "lookup" | "get" | "value" | "__direct_access"
             ) || args.iter().any(expr_needs_state)
         }
         ExprIR::If {
@@ -332,6 +332,9 @@ fn generate_op_stmt(
                 }
                 "remove" if field_ty.and_then(extract_map_kv_types).is_some() => {
                     generate_map_remove(field_idx, args, field_ty)
+                }
+                "lookup" if field_ty.and_then(extract_map_kv_types).is_some() => {
+                    generate_map_lookup(field_idx, &field_name, args, field_ty)
                 }
                 _ => quote! {},
             }
@@ -584,6 +587,68 @@ fn generate_map_insert(
     }
 }
 
+/// Emit the runtime ops for `Map<K, V>::lookup(&k) -> V`. The Popeq result
+/// must be the actual stored value the on-chain VM will compute, so call
+/// the runtime stub on `state`. Mirrors compactc 0.30.0's lookup emission:
+///
+///   Dup{n:0}
+///   Idx{cached:false, push_path:false, [Bytes<1>(field_idx)]}   // navigate to Map
+///   Idx{cached:false, push_path:false, [Key::Value(key)]}        // index by key
+///   Popeq{cached:false, result: AlignedValue::from(state.<f>.lookup(&k))}
+fn generate_map_lookup(
+    field_idx: u8,
+    field_name: &str,
+    args: &[ExprIR],
+    field_ty: Option<&syn::Type>,
+) -> TokenStream {
+    let field_ident = format_ident!("{}", field_name);
+    let raw_key = args
+        .first()
+        .map(arg_to_runtime_raw_expr)
+        .unwrap_or_else(|| quote! { () });
+    let key_expr = args
+        .first()
+        .map(arg_to_runtime_expr)
+        .unwrap_or_else(|| quote! { () });
+
+    let kv = field_ty.and_then(extract_map_kv_types);
+    let key_cast = kv
+        .as_ref()
+        .and_then(|(k, _)| primitive_cast_for_type(k))
+        .map(|c| quote! { (#key_expr) #c })
+        .unwrap_or_else(|| quote! { #key_expr });
+    // For the Popeq result, the value comes back from the runtime as a V
+    // (which may be a wrapper like Boolean/Uint<N>). Unwrap to the primitive
+    // type AlignedValue::from accepts.
+    let val_expr = match kv.as_ref().map(|(_, v)| v) {
+        Some(v_ty) => {
+            unwrap_to_aligned_primitive(quote! { state.#field_ident.lookup(&__key) }, v_ty)
+        }
+        None => quote! { state.#field_ident.lookup(&__key) },
+    };
+
+    quote! {
+        {
+            let __key = #raw_key;
+            ops.push(Op::Dup { n: 0 });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: false,
+                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+            });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: false,
+                path: vec![Key::Value(AlignedValue::from(#key_cast))].into_iter().collect(),
+            });
+            ops.push(Op::Popeq {
+                cached: false,
+                result: AlignedValue::from(#val_expr),
+            });
+        }
+    }
+}
+
 /// Emit the runtime ops for `Map<K, V>::remove(&k)`. Same Idx + Push pattern
 /// as `insert`, but with `Rem` instead of `Push(value) + Ins(first)` — the
 /// VM-level `Rem` pops `[key, container]` and pushes back the modified
@@ -623,6 +688,26 @@ fn generate_map_remove(
         ops.push(Op::Rem { cached: false });
         ops.push(Op::Ins { cached: true, n: 1 });
     }
+}
+
+/// Wrap `expr` to produce a value `AlignedValue::from(_)` can accept for
+/// type `ty`. Handles wrapper types (`Boolean` → `.value()`, `Uint<N>` →
+/// `.value() as u<N>`) and raw primitives (identity cast). Returns the
+/// raw expression if the type isn't recognized.
+fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream {
+    let ty_str = quote!(#ty).to_string().replace(' ', "");
+    if ty_str == "Boolean" {
+        return quote! { (#expr).value() };
+    }
+    if ty_str.starts_with("Uint<")
+        && let Some(c) = primitive_cast_for_type(ty)
+    {
+        return quote! { (#expr).value() #c };
+    }
+    if let Some(c) = primitive_cast_for_type(ty) {
+        return quote! { (#expr) #c };
+    }
+    expr
 }
 
 /// Map a Rust type that flows into `AlignedValue::from(_)` to the primitive

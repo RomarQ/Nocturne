@@ -298,6 +298,83 @@ mod tests {
     }
 
     #[test]
+    fn map_lookup_is_satisfiable() {
+        // Verifies the IR shape for `Map<K, V>::lookup(&k) -> V`. Encoding
+        // (matches compactc 0.30.0's lookup.zkir):
+        //   Dup{n:0}                                                    → [0x30]
+        //   Idx{cached:false, push_path:false, [Bytes<1>(field_idx)]}   → [0x50, 1, 1, field_idx]
+        //   Idx{cached:false, push_path:false, [Key::Value(key)]}        → [0x50, 1, K-align, K-value]
+        //   Popeq{cached:false, result: AlignedValue<V>}                 → [0x0c, 1, V-align, value]
+        let (name, ir) = compile_first_circuit(quote::quote! {
+            mod records {
+                #[midnight(ledger)]
+                pub struct State {
+                    records: Map<Uint<64>, Uint<64>>,
+                }
+                #[midnight(witnesses)]
+                pub struct W {
+                    user_id: Uint<64>,
+                }
+                impl State {
+                    #[midnight(constructor)]
+                    pub fn new() -> Self { Self { records: Map::empty() } }
+                    #[midnight(circuit)]
+                    pub fn fetch(&self, witnesses: &W) {
+                        let _v = self.records.lookup(&witnesses.user_id);
+                    }
+                }
+            }
+        });
+        print_zkir(&name, &ir);
+
+        let key_val = Fr::from(7u64);
+        let stored_val = Fr::from(42u64);
+
+        let public_transcript_inputs: Vec<Fr> = vec![
+            Fr::from(0x30u64),
+            // First Idx (field_idx)
+            Fr::from(0x50u64),
+            Fr::from(0x01u64),
+            Fr::from(0x01u64),
+            Fr::from(0x00u64),
+            // Second Idx (key)
+            Fr::from(0x50u64),
+            Fr::from(0x01u64),
+            Fr::from(0x08u64),
+            key_val,
+            // Popeq (V = u64)
+            Fr::from(0x0cu64),
+            Fr::from(0x01u64),
+            Fr::from(0x08u64),
+            stored_val,
+        ];
+
+        let preimage = ProofPreimage {
+            inputs: vec![],
+            private_transcript: vec![key_val],
+            public_transcript_inputs,
+            public_transcript_outputs: vec![stored_val],
+            binding_input: Fr::from(42u64),
+            communications_commitment: if ir.do_communications_commitment {
+                Some(comm_for(&[], &[]))
+            } else {
+                None
+            },
+            key_location: KeyLocation(std::borrow::Cow::Borrowed("test")),
+        };
+
+        match ir.check(&preimage) {
+            Ok(pi_skips) => {
+                println!("✓ Circuit '{name}' satisfiable! pi_skips: {pi_skips:?}");
+            }
+            Err(e) => {
+                let json = serde_json::to_string_pretty(&ir).unwrap_or_default();
+                panic!("Circuit '{name}' check failed: {e}\n\nZKIR:\n{json}");
+            }
+        }
+    }
+
+    #[test]
     fn map_remove_is_satisfiable() {
         // Verifies the IR shape for `Map<K, V>::remove(&k)`. Encoding:
         //   Idx{cached:false, push_path:true, [Bytes<1>(field_idx)]} → [0x70, 1, 1, field_idx]
