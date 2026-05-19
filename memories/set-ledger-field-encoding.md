@@ -42,5 +42,11 @@ Reproduce with `compactc /tmp/set-experiments/set.compact /tmp/set-experiments/o
 
 ## Limitations
 
-- Like Map, multi-Fr value types beyond `Bytes<N>` (custom ADTs, `Field`) aren't supported.
+- Like Map, multi-Fr value types beyond `Bytes<N>` (custom ADTs, tuple/struct elements) aren't supported.
 - Set::contains/insert/remove inside conditional branches inherits the [[conditional-io-guards]] and [[conditional-branch-cond-select-zeroing]] machinery — not explicitly e2e-tested for Set yet but the same code paths cover it.
+
+## Wider element types (2026-05-19)
+
+`Set<Field>` and `Set<MerkleTreeDigest>` work end-to-end. No additional codegen was needed beyond the `Map<Field, V>` / `Map<MerkleTreeDigest, V>` fix that landed the same day — Set routes through the same `aligned_value_encoding` (IR) and `aligned_value_arg_expr` (transcript) paths via `extract_field_key_type`, so MerkleTreeDigest gaining a Field-aligned encoding and a `Fr::from_le_bytes(&d.as_le_bytes())` arg expression automatically lit up Set.
+
+E2E coverage: `Set<Field>::{insert, contains, remove}`, `Set<MerkleTreeDigest>::{insert, contains, remove}` — all six prove + verify through `ContractCallExt::construct_proof`.

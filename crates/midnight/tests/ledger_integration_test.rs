@@ -4600,3 +4600,408 @@ async fn map_digest_key_contains_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map<MerkleTreeDigest, _>::contains");
 }
+
+// ---------------------------------------------------------------------------
+// Wider Set element types: Set<Field> and Set<MerkleTreeDigest>. Set reuses
+// Map's on-chain ops (StateValue::Null as the value slot), so the same
+// Field-aligned key handling should apply by construction. These tests pin
+// that down end-to-end.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod set_field_elem {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct SetFieldState {
+        pub members: Set<Field>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct SetFieldWitnesses {
+        pub elem: Field,
+    }
+
+    impl SetFieldState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                members: Set::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn add(&mut self, witnesses: &SetFieldWitnesses) {
+            self.members.insert(witnesses.elem);
+        }
+
+        #[midnight(circuit)]
+        pub fn check(&self, witnesses: &SetFieldWitnesses) {
+            let _exists = self.members.contains(&witnesses.elem);
+        }
+
+        #[midnight(circuit)]
+        pub fn erase(&mut self, witnesses: &SetFieldWitnesses) {
+            self.members.remove(&witnesses.elem);
+        }
+    }
+}
+
+fn build_set_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod set_field_elem {
+            #[midnight(ledger)]
+            pub struct SetFieldState { members: Set<Field> }
+            #[midnight(witnesses)]
+            pub struct SetFieldWitnesses { pub elem: Field }
+            impl SetFieldState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { members: Set::empty() } }
+                #[midnight(circuit)]
+                pub fn add(&mut self, witnesses: &SetFieldWitnesses) {
+                    self.members.insert(witnesses.elem);
+                }
+                #[midnight(circuit)]
+                pub fn check(&self, witnesses: &SetFieldWitnesses) {
+                    let _exists = self.members.contains(&witnesses.elem);
+                }
+                #[midnight(circuit)]
+                pub fn erase(&mut self, witnesses: &SetFieldWitnesses) {
+                    self.members.remove(&witnesses.elem);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn set_field_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_field_ir("add");
+    let elem = Field::from(0x1234u64);
+    let witnesses = set_field_elem::SetFieldWitnesses { elem };
+    let nocturne_transcript =
+        set_field_elem::transcript::build_add_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(Fr::from(elem.value()))];
+    let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Set<Field>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<Field>::insert");
+}
+
+#[tokio::test]
+async fn set_field_contains_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_field_ir("check");
+    let state = set_field_elem::SetFieldState::new();
+    let elem = Field::from(0x5678u64);
+    let witnesses = set_field_elem::SetFieldWitnesses { elem };
+    let nocturne_transcript =
+        set_field_elem::transcript::build_check_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(Fr::from(elem.value()))];
+    let preimage = canonical_preimage("check", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Set<Field>::contains"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<Field>::contains");
+}
+
+#[tokio::test]
+async fn set_field_remove_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_field_ir("erase");
+    let elem = Field::from(0x9abcu64);
+    let witnesses = set_field_elem::SetFieldWitnesses { elem };
+    let nocturne_transcript =
+        set_field_elem::transcript::build_erase_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(Fr::from(elem.value()))];
+    let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Set<Field>::remove"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<Field>::remove");
+}
+
+#[midnight::contract]
+mod set_digest_elem {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct SetDigestState {
+        pub members: Set<MerkleTreeDigest>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct SetDigestWitnesses {
+        pub elem: MerkleTreeDigest,
+    }
+
+    impl SetDigestState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                members: Set::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn add(&mut self, witnesses: &SetDigestWitnesses) {
+            self.members.insert(witnesses.elem);
+        }
+
+        #[midnight(circuit)]
+        pub fn check(&self, witnesses: &SetDigestWitnesses) {
+            let _exists = self.members.contains(&witnesses.elem);
+        }
+
+        #[midnight(circuit)]
+        pub fn erase(&mut self, witnesses: &SetDigestWitnesses) {
+            self.members.remove(&witnesses.elem);
+        }
+    }
+}
+
+fn build_set_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod set_digest_elem {
+            #[midnight(ledger)]
+            pub struct SetDigestState { members: Set<MerkleTreeDigest> }
+            #[midnight(witnesses)]
+            pub struct SetDigestWitnesses { pub elem: MerkleTreeDigest }
+            impl SetDigestState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { members: Set::empty() } }
+                #[midnight(circuit)]
+                pub fn add(&mut self, witnesses: &SetDigestWitnesses) {
+                    self.members.insert(witnesses.elem);
+                }
+                #[midnight(circuit)]
+                pub fn check(&self, witnesses: &SetDigestWitnesses) {
+                    let _exists = self.members.contains(&witnesses.elem);
+                }
+                #[midnight(circuit)]
+                pub fn erase(&mut self, witnesses: &SetDigestWitnesses) {
+                    self.members.remove(&witnesses.elem);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn set_digest_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_digest_ir("add");
+    let elem = MerkleTreeDigest::new(Field::from(0xFEEDu64));
+    let witnesses = set_digest_elem::SetDigestWitnesses { elem };
+    let nocturne_transcript =
+        set_digest_elem::transcript::build_add_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
+        Fr::from_le_bytes(&elem.as_le_bytes())
+            .expect("digest round-trips through Fr"),
+    )];
+    let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Set<MerkleTreeDigest>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<MerkleTreeDigest>::insert");
+}
+
+#[tokio::test]
+async fn set_digest_contains_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_digest_ir("check");
+    let state = set_digest_elem::SetDigestState::new();
+    let elem = MerkleTreeDigest::new(Field::from(0xC0DEu64));
+    let witnesses = set_digest_elem::SetDigestWitnesses { elem };
+    let nocturne_transcript =
+        set_digest_elem::transcript::build_check_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
+        Fr::from_le_bytes(&elem.as_le_bytes())
+            .expect("digest round-trips through Fr"),
+    )];
+    let preimage = canonical_preimage("check", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Set<MerkleTreeDigest>::contains"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<MerkleTreeDigest>::contains");
+}
+
+#[tokio::test]
+async fn set_digest_remove_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_set_digest_ir("erase");
+    let elem = MerkleTreeDigest::new(Field::from(0xBEAFu64));
+    let witnesses = set_digest_elem::SetDigestWitnesses { elem };
+    let nocturne_transcript =
+        set_digest_elem::transcript::build_erase_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
+        Fr::from_le_bytes(&elem.as_le_bytes())
+            .expect("digest round-trips through Fr"),
+    )];
+    let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Set<MerkleTreeDigest>::remove"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Set<MerkleTreeDigest>::remove");
+}
