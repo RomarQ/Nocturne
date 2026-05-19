@@ -3990,3 +3990,113 @@ async fn mt_check_root_mismatch_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for MerkleTree::check_root (mismatch)");
 }
+
+#[midnight::contract]
+mod mt_insert {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MtInsertState {
+        pub entries: MerkleTree<10, Bytes<32>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MtInsertWitnesses {
+        pub leaf: Bytes<32>,
+    }
+
+    impl MtInsertState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                entries: MerkleTree::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn add(&mut self, witnesses: &MtInsertWitnesses) {
+            self.entries.insert(&witnesses.leaf);
+        }
+    }
+}
+
+fn build_mt_add_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod mt_insert {
+            #[midnight(ledger)]
+            pub struct MtInsertState { entries: MerkleTree<10, Bytes<32>> }
+            #[midnight(witnesses)]
+            pub struct MtInsertWitnesses { pub leaf: Bytes<32> }
+            impl MtInsertState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
+                #[midnight(circuit)]
+                pub fn add(&mut self, witnesses: &MtInsertWitnesses) {
+                    self.entries.insert(&witnesses.leaf);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "add")
+        .unwrap()
+        .ir_source
+}
+
+/// `MerkleTree<10, Bytes<32>>::insert(&leaf)` — the full 10-op
+/// append-and-rehash sequence. Exercises:
+///
+/// - Multi-Fr `Bytes<32>` witness (2 PrivateInputs) flowing into both a
+///   PersistentHash (the leafHash with `"mdn:lh"` domain separator) and
+///   a Push as the value.
+/// - `Dup{n:2}` (new — first use of non-zero n).
+/// - `Ins{cached:true, n:2}` (new — multi-level write-back for the
+///   counter slot).
+/// - Two `Idx{push_path:true}` levels matching the 2-element Array
+///   storage shape.
+///
+/// Insertion has no return value, so there's no Popeq.
+#[tokio::test]
+async fn mt_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_mt_add_ir();
+    let witnesses = mt_insert::MtInsertWitnesses {
+        leaf: Bytes::<32>::from([0xA5u8; 32]),
+    };
+    let nocturne_transcript = mt_insert::transcript::build_add_transcript(&witnesses);
+
+    // Bytes<32> witness expands to 2 Frs in the private transcript.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0xA5u8; 32])];
+    let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for MerkleTree::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for MerkleTree::insert");
+}

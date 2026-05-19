@@ -307,11 +307,14 @@ fn generate_op_stmt(
                 }
                 "insert" => {
                     // Dispatch by field type: Map → Map::insert (k, v),
-                    // Set → Set::insert (k, Null), Cell → Cell::set (v).
+                    // Set → Set::insert (k, Null), MerkleTree → 10-op
+                    // append-and-rehash sequence, Cell → Cell::set (v).
                     if field_ty.and_then(extract_map_kv_types).is_some() {
                         generate_map_insert(field_idx, args, field_ty)
                     } else if field_ty.and_then(extract_set_inner_type).is_some() {
                         generate_set_insert(field_idx, args, field_ty)
+                    } else if field_ty.and_then(extract_merkle_tree_type).is_some() {
+                        generate_merkle_tree_insert(field_idx, args)
                     } else {
                         generate_cell_set(field_idx, args, field_ty)
                     }
@@ -1020,6 +1023,68 @@ fn generate_merkle_tree_check_root(
                 cached: true,
                 result: AlignedValue::from(__result),
             });
+        }
+    }
+}
+
+/// Emit the runtime ops for `MerkleTree::insert(leaf)`. Mirrors compactc
+/// 0.30.0's emission for `entries.insert(disclose(leaf))` and the
+/// IR-side `emit_merkle_tree_insert` — 10 ops total:
+///
+///   Idx{push_path:true, [field_idx]}   // navigate to entries
+///   Idx{push_path:true, [0]}            // navigate into entries[0] (BMT)
+///   Dup{n:2}                            // copy entries Array from stack pos 2
+///   Idx{push_path:false, [1]}           // read entries[1] (next-index)
+///   Push{storage:true, Cell(Bytes<32>(leafHash(leaf)))}
+///   Ins{cached:false, n:1}              // insert (next_index, hash) into BMT
+///   Ins{cached:true, n:1}               // write BMT back to entries[0]
+///   Idx{push_path:true, [1]}            // navigate to entries[1]
+///   Addi{1}                             // increment counter
+///   Ins{cached:true, n:2}               // write counter back, 2 levels deep
+fn generate_merkle_tree_insert(field_idx: u8, args: &[ExprIR]) -> TokenStream {
+    let raw_leaf = args
+        .first()
+        .map(arg_to_runtime_raw_expr)
+        .unwrap_or_else(|| quote! { () });
+    quote! {
+        {
+            let __leaf = #raw_leaf;
+            // leafHash(__leaf) — upstream::leaf_hash applies the "mdn:lh"
+            // domain separator and persistent_hash. The HashOutput is
+            // [u8; 32]; AlignedValue::from([u8; 32]) gives the Bytes<32>
+            // alignment the IR's Push declares expect.
+            let __leaf_hash: [u8; 32] = midnight::runtime::transient_crypto::merkle_tree::leaf_hash(
+                __leaf.as_bytes().as_slice()
+            ).0;
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: true,
+                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+            });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: true,
+                path: vec![Key::Value(AlignedValue::from(0u8))].into_iter().collect(),
+            });
+            ops.push(Op::Dup { n: 2 });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: false,
+                path: vec![Key::Value(AlignedValue::from(1u8))].into_iter().collect(),
+            });
+            ops.push(Op::Push {
+                storage: true,
+                value: StateValue::Cell(Sp::new(AlignedValue::from(__leaf_hash))),
+            });
+            ops.push(Op::Ins { cached: false, n: 1 });
+            ops.push(Op::Ins { cached: true, n: 1 });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: true,
+                path: vec![Key::Value(AlignedValue::from(1u8))].into_iter().collect(),
+            });
+            ops.push(Op::Addi { immediate: 1 });
+            ops.push(Op::Ins { cached: true, n: 2 });
         }
     }
 }

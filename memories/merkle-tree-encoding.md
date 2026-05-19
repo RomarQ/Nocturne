@@ -155,7 +155,7 @@ A reasonable phased implementation, smallest first:
 | **A** | `Cell<Field>` — single AlignmentAtom::Field test | Field alignment encoding in `aligned_value_encoding`, `LoadImm` for negative Fr values | **landed** ([[field-alignment-encoding]]) |
 | **B** | `MerkleTree<H, T>` storage type + `MerkleTreeDigest` type | `MerkleTree<H, T>: LedgerType { requires_init = true, ... }`; off-chain root() that matches on-chain Root opcode semantics | **landed** (see below) |
 | **C** | `MerkleTree::checkRoot` end-to-end | Phase A + B; `Root` and `Eq` opcodes in zkir_emitter / transcript_codegen; e2e test with empty tree | **landed** (see below) |
-| **D** | `MerkleTree::insert` end-to-end | `Dup{n:k}` for arbitrary k; `Ins{cached:true, n:2}`; `persistent_hash` with `"mdn:lh"` domain separator; multi-level Idx chains; e2e test; constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` | pending |
+| **D** | `MerkleTree::insert` end-to-end | `Dup{n:k}` for arbitrary k; `Ins{cached:true, n:2}`; `persistent_hash` with `"mdn:lh"` domain separator; multi-level Idx chains; e2e test | **landed** (see below) |
 | **E** | `MerkleTreePath<H, T>` + `merkleTreePathRoot` | Pure circuit primitive; uses existing `persistent_hash` machinery; user-side witness type | pending |
 
 Each phase is roughly the scope of the Set or Cell::set work we've already shipped — together they're 3-5 sessions of focused work.
@@ -185,6 +185,23 @@ E2E tests:
 - `mt_check_root_mismatch_proves_and_verifies` — bogus digest, Popeq result is `false`; the proof still constructs because `check_root` is a query, not an assertion
 
 Both prove+verify through `ContractCallExt::construct_proof`. The PIs match the on-chain ledger-shape PIs declare-for-declare.
+
+### Phase D notes
+
+Implemented 2026-05-19:
+
+- IR (`zkir_emitter.rs::emit_merkle_tree_insert`): emits the full 10-op encoding matching compactc 0.30.0. Three new opcodes/encodings landed:
+  - `Dup{n:2}` = `0x32` (first non-zero `n` we've emitted; the encoding is `0x30 | n`).
+  - `Ins{cached:true, n:2}` = `0xa2` (multi-level write-back — `n` is the number of `Idx{push_path:true}` levels to unwind when writing back).
+  - `Persistent_hash` with alignment `[Bytes{6}, Bytes{32}]` and the `"mdn:lh"` domain separator (literal `0x686C3A6E646D` little-endian) computes the leaf hash. The hash output is 2 Frs (32 bytes chunked into 2 Bytes<32> chunks).
+
+  Also fixed `instruction_output_count` to return `2` for `PersistentHash` — the upstream `ir_vm.rs:419` pushes `hash.field_vec()` to memory which is 2 Frs for the 32-byte HashOutput. The previous default-1 was a dormant bug (no test exercised indices beyond the hash).
+
+- Transcript codegen (`transcript_codegen.rs::generate_merkle_tree_insert`): emits matching runtime ops. The leaf hash is computed via `midnight_transient_crypto::merkle_tree::leaf_hash(leaf.as_bytes())`, whose output is `HashOutput([u8; 32])`; passing the inner `[u8; 32]` to `AlignedValue::from` gives the Bytes<32>-aligned AlignedValue the IR's Push declares expect. Routed through the existing `"insert"` dispatcher arm alongside Map/Set/Cell.
+
+E2E test: `mt_insert_proves_and_verifies` — inserts a single `Bytes<32>` leaf into an empty `MerkleTree<10, Bytes<32>>` and confirms the 10-op transcript proves and verifies via the canonical ledger preimage path.
+
+Constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` state is still deferred — the e2e tests build state through Rust's `MerkleTree::empty()` (which mirrors the on-chain initial shape via the upstream `MerkleTree<()>` wrapper), and `construct_proof` doesn't execute on-chain VM ops, so insert proves+verifies against the canonical preimage path without explicit constructor emission.
 
 ## Files implicated for any implementation
 

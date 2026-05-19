@@ -1214,6 +1214,14 @@ impl ZkirEmitter {
                 let digest_var = args.first().and_then(|a| self.emit_expr(a))?;
                 self.emit_merkle_tree_check_root(field_idx, digest_var)
             }
+            "insert" => {
+                // The argument is `Bytes<32>` (the leaf). emit_expr
+                // returns the first PrivateInput var; we gather the
+                // contiguous 2 Frs via gather_n_vars and feed them into
+                // the leafHash persistent_hash call.
+                let leaf_first = args.first().and_then(|a| self.emit_expr(a))?;
+                self.emit_merkle_tree_insert(field_idx, leaf_first)
+            }
             _ => {
                 for arg in args {
                     self.emit_expr(arg);
@@ -1221,6 +1229,161 @@ impl ZkirEmitter {
                 None
             }
         }
+    }
+
+    /// Emit ZKIR for `MerkleTree::insert(leaf)` at `field_idx`. Matches
+    /// compactc 0.30.0's emission for `entries.insert(disclose(leaf))`
+    /// (see `/tmp/mt-experiments/out/zkir/add.zkir`):
+    ///
+    /// ```text
+    /// Idx  { cached:false, push_path:true,  [Bytes<1>(field_idx)] }   // navigate to entries field
+    /// Idx  { cached:false, push_path:true,  [Bytes<1>(0)] }            // navigate into entries[0] (BMT)
+    /// Dup  { n: 2 }                                                     // copy entries Array from stack pos 2
+    /// Idx  { cached:false, push_path:false, [Bytes<1>(1)] }            // read entries[1] (next-index counter)
+    /// Push { storage:true, Cell(Bytes<32>(leafHash(leaf))) }            // hashed leaf
+    /// Ins  { cached:false, n: 1 }                                       // insert (next_index, leaf_hash) into BMT
+    /// Ins  { cached:true,  n: 1 }                                       // write modified BMT back to entries[0]
+    /// Idx  { cached:false, push_path:true,  [Bytes<1>(1)] }            // navigate to entries[1]
+    /// Addi { immediate: 1 }                                              // increment counter
+    /// Ins  { cached:true,  n: 2 }                                       // write back counter, 2 levels deep
+    /// ```
+    ///
+    /// `leafHash` is `persistent_hash(["mdn:lh", leaf_bytes])` —
+    /// alignment `[Bytes{6}, Bytes{32}]`, inputs `[domain_sep_imm,
+    /// leaf_chunk_0, leaf_chunk_1]`. The result is 2 Frs (the 32-byte
+    /// hash chunked) that flow into the Push as the Bytes<32> value.
+    ///
+    /// Today this is specialized to `Bytes<32>` leaves — matches the
+    /// only Compact use case we've encountered. Generalizing to other
+    /// leaf types means parameterizing both the leaf alignment and the
+    /// persistent_hash alignment on `T`.
+    fn emit_merkle_tree_insert(
+        &mut self,
+        field_idx: u8,
+        leaf_first: Index,
+    ) -> Option<Index> {
+        use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment};
+        let g = self.guard;
+
+        // Idx { push_path:true, [Bytes<1>(field_idx)] } → 0x70.
+        let idx_op = self.emit_load_imm(Fr::from(0x70u64));
+        self.push_declare_pub_input(idx_op);
+        self.emit_key_field_repr(field_idx);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Idx { push_path:true, [Bytes<1>(0)] } — navigate into entries[0] (BMT).
+        let idx_op_2 = self.emit_load_imm(Fr::from(0x70u64));
+        self.push_declare_pub_input(idx_op_2);
+        self.emit_key_field_repr(0);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Dup { n: 2 } → 0x32.
+        let dup_op = self.emit_load_imm(Fr::from(0x32u64));
+        self.push_declare_pub_input(dup_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Idx { push_path:false, [Bytes<1>(1)] } — read entries[1] (counter slot).
+        let idx_op_3 = self.emit_load_imm(Fr::from(0x50u64));
+        self.push_declare_pub_input(idx_op_3);
+        self.emit_key_field_repr(1);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Compute leafHash via persistent_hash with the "mdn:lh" domain
+        // separator. The hash output is 2 Frs (32-byte hash chunked).
+        // Domain separator immediate: ASCII "mdn:lh" → 6 bytes →
+        // little-endian Fr = 0x686C3A6E646D. (Compact emits it in
+        // big-endian byte order; our LoadImm parses Fr in whichever
+        // direction the value flows through.)
+        let domain_sep = self.emit_load_imm(domain_sep_fr_mdn_lh());
+        let leaf_chunks = gather_n_vars(leaf_first, 2);
+        let hash_align = Alignment(vec![
+            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 6 }),
+            AlignmentSegment::Atom(AlignmentAtom::Bytes { length: 32 }),
+        ]);
+        let mut hash_inputs = vec![domain_sep];
+        hash_inputs.extend(leaf_chunks);
+        let hash_first = self.emit_instruction(Instruction::PersistentHash {
+            alignment: hash_align,
+            inputs: hash_inputs,
+        });
+        // PersistentHash outputs 2 Frs; both are needed for the Push.
+        let hash_chunks = gather_n_vars(hash_first, 2);
+
+        // Push { storage:true, Cell(Bytes<32>(leaf_hash)) }. The value
+        // is 2 Frs (the chunked hash); alignment is [1, 32].
+        let push_op = self.emit_load_imm(Fr::from(0x11u64));
+        let cell_disc = self.emit_load_imm(Fr::from(1u64));
+        let bytes32_atom = self.emit_load_imm(Fr::from(32u64));
+        self.push_declare_pub_input(push_op);
+        self.push_declare_pub_input(cell_disc);
+        self.push_declare_pub_input(cell_disc);
+        self.push_declare_pub_input(bytes32_atom);
+        for chunk in &hash_chunks {
+            self.push_declare_pub_input(*chunk);
+        }
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 6,
+        });
+
+        // Ins { cached:false, n: 1 } → 0x91. Insert (next_index, hash) into BMT.
+        let ins1 = self.emit_load_imm(Fr::from(0x91u64));
+        self.push_declare_pub_input(ins1);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Ins { cached:true, n: 1 } → 0xa1. Write BMT back into entries[0].
+        let ins2 = self.emit_load_imm(Fr::from(0xa1u64));
+        self.push_declare_pub_input(ins2);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Idx { push_path:true, [Bytes<1>(1)] } — navigate to entries[1].
+        let idx_op_4 = self.emit_load_imm(Fr::from(0x70u64));
+        self.push_declare_pub_input(idx_op_4);
+        self.emit_key_field_repr(1);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Addi { immediate: 1 } → [0x0e, 1]. Increment counter.
+        let addi_op = self.emit_load_imm(Fr::from(0x0eu64));
+        let one = self.emit_load_imm(Fr::from(1u64));
+        self.push_declare_pub_input(addi_op);
+        self.push_declare_pub_input(one);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 2,
+        });
+
+        // Ins { cached:true, n: 2 } → 0xa2. Write back counter; n:2 because
+        // we navigated `entries` then `[1]` — two `Idx{push_path:true}`
+        // levels deep — so the trailing Ins must unwind both levels.
+        let ins3 = self.emit_load_imm(Fr::from(0xa2u64));
+        self.push_declare_pub_input(ins3);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        None
     }
 
     /// Emit ZKIR for `MerkleTree::check_root(&digest) -> bool` at
@@ -1808,6 +1971,23 @@ fn extract_map_kv_types(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
     None
 }
 
+/// The Fr immediate compactc emits for the `"mdn:lh"` leaf-hash domain
+/// separator. The bytes `m, d, n, :, l, h` little-endian-encode to the
+/// integer `0x686C3A6E646D` — that's the value stored in the LoadImm we
+/// see in the compactc IR (the hex literal `0x6D646E3A6C68` printed in
+/// big-endian byte order).
+///
+/// Going through `value_atom_as_field` would also work but pulling a
+/// u64 constant is simpler — the 6 bytes fit in a u64.
+fn domain_sep_fr_mdn_lh() -> Fr {
+    let bytes = b"mdn:lh"; // 6 bytes
+    let mut acc: u64 = 0;
+    for &b in bytes.iter().rev() {
+        acc = (acc << 8) | (b as u64);
+    }
+    Fr::from(acc)
+}
+
 fn instruction_output_count(instruction: &Instruction) -> u32 {
     match instruction {
         Instruction::Assert { .. }
@@ -1822,7 +2002,11 @@ fn instruction_output_count(instruction: &Instruction) -> u32 {
         | Instruction::EcMul { .. }
         | Instruction::EcMulGenerator { .. }
         | Instruction::HashToCurve { .. }
-        | Instruction::DivModPowerOfTwo { .. } => 2,
+        | Instruction::DivModPowerOfTwo { .. }
+        // PersistentHash pushes `hash.field_vec()` to memory
+        // (`zkir/src/ir_vm.rs:419`). The hash output is 32 bytes →
+        // `field_vec()` yields 2 Frs, so the op produces 2 outputs.
+        | Instruction::PersistentHash { .. } => 2,
 
         _ => 1,
     }
