@@ -77,6 +77,40 @@ mod reader {
 }
 
 #[midnight::contract]
+mod bytes_witness {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct BytesWitnessState {
+        pub count: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct BytesWitnessWitnesses {
+        pub digest: Bytes<32>,
+    }
+
+    impl BytesWitnessState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn take_digest(&mut self, witnesses: &BytesWitnessWitnesses) {
+            // Reference the witness so PrivateInput + ConstrainBits are
+            // emitted. The actual digest isn't pushed on chain in this
+            // minimal contract — we're just verifying the multi-Fr witness
+            // serialization round-trips through prove+verify.
+            let _d = witnesses.digest.clone();
+            self.count.increment();
+        }
+    }
+}
+
+#[midnight::contract]
 mod counter_reader {
     use super::*;
 
@@ -269,6 +303,35 @@ fn build_read_stored_ir() -> midnight_zkir::IrSource {
         .circuits
         .into_iter()
         .find(|c| c.circuit_name == "read_stored")
+        .unwrap()
+        .ir_source
+}
+
+fn build_take_digest_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod bytes_witness {
+            #[midnight(ledger)]
+            pub struct BytesWitnessState { count: Counter }
+            #[midnight(witnesses)]
+            pub struct BytesWitnessWitnesses { pub digest: Bytes<32> }
+            impl BytesWitnessState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { count: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn take_digest(&mut self, witnesses: &BytesWitnessWitnesses) {
+                    let _d = witnesses.digest.clone();
+                    self.count.increment();
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "take_digest")
         .unwrap()
         .ir_source
 }
@@ -943,4 +1006,59 @@ async fn map_lookup_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map::lookup");
+}
+
+/// Confirms a `Bytes<32>` witness round-trips through prove+verify. The
+/// witness expands to two `PrivateInput`s in the IR (the high byte at
+/// 8 bits and the low 31-byte chunk at 248 bits), and the transcript
+/// builder pushes both via `AlignedValueExt::value_only_field_repr` so
+/// the order matches. The circuit body itself only uses Counter so we
+/// don't have to thread the Bytes<32> through a Push yet (Cell<Bytes<N>>
+/// is the next milestone).
+#[tokio::test]
+async fn bytes32_witness_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_take_digest_ir();
+    let witnesses = bytes_witness::BytesWitnessWitnesses {
+        digest: Bytes::<32>::from([0xABu8; 32]),
+    };
+    let nocturne_transcript = bytes_witness::transcript::build_take_digest_transcript(&witnesses);
+
+    // The witness expands to ceil(32/31) = 2 Frs. Passing the [u8; 32] as
+    // a single AlignedValue tells construct_proof to use the same
+    // chunk-and-reverse encoding the IR's PrivateInputs expect.
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            [0xABu8; 32],
+        )];
+    let preimage = canonical_preimage(
+        "take_digest",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for the Bytes<32>-witness circuit"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for the Bytes<32>-witness circuit");
 }

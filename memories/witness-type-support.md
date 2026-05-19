@@ -1,39 +1,52 @@
 # Witness type support
 
 **Discovered**: 2026-05-18 (during witness coverage work)
-**Status**: Boolean / Field / Uint<N> supported. Bytes<N> rejected at parse time pending multi-Fr witness emission.
+**Updated**: 2026-05-19 (multi-Fr `Bytes<N>` witness emission landed)
+**Status**: Boolean / Field / Uint<N> / Bytes<N> all supported as witnesses.
 
 ## Supported witness types
 
-| Type | `value()` returns | `Fr::from(...)` | Type constraint emitted |
+| Type | Frs emitted | Per-Fr serialization | Type constraint emitted |
 |---|---|---|---|
-| `Boolean` | `bool` | `Fr::from(bool)` | `ConstrainToBoolean { var }` |
-| `Field` | `u128` | `Fr::from(u128)` | none (Field is unrestricted) |
-| `Uint<N>` | `u128` | `Fr::from(u128)` | `ConstrainBits { var, bits: N }` |
-| `Bytes<N>` | n/a | n/a | (would need multi-Fr emission) |
+| `Boolean` | 1 | `Fr::from(bool)` via `.value()` | `ConstrainToBoolean { var }` |
+| `Field` | 1 | `Fr::from(u128)` via `.value()` | none (Field is unrestricted) |
+| `Uint<N>` | 1 | `Fr::from(u128)` via `.value()` | `ConstrainBits { var, bits: N }` |
+| `Bytes<N>` | `ceil(N / 31)` | `AlignedValueExt::value_only_field_repr` of `AlignedValue::from(*as_bytes())` | per-chunk `ConstrainBits` (8 bits for the first emitted chunk when `N % 31 == 1`, etc.; full chunks are 248 bits) |
 
 ## How witnesses flow through codegen
 
-- **Macro-generated witness struct**: each field's type is preserved as the user wrote it. `Bytes<N>` fails Rust's `Copy` check when accessed by value, which is a hint of the deeper issue.
-- **Transcript builder** (`crates/midnight-codegen/src/transcript_codegen.rs`): for every `WitnessAccess` in the body, emits `private_transcript.push(Fr::from(witnesses.<field>.value()));`. The `Fr::from(...)` resolves via `From<bool>` / `From<u128>` impls in midnight-transient-crypto's `curve.rs`. The previous `value() as u64` cast silently truncated `Field` and large `Uint<N>` — fixed 2026-05-18.
-- **ZKIR emitter** (`crates/midnight-codegen/src/zkir_emitter.rs::emit_type_constraint`): dispatches on the stringified type to emit `ConstrainBits` (for Uint/Bytes) or `ConstrainToBoolean` (for Boolean). `Field` gets no constraint.
+- **Macro-generated witness struct**: each field's type is preserved as the user wrote it.
+- **Transcript builder** (`crates/midnight-codegen/src/transcript_codegen.rs`):
+  for single-Fr witnesses, emits `private_transcript.push(Fr::from(witnesses.<field>.value()));`.
+  For `Bytes<N>`, emits
+  ```
+  let __av = AlignedValue::from(*witnesses.<field>.as_bytes());
+  __av.value_only_field_repr(&mut private_transcript);
+  ```
+  which pushes the right number of Frs in the same order the IR's
+  PrivateInputs expect (high-bytes chunk first after `.rev()`).
+- **ZKIR emitter** (`crates/midnight-codegen/src/zkir_emitter.rs`): the
+  `WitnessAccess` arm consults `witness_fr_layout(ty)` to decide how many
+  `PrivateInput` instructions to emit and what `ConstrainBits` bit width
+  to apply to each. For non-Bytes types it falls back to
+  `emit_type_constraint` (Boolean → `ConstrainToBoolean`, etc.).
 
-## Bytes<N> rejection
+## How the chunk order works for `Bytes<N>`
 
-`crates/midnight-ir/src/parse.rs::parse_witnesses_struct` checks each field type and returns `MIDNIGHT-001 InvalidType` with a message pointing to this memory when the user declares a `Bytes<N>` witness. This is intentional: until we have multi-Fr witness emission, letting `Bytes<N>` through produces either a confusing macro-expansion error or, worse, silently-wrong serialization.
+`AlignmentAtom::Bytes{N}.field_repr_unchecked` uses
+`bytes.chunks(31).rev()`. For `Bytes<32>`, that's
+`[bytes[31..32], bytes[0..31]]` — the high byte first (constrained to 8
+bits), then the low 31 bytes (constrained to 248 bits). This matches
+compactc 0.30.0's emission for `Bytes<32>` circuit inputs.
 
-### What "multi-Fr witness emission" needs
-
-A `Bytes<N>` value's canonical field representation (via `FieldRepr`) uses `ceil(N * 8 / FR_BITS_STORED)` field elements. Adding support requires:
-
-1. **Transcript codegen**: dispatch on witness type, emit `<T as FieldRepr>::field_repr(&witnesses.<field>, &mut private_transcript)` instead of a single `push`.
-2. **ZKIR emitter**: emit one `PrivateInput { guard }` per Fr the witness produces, not just one. Probably need a new `WitnessAccess` lowering that knows the witness type and unrolls into the right number of `PrivateInput` instances.
-3. **Type constraint**: `ConstrainBits` per Fr (or skip if the constraint isn't expressible per-Fr).
-
-This is a real refactor — not a one-line fix. Leave the parse-time rejection in place until someone needs Bytes witnesses.
+For general `Bytes<N>`:
+- `chunks = ceil(N / 31)`.
+- First emitted chunk has `if N % 31 == 0 { 31 } else { N % 31 }` bytes.
+- All later chunks have 31 bytes.
 
 ## Tests
 
 - `crates/midnight/tests/witness_types_test.rs::multi_witness_struct_constructs` — multi-typed witness struct compiles.
-- `each_witness_type_builds_transcript` — Boolean/Field/Uint witnesses serialize correctly, and `Field::from(u128::MAX)` survives the round trip (would have failed under the old `as u64` cast).
-- `bytes_witness_is_rejected_at_parse_time` — Bytes<N> witness produces the documented `MIDNIGHT-001` error.
+- `each_witness_type_builds_transcript` — Boolean/Field/Uint witnesses serialize correctly.
+- `bytes_witness_is_accepted` — `Bytes<32>` witness contract parses cleanly.
+- `crates/midnight/tests/ledger_integration_test.rs::bytes32_witness_proves_and_verifies` — `Bytes<32>` witness round-trips through `ContractCallExt::construct_proof` + prove + verify.

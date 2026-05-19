@@ -7,9 +7,10 @@
 //! - Only emits ops for the active branch (matching ZKIR's pi_skip behavior)
 //! - Converts witness values to `Fr` for the private transcript
 
-use midnight_ir::{CircuitIR, ContractIR, ExprIR};
+use midnight_ir::{CircuitIR, ContractIR, ExprIR, WitnessIR};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use std::collections::HashMap;
 
 /// Generate the transcript builder module for a contract.
 pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
@@ -29,6 +30,11 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
 
     let witnesses_name = contract.witnesses.as_ref().map(|w| &w.name);
     let ledger_name = &contract.ledger.name;
+    let witness_types: HashMap<String, syn::Type> = contract
+        .witnesses
+        .as_ref()
+        .map(witness_type_map)
+        .unwrap_or_default();
 
     let circuit_fns: Vec<TokenStream> = contract
         .circuits
@@ -40,6 +46,7 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
                 &field_types,
                 witnesses_name,
                 ledger_name,
+                &witness_types,
             )
         })
         .collect();
@@ -85,6 +92,7 @@ fn generate_circuit_transcript_fn(
     field_types: &[syn::Type],
     witnesses_name: Option<&syn::Ident>,
     ledger_name: &syn::Ident,
+    witness_types: &HashMap<String, syn::Type>,
 ) -> TokenStream {
     let fn_name = format_ident!("build_{}_transcript", circuit.name);
     let doc = format!("Build the transcript for the `{}` circuit.", circuit.name);
@@ -92,7 +100,7 @@ fn generate_circuit_transcript_fn(
     let body_stmts: Vec<TokenStream> = circuit
         .body
         .iter()
-        .map(|expr| generate_op_stmt(expr, field_names, field_types))
+        .map(|expr| generate_op_stmt(expr, field_names, field_types, witness_types))
         .collect();
 
     let needs_state = circuit_needs_state(&circuit.body);
@@ -198,6 +206,7 @@ fn generate_op_stmt(
     expr: &ExprIR,
     field_names: &[String],
     field_types: &[syn::Type],
+    witness_types: &HashMap<String, syn::Type>,
 ) -> TokenStream {
     match expr {
         ExprIR::LedgerAccess {
@@ -351,13 +360,13 @@ fn generate_op_stmt(
             let cond_expr = generate_runtime_cond(cond);
             let then_stmts: Vec<TokenStream> = then_branch
                 .iter()
-                .map(|e| generate_op_stmt(e, field_names, field_types))
+                .map(|e| generate_op_stmt(e, field_names, field_types, witness_types))
                 .collect();
 
             if let Some(else_exprs) = else_branch {
                 let else_stmts: Vec<TokenStream> = else_exprs
                     .iter()
-                    .map(|e| generate_op_stmt(e, field_names, field_types))
+                    .map(|e| generate_op_stmt(e, field_names, field_types, witness_types))
                     .collect();
                 quote! {
                     #witness_adds
@@ -385,7 +394,7 @@ fn generate_op_stmt(
             let stripped = name.to_string();
             let stripped = stripped.trim_start_matches('_');
             let var_name = format_ident!("_let_{}", stripped);
-            let val_stmt = generate_op_stmt(value, field_names, field_types);
+            let val_stmt = generate_op_stmt(value, field_names, field_types, witness_types);
             quote! {
                 let #var_name = {
                     #val_stmt
@@ -394,39 +403,50 @@ fn generate_op_stmt(
         }
 
         ExprIR::WitnessAccess { field, .. } => {
+            // Read the witness value and add it to the private transcript.
+            //
+            // Single-Fr witnesses (Boolean/Field/Uint) push `Fr::from(value())`
+            // directly. Multi-Fr witnesses (`Bytes<N>`) build an AlignedValue
+            // from the underlying [u8; N] and use
+            // `AlignedValueExt::value_only_field_repr` to push the right
+            // number of Frs in the same order the IR's PrivateInputs expect
+            // (high-bytes chunk first, then full 31-byte chunks).
             let field_ident = format_ident!("{}", field.to_string());
-            // Read the witness value and add to private transcript as Fr.
-            //
-            // `Boolean::value()` returns `bool`, `Field::value()` and
-            // `Uint::<N>::value()` both return `u128`. `Fr: From<bool>`,
-            // `From<u64>`, `From<u128>` — so `Fr::from(value())` works for
-            // all three without the previous `as u64` cast, which silently
-            // truncated `Field` and large `Uint<N>` values.
-            //
-            // Multi-Fr witnesses (e.g. `Bytes<N>`) are rejected at parse
-            // time in `crates/midnight-ir/src/parse.rs::parse_witnesses_struct`
-            // until we add proper multi-Fr witness emission.
-            quote! {
-                private_transcript.push(Fr::from(witnesses.#field_ident.value()));
+            let field_str = field.to_string();
+            if witness_types
+                .get(&field_str)
+                .map(is_bytes_witness)
+                .unwrap_or(false)
+            {
+                quote! {
+                    {
+                        use midnight::runtime::transient_crypto::fab::AlignedValueExt;
+                        let __av = AlignedValue::from(*witnesses.#field_ident.as_bytes());
+                        __av.value_only_field_repr(&mut private_transcript);
+                    }
+                }
+            } else {
+                quote! {
+                    private_transcript.push(Fr::from(witnesses.#field_ident.value()));
+                }
             }
         }
 
         ExprIR::Block { stmts, .. } => {
             let inner: Vec<TokenStream> = stmts
                 .iter()
-                .map(|s| generate_op_stmt(s, field_names, field_types))
+                .map(|s| generate_op_stmt(s, field_names, field_types, witness_types))
                 .collect();
             quote! { #(#inner)* }
         }
 
-        ExprIR::MethodCall {
-            receiver, method, ..
-        } => {
-            let method_name = method.to_string();
-            match method_name.as_str() {
-                "into" | "value" => generate_op_stmt(receiver, field_names, field_types),
-                _ => quote! {},
-            }
+        ExprIR::MethodCall { receiver, .. } => {
+            // Always forward to the receiver so any side-effecting
+            // sub-expressions (e.g. witness reads that push to
+            // `private_transcript`) are emitted. Method-specific runtime
+            // behavior is generated elsewhere; this arm is just about
+            // side effects on the transcript builder's state.
+            generate_op_stmt(receiver, field_names, field_types, witness_types)
         }
 
         _ => quote! {},
@@ -708,6 +728,22 @@ fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream
         return quote! { (#expr) #c };
     }
     expr
+}
+
+/// Build a `field_name -> field_type` map from a `WitnessIR`. Used by
+/// `generate_op_stmt` to dispatch on the witness type at codegen time.
+fn witness_type_map(w: &WitnessIR) -> HashMap<String, syn::Type> {
+    w.fields
+        .iter()
+        .map(|f| (f.name.to_string(), f.ty.clone()))
+        .collect()
+}
+
+/// True if `ty` is `Bytes<N>` for some N (the only multi-Fr witness type
+/// we currently support).
+fn is_bytes_witness(ty: &syn::Type) -> bool {
+    let ty_str = quote!(#ty).to_string().replace(' ', "");
+    ty_str.starts_with("Bytes<")
 }
 
 /// Map a Rust type that flows into `AlignedValue::from(_)` to the primitive

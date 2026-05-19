@@ -262,14 +262,38 @@ impl ZkirEmitter {
                 if let Some(&idx) = self.variables.get(&key) {
                     return Some(idx);
                 }
-                let idx = self.emit_instruction(Instruction::PrivateInput { guard: None });
-                // Emit type constraint based on witness field type.
                 let ty = self.witness_types.get(&field.to_string()).cloned();
-                if let Some(ty) = &ty {
-                    self.emit_type_constraint(idx, ty);
+
+                // Multi-Fr witnesses (currently just `Bytes<N>` for N>0)
+                // expand to one PrivateInput per Fr the value's
+                // `value_only_field_repr` emits, with a per-chunk ConstrainBits
+                // that matches the corresponding byte width. The chunk order
+                // mirrors `field_repr_unchecked` for `Bytes{N}` (which
+                // reverses 31-byte chunks), so the IR's PrivateInputs and the
+                // transcript's `value_only_field_repr` output land in the
+                // same order.
+                let layout = ty
+                    .as_ref()
+                    .map(witness_fr_layout)
+                    .unwrap_or_else(|| vec![None]);
+                let mut first_idx = None;
+                for bits in layout {
+                    let var = self.emit_instruction(Instruction::PrivateInput { guard: None });
+                    if first_idx.is_none() {
+                        first_idx = Some(var);
+                    }
+                    if let Some(b) = bits {
+                        self.instructions
+                            .push(Instruction::ConstrainBits { var, bits: b });
+                    } else if let Some(t) = &ty {
+                        // Fall back to type-dispatched constraint for single-Fr
+                        // types (Boolean → ConstrainToBoolean, etc.).
+                        self.emit_type_constraint(var, t);
+                    }
                 }
-                self.variables.insert(key, idx);
-                Some(idx)
+                let first = first_idx.expect("at least one PrivateInput per witness");
+                self.variables.insert(key, first);
+                Some(first)
             }
 
             ExprIR::Literal { value, .. } => {
@@ -1247,6 +1271,48 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
     // encoded into the LoadImm).
     // Bytes<N>: similarly deferred until we add multi-Fr value emission.
     None
+}
+
+/// Number of bytes that fit in a single Fr's field representation
+/// (must mirror `transient_crypto::curve::FR_BYTES_STORED` = `FR_BYTES - 1`).
+const FR_BYTES_STORED: u32 = 31;
+
+/// Per-Fr bit layout for a witness type, in the order PrivateInputs are
+/// emitted (matching `AlignedValueExt::value_only_field_repr`).
+///
+/// Returns `Some(bits)` to apply `ConstrainBits { var, bits }` to that Fr.
+/// Returns `None` to use the generic type-dispatched constraint (for
+/// Boolean/Field/Uint).
+///
+/// `Bytes<N>` uses `FieldRepr` chunk-and-reverse semantics: `chunks(31)`
+/// then `.rev()`. The first emitted Fr is the high-bytes chunk (the tail
+/// of the original byte string), whose size is `N % 31` if that's
+/// non-zero, otherwise `31`. Each subsequent Fr is a full 31-byte chunk.
+fn witness_fr_layout(ty: &syn::Type) -> Vec<Option<u32>> {
+    let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
+    if let Some(n) = ty_str
+        .strip_prefix("Bytes<")
+        .and_then(|s| s.strip_suffix('>'))
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        let mut layout = Vec::new();
+        let chunks = n.div_ceil(FR_BYTES_STORED);
+        // First chunk (high portion after .rev()).
+        let first_bytes = n % FR_BYTES_STORED;
+        let first_bytes = if first_bytes == 0 {
+            FR_BYTES_STORED
+        } else {
+            first_bytes
+        };
+        layout.push(Some(first_bytes * 8));
+        // Remaining chunks are always full FR_BYTES_STORED bytes.
+        for _ in 1..chunks {
+            layout.push(Some(FR_BYTES_STORED * 8));
+        }
+        return layout;
+    }
+    // Single-Fr fallback: delegate to emit_type_constraint via None.
+    vec![None]
 }
 
 /// Return the value type read by `self.<field>.get()` / `.value()` for a

@@ -120,11 +120,12 @@ fn each_witness_type_builds_transcript() {
     );
 }
 
-/// Sanity check that `Bytes<N>` is rejected at parse time with a clear
-/// error, so users don't end up with a confusing "no method `value`"
-/// error from the macro expansion.
+/// `Bytes<N>` witnesses are now supported via multi-Fr witness emission
+/// (each witness expands to `ceil(N / FR_BYTES_STORED)` PrivateInputs,
+/// each ConstrainBits-constrained). Verify a Bytes<32> witness contract
+/// parses cleanly.
 #[test]
-fn bytes_witness_is_rejected_at_parse_time() {
+fn bytes_witness_is_accepted() {
     use midnight_ir::parse_contract;
 
     let module: syn::ItemMod = syn::parse_quote! {
@@ -144,10 +145,5 @@ fn bytes_witness_is_rejected_at_parse_time() {
         }
     };
 
-    let err = parse_contract(module).expect_err("Bytes<N> witness must be rejected");
-    let msg = format!("{err:?}");
-    assert!(
-        msg.contains("Bytes") && msg.contains("not yet supported"),
-        "expected Bytes rejection message, got: {msg}"
-    );
+    parse_contract(module).expect("Bytes<32> witness must parse");
 }
