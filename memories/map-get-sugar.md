@@ -38,6 +38,18 @@ Without either, the `lookup`-inside-conditional pattern fails: either the verifi
 
 All four shapes lower to the same `if contains(k) { let v = lookup(k); ... } else { ... }` IR.
 
+## Verified key/value type matrix
+
+The sugar composes cleanly with multi-Fr key and value encodings — no fixes were needed beyond the existing [[conditional-io-guards]] and multi-Fr Map work. Tests in `crates/midnight/tests/ledger_integration_test.rs`:
+
+| K | V | Tests |
+|---|---|---|
+| `Uint<64>` | `Uint<64>` | `map_get_sugar_{present,absent}`, `if_let_else_absent_runs_else`, `match_get_{present,absent,reversed_arms}` |
+| `Bytes<32>` (multi-Fr K) | `Uint<64>` | `bytes_get_sugar_{present,absent}` |
+| `Uint<64>` | `Bytes<32>` (multi-Fr V) | `bytes_v_get_sugar_{present,absent}` |
+
+Each test exercises both the active path (key present → lookup fires) and the inactive path (key absent → lookup branch's PIs guard out without consuming transcript entries).
+
 ## Limitations
 
 - `let-else` (`let Some(v) = self.map.get(&k) else { return; }`) isn't supported yet.

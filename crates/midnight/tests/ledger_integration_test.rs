@@ -3059,3 +3059,409 @@ async fn match_get_reversed_arms_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for `match` with reversed arms");
 }
+
+#[midnight::contract]
+mod bytes_get_sugar {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct BytesGetSugarState {
+        pub records: Map<Bytes<32>, Uint<64>>,
+        pub fallback_hits: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct BytesGetSugarWitnesses {
+        pub digest: Bytes<32>,
+    }
+
+    impl BytesGetSugarState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+                fallback_hits: Counter::zero(),
+            }
+        }
+
+        // Multi-Fr K (`Bytes<32>` = 2 Frs) flowing through the Map::get
+        // sugar — exercises the if-let-Some rewrite alongside the multi-Fr
+        // contains+lookup paths.
+        #[midnight(circuit)]
+        pub fn read_digest(&mut self, witnesses: &BytesGetSugarWitnesses) {
+            if let Some(_v) = self.records.get(&witnesses.digest) {
+                let _hold = _v;
+            } else {
+                self.fallback_hits.increment();
+            }
+        }
+    }
+}
+
+fn build_read_digest_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod bytes_get_sugar {
+            #[midnight(ledger)]
+            pub struct BytesGetSugarState {
+                records: Map<Bytes<32>, Uint<64>>,
+                fallback_hits: Counter,
+            }
+            #[midnight(witnesses)]
+            pub struct BytesGetSugarWitnesses { pub digest: Bytes<32> }
+            impl BytesGetSugarState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn read_digest(&mut self, witnesses: &BytesGetSugarWitnesses) {
+                    if let Some(_v) = self.records.get(&witnesses.digest) {
+                        let _hold = _v;
+                    } else {
+                        self.fallback_hits.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "read_digest")
+        .unwrap()
+        .ir_source
+}
+
+/// `if let Some(v) = self.map.get(&bytes32_key)` over `Map<Bytes<32>,
+/// Uint<64>>` — composes multi-Fr K (2 Frs per key) with the Map::get
+/// sugar. Key present case: contains+lookup both fire; the second `Idx`
+/// in lookup walks 2 Fr key chunks.
+#[tokio::test]
+async fn bytes_get_sugar_present_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_digest_ir();
+    let mut state = bytes_get_sugar::BytesGetSugarState::new();
+    let digest = Bytes::<32>::from([0xA1u8; 32]);
+    state.records.insert(digest.clone(), Uint::<64>::from(99u64));
+    let witnesses = bytes_get_sugar::BytesGetSugarWitnesses { digest };
+    let nocturne_transcript =
+        bytes_get_sugar::transcript::build_read_digest_transcript(&state, &witnesses);
+
+    // Bytes<32> witness expands to 2 Frs in the private transcript.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0xA1u8; 32])];
+    let preimage = canonical_preimage(
+        "read_digest",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Map<Bytes<32>, _>::get sugar (present)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Bytes<32>, _>::get sugar (present)");
+}
+
+/// Same as `bytes_get_sugar_present` but with the key absent — the
+/// inactive lookup branch's multi-Fr key Push and multi-Fr Popeq result
+/// must all guard out without consuming.
+#[tokio::test]
+async fn bytes_get_sugar_absent_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_digest_ir();
+    let state = bytes_get_sugar::BytesGetSugarState::new(); // empty
+    let witnesses = bytes_get_sugar::BytesGetSugarWitnesses {
+        digest: Bytes::<32>::from([0xB2u8; 32]),
+    };
+    let nocturne_transcript =
+        bytes_get_sugar::transcript::build_read_digest_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0xB2u8; 32])];
+    let preimage = canonical_preimage(
+        "read_digest",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Map<Bytes<32>, _>::get sugar (absent)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Bytes<32>, _>::get sugar (absent)");
+}
+
+#[midnight::contract]
+mod bytes_v_get_sugar {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct BytesVGetSugarState {
+        pub records: Map<Uint<64>, Bytes<32>>,
+        pub fallback_hits: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct BytesVGetSugarWitnesses {
+        pub user_id: Uint<64>,
+    }
+
+    impl BytesVGetSugarState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+                fallback_hits: Counter::zero(),
+            }
+        }
+
+        // Multi-Fr V (`Bytes<32>` = 2 Frs in the Popeq result) flowing
+        // through the conditional Map::get sugar. The inactive-branch
+        // Popeq must guard out both V Fr chunks (each PublicInput carries
+        // the branch guard so neither consumes).
+        #[midnight(circuit)]
+        pub fn read_blob(&mut self, witnesses: &BytesVGetSugarWitnesses) {
+            if let Some(_v) = self.records.get(&witnesses.user_id) {
+                let _hold = _v;
+            } else {
+                self.fallback_hits.increment();
+            }
+        }
+    }
+}
+
+fn build_read_blob_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod bytes_v_get_sugar {
+            #[midnight(ledger)]
+            pub struct BytesVGetSugarState {
+                records: Map<Uint<64>, Bytes<32>>,
+                fallback_hits: Counter,
+            }
+            #[midnight(witnesses)]
+            pub struct BytesVGetSugarWitnesses { pub user_id: Uint<64> }
+            impl BytesVGetSugarState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn read_blob(&mut self, witnesses: &BytesVGetSugarWitnesses) {
+                    if let Some(_v) = self.records.get(&witnesses.user_id) {
+                        let _hold = _v;
+                    } else {
+                        self.fallback_hits.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "read_blob")
+        .unwrap()
+        .ir_source
+}
+
+/// Map::get sugar with a multi-Fr value (`Bytes<32>` = 2 Frs). Key
+/// present → the lookup's multi-Fr Popeq fires on the active branch.
+#[tokio::test]
+async fn bytes_v_get_sugar_present_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_blob_ir();
+    let mut state = bytes_v_get_sugar::BytesVGetSugarState::new();
+    state
+        .records
+        .insert(Uint::<64>::from(7u64), Bytes::<32>::from([0xCDu8; 32]));
+    let witnesses = bytes_v_get_sugar::BytesVGetSugarWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        bytes_v_get_sugar::transcript::build_read_blob_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "read_blob",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Map<_, Bytes<32>>::get sugar (present)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<_, Bytes<32>>::get sugar (present)");
+}
+
+/// Multi-Fr V Map::get sugar, key absent — exercises the multi-Fr Popeq
+/// guard-out (2 PublicInputs, both inactive).
+#[tokio::test]
+async fn bytes_v_get_sugar_absent_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_blob_ir();
+    let state = bytes_v_get_sugar::BytesVGetSugarState::new(); // empty
+    let witnesses = bytes_v_get_sugar::BytesVGetSugarWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        bytes_v_get_sugar::transcript::build_read_blob_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "read_blob",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Map<_, Bytes<32>>::get sugar (absent)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<_, Bytes<32>>::get sugar (absent)");
+}
