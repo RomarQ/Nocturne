@@ -255,9 +255,16 @@ E2E coverage: `Map<Field, Uint<64>>::{insert, contains}`,
 
 Other key shapes still untested: tuple/struct keys (compactc supports
 record-typed keys), `Map<Boolean, V>` (technically legal but unusual).
-`Bytes<N>` keys for `N != 32` compile but lack dedicated e2e tests —
-the encoding is the same shape so single-Fr `Bytes<N>` (N ≤ 31) should
-work mechanically.
+
+### Bytes<N != 32> coverage (2026-05-19)
+
+`Map<Bytes<16>, Uint<64>>` (single-Fr key, 16 ≤ 31 fits in one Fr) and
+`Map<Bytes<48>, Uint<64>>` (multi-Fr key, 48 = 17 + 31, 2 Fr chunks)
+both prove + verify end-to-end for `insert` and `contains`. No code
+changes needed — `aligned_value_encoding`'s general `Bytes<N>` arm and
+`bytes_n_layout`'s `(first_bytes, FR_BYTES_STORED * (chunks - 1))` split
+already covered these shapes. The tests pin down the boundary cases
+the Bytes<32>-only coverage left implicit.
 
 ## References
 
