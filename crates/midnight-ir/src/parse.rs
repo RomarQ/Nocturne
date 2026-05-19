@@ -24,6 +24,8 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
     let mut other_items: Vec<Item> = Vec::new();
     let mut user_structs: std::collections::HashMap<String, Vec<UserStructField>> =
         std::collections::HashMap::new();
+    let mut user_enums: std::collections::HashMap<String, Vec<UserEnumVariant>> =
+        std::collections::HashMap::new();
     let mut diagnostics = Diagnostics::new();
 
     for item in items {
@@ -81,6 +83,26 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                     &mut diagnostics,
                 )?;
             }
+            Item::Enum(e) => {
+                // Only unit-variant enums are supported for now —
+                // anything carrying a payload would need ADT
+                // encoding work and bumps from Bytes<1> discriminant.
+                let mut variants: Vec<UserEnumVariant> = Vec::new();
+                let mut payload_seen = false;
+                for v in &e.variants {
+                    if !matches!(v.fields, syn::Fields::Unit) {
+                        payload_seen = true;
+                        break;
+                    }
+                    variants.push(UserEnumVariant {
+                        name: v.ident.clone(),
+                    });
+                }
+                if !payload_seen && !variants.is_empty() {
+                    user_enums.insert(e.ident.to_string(), variants);
+                }
+                other_items.push(item);
+            }
             _ => {
                 other_items.push(item);
             }
@@ -122,6 +144,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
         queries,
         other_items,
         user_structs,
+        user_enums,
     })
 }
 
@@ -468,11 +491,12 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                     name: ident.clone(),
                 })
             } else {
-                // Could be a qualified path like Self or midnight::disclose.
-                let full_path = quote::quote!(#path).to_string();
-                Ok(ExprIR::Var {
+                // Multi-segment path like `Status::Open`, `Self::CONST`, or
+                // `midnight::disclose`. Stash the `syn::Path` itself so codegen
+                // can emit it verbatim — flattening to an `Ident` panics.
+                Ok(ExprIR::Path {
                     span: Span::call_site(),
-                    name: syn::Ident::new(&full_path.replace(' ', ""), Span::call_site()),
+                    path: path.clone(),
                 })
             }
         }
@@ -694,6 +718,13 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
         // matcher produces. Both arms must be present; arm order doesn't
         // matter (Some-first and None-first both work).
         Expr::Match(expr_match) => {
+            // Unit-variant enum match: lower
+            //   match s { A => body_a, B => body_b, _ => default }
+            // to nested `if s == A { body_a } else if s == B { body_b } else { default }`.
+            // Discriminant resolution happens later in codegen via `user_enums`.
+            if let Some(chain) = lower_enum_match(expr_match)? {
+                return Ok(chain);
+            }
             if let Some((var_name, map_field, key_expr, some_body, none_body)) =
                 match_match_on_get(expr_match)
             {
@@ -876,6 +907,146 @@ fn parse_macro_expr(mac: &syn::Macro) -> MidnightResult<ExprIR> {
 /// Check if an expression is `self`.
 fn is_self_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Path(ExprPath { path, .. }) if path.is_ident("self"))
+}
+
+/// Lower a `match` over unit-variant enum patterns into a nested `if`
+/// chain. Returns `Some(if_chain)` when every arm is either a path
+/// pattern (e.g. `Status::Open`) or `_`/identifier wildcard, otherwise
+/// `None` so the caller can try other match shapes.
+fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR>> {
+    use syn::Pat;
+    if expr_match.arms.is_empty() {
+        return Ok(None);
+    }
+    // Classify arms.
+    #[derive(Debug)]
+    enum ArmShape<'a> {
+        Path(&'a syn::Path),
+        Wild,
+    }
+    let mut shapes: Vec<(ArmShape<'_>, &syn::Expr)> = Vec::with_capacity(expr_match.arms.len());
+    for arm in &expr_match.arms {
+        if arm.guard.is_some() {
+            return Ok(None);
+        }
+        match &arm.pat {
+            Pat::Path(p) if p.path.segments.len() >= 2 => {
+                shapes.push((ArmShape::Path(&p.path), arm.body.as_ref()));
+            }
+            Pat::Wild(_) => shapes.push((ArmShape::Wild, arm.body.as_ref())),
+            Pat::Ident(pi) if pi.subpat.is_none() => {
+                // Catch-all identifier (no `@` sub-pattern) acts as wildcard.
+                shapes.push((ArmShape::Wild, arm.body.as_ref()));
+            }
+            _ => return Ok(None),
+        }
+    }
+    let scrutinee = parse_expr(&expr_match.expr)?;
+
+    // Find the wildcard arm if any; it becomes the final else branch. If no
+    // wildcard, the final variant arm's body is used directly as the bare
+    // else (the user is responsible for exhaustiveness).
+    let wild_idx = shapes.iter().position(|(s, _)| matches!(s, ArmShape::Wild));
+    let (variant_arms, default_body): (Vec<_>, Option<Vec<ExprIR>>) = if let Some(idx) = wild_idx {
+        let default_body = parse_arm_body(shapes[idx].1)?;
+        let variants: Vec<_> = shapes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, (s, body))| match s {
+                ArmShape::Path(p) if i != idx => Some((*p, *body)),
+                _ => None,
+            })
+            .collect();
+        (variants, Some(default_body))
+    } else {
+        let variants: Vec<_> = shapes
+            .iter()
+            .filter_map(|(s, body)| match s {
+                ArmShape::Path(p) => Some((*p, *body)),
+                _ => None,
+            })
+            .collect();
+        (variants, None)
+    };
+
+    if variant_arms.is_empty() {
+        return Ok(None);
+    }
+
+    // Build the if chain from the last variant outward.
+    let mut else_branch: Option<Vec<ExprIR>> = default_body;
+    for (path, body) in variant_arms.iter().rev() {
+        let then_branch = parse_arm_body(body)?;
+        let cond = ExprIR::BinaryOp {
+            span: Span::call_site(),
+            op: syn::BinOp::Eq(syn::token::EqEq(Span::call_site())),
+            lhs: Box::new(clone_expr_ir(&scrutinee)),
+            rhs: Box::new(ExprIR::Path {
+                span: Span::call_site(),
+                path: (*path).clone(),
+            }),
+        };
+        let if_expr = ExprIR::If {
+            span: Span::call_site(),
+            cond: Box::new(cond),
+            then_branch,
+            else_branch: else_branch.take(),
+        };
+        else_branch = Some(vec![if_expr]);
+    }
+    // `else_branch` now holds a single-element vec with the outermost If.
+    Ok(else_branch.and_then(|mut v| v.pop()))
+}
+
+/// Deep-clone an `ExprIR`. We avoid implementing `Clone` on the enum so
+/// the codegen layer can keep pattern-matching against `&ExprIR` without
+/// worrying about accidental copies; the cloning is only needed here to
+/// reuse the scrutinee across multiple comparison arms.
+fn clone_expr_ir(expr: &ExprIR) -> ExprIR {
+    match expr {
+        ExprIR::Var { span, name } => ExprIR::Var { span: *span, name: name.clone() },
+        ExprIR::Path { span, path } => ExprIR::Path { span: *span, path: path.clone() },
+        ExprIR::WitnessAccess { span, field } => ExprIR::WitnessAccess {
+            span: *span,
+            field: field.clone(),
+        },
+        ExprIR::LedgerAccess {
+            span,
+            field,
+            method,
+            args,
+        } => ExprIR::LedgerAccess {
+            span: *span,
+            field: field.clone(),
+            method: method.clone(),
+            args: args.iter().map(clone_expr_ir).collect(),
+        },
+        ExprIR::Literal { span, value } => ExprIR::Literal {
+            span: *span,
+            value: value.clone(),
+        },
+        ExprIR::MethodCall {
+            span,
+            receiver,
+            method,
+            args,
+        } => ExprIR::MethodCall {
+            span: *span,
+            receiver: Box::new(clone_expr_ir(receiver)),
+            method: method.clone(),
+            args: args.iter().map(clone_expr_ir).collect(),
+        },
+        ExprIR::Reference { span, expr } => ExprIR::Reference {
+            span: *span,
+            expr: Box::new(clone_expr_ir(expr)),
+        },
+        // Other variants aren't expected as match scrutinees; render as
+        // Unsupported so misuse surfaces clearly at the next step.
+        other => ExprIR::Unsupported {
+            span: Span::call_site(),
+            description: format!("cannot clone {other:?} as match scrutinee"),
+        },
+    }
 }
 
 /// Parse a match arm's body, which is either a block or a bare expression.

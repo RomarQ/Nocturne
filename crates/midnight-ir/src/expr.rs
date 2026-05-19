@@ -76,6 +76,12 @@ pub enum ExprIR {
     /// A local variable reference.
     Var { span: Span, name: Ident },
 
+    /// A multi-segment path expression, e.g. `Status::Open` or
+    /// `Self::CONST`. Stored as a `syn::Path` so codegen can emit it
+    /// verbatim — unlike `Var`, the path may contain `::` and is not a
+    /// valid single `Ident`.
+    Path { span: Span, path: syn::Path },
+
     /// A block of statements.
     Block { span: Span, stmts: Vec<ExprIR> },
 

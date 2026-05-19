@@ -38,6 +38,8 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let transcript_mod =
                 midnight_codegen::transcript_codegen::generate_transcript_module(&contract_ir);
             let deploy_mod = midnight_codegen::deploy_codegen::generate_deploy_module(&contract_ir);
+            let enum_helpers_tokens =
+                midnight_codegen::enum_helpers::generate_enum_helpers(&contract_ir);
 
             // Return the module with midnight attributes stripped +
             // generated modules injected. `#[allow(dead_code)]` on the module
@@ -45,6 +47,16 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             // referenced by the generated transcript/deploy code paths.
             let mut cleaned = strip_midnight_attrs_from_module(module);
             if let Some((brace, ref mut items)) = cleaned.content {
+                // Enum helpers go in first as raw items
+                // (impl blocks) so the rest of the generated code
+                // can call `.discriminant()` on user enum values.
+                let helper_items: Vec<syn::Item> =
+                    syn::parse2::<syn::File>(enum_helpers_tokens)
+                        .map(|f| f.items)
+                        .unwrap_or_default();
+                for item in helper_items {
+                    items.push(item);
+                }
                 items.push(syn::parse2(transcript_mod).expect("generated transcript module"));
                 items.push(syn::parse2(deploy_mod).expect("generated deploy module"));
                 cleaned.content = Some((brace, std::mem::take(items)));

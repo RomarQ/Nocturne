@@ -87,6 +87,7 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
                 &field_types,
                 &witness_types,
                 &contract.user_structs,
+                &contract.user_enums,
             );
             emitter.emit_circuit(circuit)
         })
@@ -120,6 +121,9 @@ struct ZkirEmitter {
     /// order). Lets `Map<MyStruct, _>` / `Set<MyStruct>` etc. layout the
     /// struct as a tuple-of-fields for alignment + witness expansion.
     user_structs: HashMap<String, Vec<midnight_ir::UserStructField>>,
+    /// User-defined unit-variant enums (name → variants). Encoded
+    /// on-chain as `Bytes<1>` carrying the variant discriminant.
+    user_enums: HashMap<String, Vec<midnight_ir::UserEnumVariant>>,
 }
 
 impl ZkirEmitter {
@@ -128,6 +132,7 @@ impl ZkirEmitter {
         field_types: &[syn::Type],
         witness_types: &HashMap<String, syn::Type>,
         user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
+        user_enums: &HashMap<String, Vec<midnight_ir::UserEnumVariant>>,
     ) -> Self {
         Self {
             instructions: Vec::new(),
@@ -141,6 +146,7 @@ impl ZkirEmitter {
             field_types: field_types.to_vec(),
             witness_types: witness_types.clone(),
             user_structs: user_structs.clone(),
+            user_enums: user_enums.clone(),
         }
     }
 
@@ -320,7 +326,7 @@ impl ZkirEmitter {
                 // each Fr's constraint type rather than a uniform width.
                 let layout = ty
                     .as_ref()
-                    .map(|t| witness_fr_layout(t, &self.user_structs))
+                    .map(|t| witness_fr_layout(t, &self.user_structs, &self.user_enums))
                     .unwrap_or_else(|| vec![FrLayout::Field]);
                 let mut first_idx = None;
                 for entry in layout {
@@ -355,6 +361,16 @@ impl ZkirEmitter {
             }
 
             ExprIR::Var { name, .. } => self.variables.get(&name.to_string()).copied(),
+
+            // A `Path` like `Status::Open` is a compile-time constant.
+            // When it names a known user enum variant, lower to a
+            // LoadImm of the variant's discriminant so `BinaryOp::Eq`
+            // can compare it directly against an enum wire. For other
+            // paths (assoc constants, etc.) there's no wire backing —
+            // return None and let callers handle the absence.
+            ExprIR::Path { path, .. } => self
+                .resolve_enum_variant_discriminant(path)
+                .map(|d| self.emit_load_imm(Fr::from(d as u64))),
 
             ExprIR::BinaryOp { op, lhs, rhs, .. } => {
                 let a = self.emit_expr(lhs)?;
@@ -700,7 +716,7 @@ impl ZkirEmitter {
         // the same order `AlignedValueExt::value_only_field_repr` writes
         // them on the construct_proof side, which mirrors the IR's
         // sequential PublicInput consumption.
-        let result_enc = result_ty.and_then(|t| aligned_value_encoding(t, &self.user_structs));
+        let result_enc = result_ty.and_then(|t| aligned_value_encoding(t, &self.user_structs, &self.user_enums));
         let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
         self.push_declare_pub_input(popeq_op);
 
@@ -762,7 +778,7 @@ impl ZkirEmitter {
         k_ty: &syn::Type,
         v_ty: &syn::Type,
     ) -> Option<Index> {
-        let key_enc = aligned_value_encoding(k_ty, &self.user_structs)?;
+        let key_enc = aligned_value_encoding(k_ty, &self.user_structs, &self.user_enums)?;
 
         match method_name {
             "contains" => {
@@ -771,7 +787,7 @@ impl ZkirEmitter {
                 self.emit_map_member(field_idx, &key_vars, &key_enc)
             }
             "insert" | "set" => {
-                let val_enc = aligned_value_encoding(v_ty, &self.user_structs)?;
+                let val_enc = aligned_value_encoding(v_ty, &self.user_structs, &self.user_enums)?;
                 let k_first = args.first().and_then(|a| self.emit_expr(a))?;
                 let v_first = args.get(1).and_then(|a| self.emit_expr(a))?;
                 let key_vars = gather_n_vars(k_first, key_enc.value_field_count);
@@ -784,7 +800,7 @@ impl ZkirEmitter {
                 self.emit_map_remove(field_idx, &key_vars, &key_enc)
             }
             "lookup" => {
-                let val_enc = aligned_value_encoding(v_ty, &self.user_structs)?;
+                let val_enc = aligned_value_encoding(v_ty, &self.user_structs, &self.user_enums)?;
                 let first = args.first().and_then(|a| self.emit_expr(a))?;
                 let key_vars = gather_n_vars(first, key_enc.value_field_count);
                 self.emit_map_lookup(field_idx, &key_vars, &key_enc, v_ty, &val_enc)
@@ -1120,7 +1136,7 @@ impl ZkirEmitter {
         args: &[midnight_ir::ExprIR],
         t_ty: &syn::Type,
     ) -> Option<Index> {
-        let key_enc = aligned_value_encoding(t_ty, &self.user_structs)?;
+        let key_enc = aligned_value_encoding(t_ty, &self.user_structs, &self.user_enums)?;
         match method_name {
             "contains" | "member" => {
                 let first = args.first().and_then(|a| self.emit_expr(a))?;
@@ -1576,7 +1592,7 @@ impl ZkirEmitter {
         // Push { storage:false, Cell(Field(user_digest)) }. Reuse
         // emit_push_cell with the Field encoding from Phase A.
         let field_ty: syn::Type = syn::parse_quote!(Field);
-        let enc = aligned_value_encoding(&field_ty, &self.user_structs)
+        let enc = aligned_value_encoding(&field_ty, &self.user_structs, &self.user_enums)
             .expect("Field encoding must exist");
         self.emit_push_cell(&[digest_var], Some(&enc), /* storage = */ false);
 
@@ -1646,7 +1662,7 @@ impl ZkirEmitter {
             .and_then(extract_cell_inner_type);
         let n_fr = inner_ty
             .as_ref()
-            .and_then(|t| aligned_value_encoding(t, &self.user_structs))
+            .and_then(|t| aligned_value_encoding(t, &self.user_structs, &self.user_enums))
             .map(|e| e.value_field_count)
             .unwrap_or(1);
         (first..first + n_fr as Index).collect()
@@ -1666,7 +1682,7 @@ impl ZkirEmitter {
                 .and_then(extract_cell_inner_type);
             let value_encoding = inner_ty
                 .as_ref()
-                .and_then(|t| aligned_value_encoding(t, &self.user_structs));
+                .and_then(|t| aligned_value_encoding(t, &self.user_structs, &self.user_enums));
             self.emit_push_cell(
                 value_vars,
                 value_encoding.as_ref(),
@@ -1749,6 +1765,28 @@ impl ZkirEmitter {
 
     fn emit_load_imm(&mut self, value: Fr) -> Index {
         self.emit_instruction(Instruction::LoadImm { imm: value })
+    }
+
+    /// If `path` names a known unit-variant enum like `Status::Open`,
+    /// return the variant's discriminant (its index in declaration
+    /// order). Matches on the last two segments so paths qualified with
+    /// `self::`, `crate::`, etc. still resolve.
+    fn resolve_enum_variant_discriminant(&self, path: &syn::Path) -> Option<u8> {
+        let segs: Vec<String> = path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        if segs.len() < 2 {
+            return None;
+        }
+        let enum_name = &segs[segs.len() - 2];
+        let variant_name = &segs[segs.len() - 1];
+        let variants = self.user_enums.get(enum_name)?;
+        variants
+            .iter()
+            .position(|v| v.name == *variant_name)
+            .map(|i| i as u8)
     }
 
     fn emit_instruction(&mut self, instruction: Instruction) -> Index {
@@ -1860,7 +1898,22 @@ fn aligned_value_encoding_bytes(n: u32) -> AlignedValueEncoding {
 fn aligned_value_encoding(
     ty: &syn::Type,
     user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
+    user_enums: &HashMap<String, Vec<midnight_ir::UserEnumVariant>>,
 ) -> Option<AlignedValueEncoding> {
+    // User-defined unit-variant enum: encoded as Bytes<1> carrying
+    // the variant discriminant (0, 1, ..., n-1). Caps at 256 variants
+    // by construction (u8 discriminant); larger enums would need a
+    // multi-byte Bytes<_> shape.
+    if let syn::Type::Path(tp) = ty
+        && tp.qself.is_none()
+        && let Some(seg) = tp.path.segments.last()
+        && user_enums.contains_key(&seg.ident.to_string())
+    {
+        return Some(AlignedValueEncoding {
+            alignment_atoms: vec![1, 1],
+            value_field_count: 1,
+        });
+    }
     // Compose a flat encoding from an ordered list of component types,
     // mirroring upstream `Aligned for (T1, ..., Tn)`. Shared between
     // tuples and user structs (whose named fields layout identically).
@@ -1868,7 +1921,7 @@ fn aligned_value_encoding(
         let mut atoms: Vec<i32> = Vec::new();
         let mut count: usize = 0;
         for elem in comps {
-            let inner = aligned_value_encoding(elem, user_structs)?;
+            let inner = aligned_value_encoding(elem, user_structs, user_enums)?;
             atoms.extend(inner.alignment_atoms.iter().skip(1));
             count += inner.value_field_count;
         }
@@ -2009,6 +2062,7 @@ enum FrLayout {
 fn witness_fr_layout(
     ty: &syn::Type,
     user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
+    user_enums: &HashMap<String, Vec<midnight_ir::UserEnumVariant>>,
 ) -> Vec<FrLayout> {
     // Tuples concatenate their components' layouts in declaration order.
     // Mirrors `Aligned for (T1, ..., Tn)` upstream
@@ -2017,7 +2071,7 @@ fn witness_fr_layout(
     if let syn::Type::Tuple(tt) = ty {
         let mut layout = Vec::new();
         for elem in &tt.elems {
-            layout.extend(witness_fr_layout(elem, user_structs));
+            layout.extend(witness_fr_layout(elem, user_structs, user_enums));
         }
         return layout;
     }
@@ -2030,9 +2084,19 @@ fn witness_fr_layout(
     {
         let mut layout = Vec::new();
         for f in fields {
-            layout.extend(witness_fr_layout(&f.ty, user_structs));
+            layout.extend(witness_fr_layout(&f.ty, user_structs, user_enums));
         }
         return layout;
+    }
+
+    // User-defined unit-variant enum: discriminant fits in a single
+    // u8, so it's an 8-bit constrained PrivateInput.
+    if let syn::Type::Path(tp) = ty
+        && tp.qself.is_none()
+        && let Some(seg) = tp.path.segments.last()
+        && user_enums.contains_key(&seg.ident.to_string())
+    {
+        return vec![FrLayout::Bits(8)];
     }
 
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");

@@ -7,7 +7,7 @@
 //! - Only emits ops for the active branch (matching ZKIR's pi_skip behavior)
 //! - Converts witness values to `Fr` for the private transcript
 
-use midnight_ir::{CircuitIR, ContractIR, ExprIR, UserStructField, WitnessIR};
+use midnight_ir::{CircuitIR, ContractIR, ExprIR, UserEnumVariant, UserStructField, WitnessIR};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::HashMap;
@@ -48,6 +48,7 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
                 ledger_name,
                 &witness_types,
                 &contract.user_structs,
+                &contract.user_enums,
             )
         })
         .collect();
@@ -94,7 +95,7 @@ fn generate_circuit_transcript_fn(
     witnesses_name: Option<&syn::Ident>,
     ledger_name: &syn::Ident,
     witness_types: &HashMap<String, syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let fn_name = format_ident!("build_{}_transcript", circuit.name);
     let doc = format!("Build the transcript for the `{}` circuit.", circuit.name);
@@ -102,7 +103,7 @@ fn generate_circuit_transcript_fn(
     let body_stmts: Vec<TokenStream> = circuit
         .body
         .iter()
-        .map(|expr| generate_op_stmt(expr, field_names, field_types, witness_types, user_structs))
+        .map(|expr| generate_op_stmt(expr, field_names, field_types, witness_types, user_structs, user_enums))
         .collect();
 
     let needs_state = circuit_needs_state(&circuit.body);
@@ -210,7 +211,7 @@ fn generate_op_stmt(
     field_names: &[String],
     field_types: &[syn::Type],
     witness_types: &HashMap<String, syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     match expr {
         ExprIR::LedgerAccess {
@@ -305,7 +306,7 @@ fn generate_op_stmt(
                     // (via `generate_runtime_cond`), the bool drives branching.
                     // Works for both Map and Set fields (same Member opcode,
                     // K type resolved via extract_field_key_type).
-                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs);
+                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs, user_enums);
                     quote! { let _ = #block; }
                 }
                 "insert" => {
@@ -313,33 +314,33 @@ fn generate_op_stmt(
                     // Set → Set::insert (k, Null), MerkleTree → 10-op
                     // append-and-rehash sequence, Cell → Cell::set (v).
                     if field_ty.and_then(extract_map_kv_types).is_some() {
-                        generate_map_insert(field_idx, args, field_ty, user_structs)
+                        generate_map_insert(field_idx, args, field_ty, user_structs, user_enums)
                     } else if field_ty.and_then(extract_set_inner_type).is_some() {
-                        generate_set_insert(field_idx, args, field_ty, user_structs)
+                        generate_set_insert(field_idx, args, field_ty, user_structs, user_enums)
                     } else if field_ty.and_then(extract_merkle_tree_type).is_some() {
                         generate_merkle_tree_insert(field_idx, args)
                     } else {
-                        generate_cell_set(field_idx, args, field_ty, user_structs)
+                        generate_cell_set(field_idx, args, field_ty, user_structs, user_enums)
                     }
                 }
                 "set" => {
                     // `set` is also used as an alias for Map::insert. Route
                     // based on the field type.
                     if field_ty.and_then(extract_map_kv_types).is_some() {
-                        generate_map_insert(field_idx, args, field_ty, user_structs)
+                        generate_map_insert(field_idx, args, field_ty, user_structs, user_enums)
                     } else {
-                        generate_cell_set(field_idx, args, field_ty, user_structs)
+                        generate_cell_set(field_idx, args, field_ty, user_structs, user_enums)
                     }
                 }
                 "remove" if field_ty.and_then(extract_map_kv_types).is_some() => {
-                    generate_map_remove(field_idx, args, field_ty, user_structs)
+                    generate_map_remove(field_idx, args, field_ty, user_structs, user_enums)
                 }
                 "remove" if field_ty.and_then(extract_set_inner_type).is_some() => {
                     // Set::remove has the same on-chain pattern as Map::remove.
-                    generate_set_remove(field_idx, args, field_ty, user_structs)
+                    generate_set_remove(field_idx, args, field_ty, user_structs, user_enums)
                 }
                 "lookup" if field_ty.and_then(extract_map_kv_types).is_some() => {
-                    generate_map_lookup(field_idx, &field_name, args, field_ty, user_structs)
+                    generate_map_lookup(field_idx, &field_name, args, field_ty, user_structs, user_enums)
                 }
                 "check_root" if field_ty.and_then(extract_merkle_tree_type).is_some() => {
                     generate_merkle_tree_check_root(field_idx, &field_name, args)
@@ -355,17 +356,17 @@ fn generate_op_stmt(
             ..
         } => {
             // Collect witness values used in the condition for private_transcript.
-            let witness_adds = collect_witness_private_inputs(cond);
-            let cond_expr = generate_runtime_cond(cond, field_names, field_types, user_structs);
+            let witness_adds = collect_witness_private_inputs(cond, witness_types, user_enums);
+            let cond_expr = generate_runtime_cond(cond, field_names, field_types, user_structs, user_enums);
             let then_stmts: Vec<TokenStream> = then_branch
                 .iter()
-                .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs))
+                .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs, user_enums))
                 .collect();
 
             if let Some(else_exprs) = else_branch {
                 let else_stmts: Vec<TokenStream> = else_exprs
                     .iter()
-                    .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs))
+                    .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs, user_enums))
                     .collect();
                 quote! {
                     #witness_adds
@@ -392,7 +393,7 @@ fn generate_op_stmt(
             // leading underscore so the `unused_variables` lint is
             // already satisfied for ignored bindings.
             let var_name = format_ident!("{}", name.to_string());
-            let val_stmt = generate_op_stmt(value, field_names, field_types, witness_types, user_structs);
+            let val_stmt = generate_op_stmt(value, field_names, field_types, witness_types, user_structs, user_enums);
             quote! {
                 #[allow(non_snake_case, unused_variables)]
                 let #var_name = {
@@ -464,10 +465,18 @@ fn generate_op_stmt(
                     .map(|f| {
                         let fname = f.name.clone();
                         let accessor = quote! { witnesses.#field_ident.#fname };
-                        component_private_push(&f.ty, &accessor)
+                        component_private_push(&f.ty, &accessor, user_enums)
                     })
                     .collect();
                 quote! { #(#pushes)* }
+            } else if witness_ty.map(|t| is_user_enum(t, user_enums)).unwrap_or(false) {
+                // User-defined unit-variant enum witness: push the
+                // discriminant as a u8-aligned Fr.
+                quote! {
+                    private_transcript.push(
+                        Fr::from(witnesses.#field_ident.discriminant() as u64),
+                    );
+                }
             } else {
                 quote! {
                     private_transcript.push(Fr::from(witnesses.#field_ident.value()));
@@ -478,7 +487,7 @@ fn generate_op_stmt(
         ExprIR::Block { stmts, .. } => {
             let inner: Vec<TokenStream> = stmts
                 .iter()
-                .map(|s| generate_op_stmt(s, field_names, field_types, witness_types, user_structs))
+                .map(|s| generate_op_stmt(s, field_names, field_types, witness_types, user_structs, user_enums))
                 .collect();
             quote! { #(#inner)* }
         }
@@ -489,7 +498,7 @@ fn generate_op_stmt(
             // `private_transcript`) are emitted. Method-specific runtime
             // behavior is generated elsewhere; this arm is just about
             // side effects on the transcript builder's state.
-            generate_op_stmt(receiver, field_names, field_types, witness_types, user_structs)
+            generate_op_stmt(receiver, field_names, field_types, witness_types, user_structs, user_enums)
         }
 
         // Free-function calls used as RHS of `let` or as standalone
@@ -503,7 +512,7 @@ fn generate_op_stmt(
             // Emit witness pushes from any path-typed args first.
             let witness_emits: Vec<TokenStream> = args
                 .iter()
-                .map(|a| generate_op_stmt(a, field_names, field_types, witness_types, user_structs))
+                .map(|a| generate_op_stmt(a, field_names, field_types, witness_types, user_structs, user_enums))
                 .collect();
             let name_str = name.to_string();
             let value_expr = match name_str.as_str() {
@@ -525,7 +534,7 @@ fn generate_op_stmt(
         // Reference (`&expr`) forwards to its inner so side effects
         // bubble up through `&witnesses.path` etc.
         ExprIR::Reference { expr: inner, .. } => {
-            generate_op_stmt(inner, field_names, field_types, witness_types, user_structs)
+            generate_op_stmt(inner, field_names, field_types, witness_types, user_structs, user_enums)
         }
 
         _ => quote! {},
@@ -533,22 +542,45 @@ fn generate_op_stmt(
 }
 
 /// Collect witness field accesses in a condition expression and
-/// generate code to add their values to private_transcript.
-fn collect_witness_private_inputs(expr: &ExprIR) -> TokenStream {
+/// generate code to add their values to private_transcript. Type-aware
+/// so enum and Bytes/digest witnesses use the same push shape as the
+/// `WitnessAccess` arm of `generate_op_stmt`.
+fn collect_witness_private_inputs(
+    expr: &ExprIR,
+    witness_types: &HashMap<String, syn::Type>,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> TokenStream {
     match expr {
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
-            quote! {
-                private_transcript.push(Fr::from(witnesses.#field_ident.value() as u64));
+            let field_str = field.to_string();
+            let witness_ty = witness_types.get(&field_str);
+            if witness_ty
+                .map(|t| is_user_enum(t, user_enums))
+                .unwrap_or(false)
+            {
+                quote! {
+                    private_transcript.push(
+                        Fr::from(witnesses.#field_ident.discriminant() as u64),
+                    );
+                }
+            } else {
+                quote! {
+                    private_transcript.push(Fr::from(witnesses.#field_ident.value() as u64));
+                }
             }
         }
-        ExprIR::MethodCall { receiver, .. } => collect_witness_private_inputs(receiver),
+        ExprIR::MethodCall { receiver, .. } => {
+            collect_witness_private_inputs(receiver, witness_types, user_enums)
+        }
         ExprIR::BinaryOp { lhs, rhs, .. } => {
-            let l = collect_witness_private_inputs(lhs);
-            let r = collect_witness_private_inputs(rhs);
+            let l = collect_witness_private_inputs(lhs, witness_types, user_enums);
+            let r = collect_witness_private_inputs(rhs, witness_types, user_enums);
             quote! { #l #r }
         }
-        ExprIR::UnaryOp { expr: inner, .. } => collect_witness_private_inputs(inner),
+        ExprIR::UnaryOp { expr: inner, .. } => {
+            collect_witness_private_inputs(inner, witness_types, user_enums)
+        }
         _ => quote! {},
     }
 }
@@ -581,6 +613,9 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
         ExprIR::Var { name, .. } => {
             let ident = format_ident!("{}", name.to_string());
             quote! { #ident }
+        }
+        ExprIR::Path { path, .. } => {
+            quote! { #path }
         }
         ExprIR::MethodCall {
             receiver, method, ..
@@ -618,7 +653,7 @@ fn generate_map_contains_block(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
@@ -630,7 +665,7 @@ fn generate_map_contains_block(
     let k_ty = field_ty.and_then(extract_field_key_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -663,12 +698,12 @@ fn generate_cell_set(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let t_ty = field_ty.and_then(extract_cell_inner_type);
     let value_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
     quote! {
         ops.push(Op::Push {
@@ -681,6 +716,22 @@ fn generate_cell_set(
         });
         ops.push(Op::Ins { cached: false, n: 1 });
     }
+}
+
+/// True if `ty` is the path of a user-defined unit-variant enum.
+fn is_user_enum(
+    ty: &syn::Type,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> bool {
+    let syn::Type::Path(tp) = ty else { return false };
+    if tp.qself.is_some() {
+        return false;
+    }
+    tp.path
+        .segments
+        .last()
+        .map(|s| user_enums.contains_key(&s.ident.to_string()))
+        .unwrap_or(false)
 }
 
 /// If `ty` is a user-defined struct registered in `user_structs`,
@@ -705,7 +756,11 @@ fn user_struct_fields<'a>(
 /// component) onto `private_transcript`. Mirrors the per-type pushes in
 /// the `WitnessAccess` arm, but takes a token accessor (e.g.
 /// `witnesses.key.a`) instead of a witness ident.
-fn component_private_push(ty: &syn::Type, accessor: &TokenStream) -> TokenStream {
+fn component_private_push(
+    ty: &syn::Type,
+    accessor: &TokenStream,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> TokenStream {
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     if ty_str.starts_with("Bytes<") {
         return quote! {
@@ -734,6 +789,11 @@ fn component_private_push(ty: &syn::Type, accessor: &TokenStream) -> TokenStream
             private_transcript.push(Fr::from((#accessor).value() as u64));
         };
     }
+    if is_user_enum(ty, user_enums) {
+        return quote! {
+            private_transcript.push(Fr::from((#accessor).discriminant() as u64));
+        };
+    }
     // Uint<N> / primitive integer: cast to u64 for Fr::from.
     quote! {
         private_transcript.push(Fr::from((#accessor).value() as u64));
@@ -748,7 +808,7 @@ fn component_private_push(ty: &syn::Type, accessor: &TokenStream) -> TokenStream
 fn aligned_value_arg_expr(
     expr: &ExprIR,
     ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     if let Some(t) = ty {
         // Tuple keys / values: build the upstream tuple shape that
@@ -823,6 +883,14 @@ fn aligned_value_arg_expr(
                 }
             };
         }
+        // User-defined unit-variant enum: lower to its u8 discriminant.
+        // The macro-generated `discriminant()` method (see
+        // enum_helpers.rs) gives us the encoding-compatible u8 the
+        // on-chain Bytes<1> alignment expects.
+        if is_user_enum(t, user_enums) {
+            let raw = arg_to_runtime_raw_expr(expr);
+            return quote! { (#raw).discriminant() };
+        }
     }
     let value_expr = arg_to_runtime_expr(expr);
     match ty.and_then(primitive_cast_for_type) {
@@ -856,6 +924,13 @@ fn tuple_component_aligned_repr(ty: &syn::Type, accessor: &TokenStream) -> Token
     }
     // Uint<N> / primitive integers: snap to the matching Rust primitive
     // so the upstream Aligned-for-primitive impl picks the right Bytes<n>
+    //
+    // Note: tuple_component_aligned_repr doesn't take user_enums today,
+    // so enum-valued tuple components fall through to the integer path
+    // — fine for now since the per-component accessor's primitive cast
+    // pulls in `.discriminant()` when the type is recognized at the
+    // top-level dispatch. Nested enum-in-tuple-in-struct would need
+    // user_enums plumbed here too.
     // alignment.
     match primitive_cast_for_type(ty) {
         Some(cast) => quote! { (#accessor).value() #cast },
@@ -875,7 +950,7 @@ fn generate_map_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let kv = field_ty.and_then(extract_map_kv_types);
     let k_ty = kv.as_ref().map(|(k, _)| k.clone());
@@ -886,11 +961,11 @@ fn generate_map_insert(
     // while primitives still get the right `as u<N>` cast.
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
     let val_aligned = args
         .get(1)
-        .map(|a| aligned_value_arg_expr(a, v_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, v_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -925,7 +1000,7 @@ fn generate_map_lookup(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
@@ -940,7 +1015,7 @@ fn generate_map_lookup(
     // build as `Push` does — multi-Fr K must use `*<raw>.as_bytes()`.
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
 
     // Popeq result: V comes back from the runtime (a wrapper like Boolean
@@ -987,12 +1062,12 @@ fn generate_map_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let k_ty = field_ty.and_then(extract_map_key_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1159,12 +1234,12 @@ fn generate_set_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1192,12 +1267,12 @@ fn generate_set_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs, user_enums))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1428,6 +1503,11 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
             let ident = format_ident!("{}", name.to_string());
             quote! { #ident.clone() }
         }
+        ExprIR::Path { path, .. } => {
+            // Multi-segment paths are constants (enum variants, assoc
+            // constants); cloning is a no-op for `Copy` enum variants.
+            quote! { #path }
+        }
         // Preserve method chains (e.g. `.clone()`, `.into_inner()`) on the
         // raw wrapper. Without this, MethodCall falls through to
         // `arg_to_runtime_expr` which unwraps to `.value()` — wrong for
@@ -1481,11 +1561,57 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
 /// evaluates to that bool. This lets `if self.map.contains(&k) { ... }`
 /// emit the contains transcript ops in cond position the same way it
 /// would as a statement.
+/// True if `expr` is `ExprIR::Path` whose path resolves (by the last two
+/// segments) to a known unit-variant enum like `Status::Open`.
+fn is_enum_variant_path_expr(
+    expr: &ExprIR,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> bool {
+    let ExprIR::Path { path, .. } = expr else {
+        return false;
+    };
+    let n = path.segments.len();
+    if n < 2 {
+        return false;
+    }
+    let enum_name = path.segments[n - 2].ident.to_string();
+    let variant_name = path.segments[n - 1].ident.to_string();
+    user_enums
+        .get(&enum_name)
+        .map(|vs| vs.iter().any(|v| v.name == variant_name))
+        .unwrap_or(false)
+}
+
+/// Lower an operand of an enum equality comparison to a `u64`-typed
+/// discriminant expression. The macro-generated `discriminant()` method
+/// is in scope for every user enum, so this works uniformly on witness
+/// reads (`witnesses.f`), local bindings, and variant literals.
+fn runtime_enum_disc_expr(expr: &ExprIR) -> TokenStream {
+    match expr {
+        ExprIR::Path { path, .. } => quote! { ((#path).discriminant() as u64) },
+        ExprIR::WitnessAccess { field, .. } => {
+            let f = format_ident!("{}", field.to_string());
+            quote! { (witnesses.#f.discriminant() as u64) }
+        }
+        ExprIR::Var { name, .. } => {
+            let n = format_ident!("{}", name.to_string());
+            quote! { (#n.discriminant() as u64) }
+        }
+        ExprIR::Reference { expr: inner, .. } => runtime_enum_disc_expr(inner),
+        // Fallback: trust that the underlying expression evaluates to
+        // the user-facing enum type so `.discriminant()` resolves.
+        other => {
+            let raw = arg_to_runtime_raw_expr(other);
+            quote! { ((#raw).discriminant() as u64) }
+        }
+    }
+}
+
 fn generate_runtime_cond(
     expr: &ExprIR,
     field_names: &[String],
     field_types: &[syn::Type],
-    user_structs: &HashMap<String, Vec<UserStructField>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
     match expr {
         ExprIR::WitnessAccess { field, .. } => {
@@ -1506,7 +1632,7 @@ fn generate_runtime_cond(
                     .position(|f| f == &field_name)
                     .unwrap_or(0) as u8;
                 let field_ty = field_types.get(field_idx as usize);
-                return generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs);
+                return generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs, user_enums);
             }
             // Other LedgerAccess methods aren't bool-typed (lookup returns V,
             // get/value return T, increment returns nothing). Fall through to
@@ -1520,9 +1646,9 @@ fn generate_runtime_cond(
         } => {
             let method_name = method.to_string();
             match method_name.as_str() {
-                "into" | "value" => generate_runtime_cond(receiver, field_names, field_types, user_structs),
+                "into" | "value" => generate_runtime_cond(receiver, field_names, field_types, user_structs, user_enums),
                 _ => {
-                    let recv = generate_runtime_cond(receiver, field_names, field_types, user_structs);
+                    let recv = generate_runtime_cond(receiver, field_names, field_types, user_structs, user_enums);
                     let m = format_ident!("{}", method_name);
                     quote! { #recv.#m() }
                 }
@@ -1531,6 +1657,9 @@ fn generate_runtime_cond(
         ExprIR::Var { name, .. } => {
             let ident = format_ident!("{}", name.to_string());
             quote! { #ident }
+        }
+        ExprIR::Path { path, .. } => {
+            quote! { #path }
         }
         ExprIR::Literal { value, .. } => match value {
             midnight_ir::expr::LiteralIR::Bool(b) => quote! { #b },
@@ -1541,8 +1670,24 @@ fn generate_runtime_cond(
             _ => quote! { true },
         },
         ExprIR::BinaryOp { op, lhs, rhs, .. } => {
-            let l = generate_runtime_cond(lhs, field_names, field_types, user_structs);
-            let r = generate_runtime_cond(rhs, field_names, field_types, user_structs);
+            // If either side is an enum-variant path, the other side is a
+            // value of that enum and bare `==` won't type-check (witnesses
+            // expose `.value()`, not the raw enum). Compare discriminants
+            // on both sides instead.
+            if matches!(op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
+                && (is_enum_variant_path_expr(lhs, user_enums)
+                    || is_enum_variant_path_expr(rhs, user_enums))
+            {
+                let l = runtime_enum_disc_expr(lhs);
+                let r = runtime_enum_disc_expr(rhs);
+                return match op {
+                    syn::BinOp::Eq(_) => quote! { #l == #r },
+                    syn::BinOp::Ne(_) => quote! { #l != #r },
+                    _ => unreachable!(),
+                };
+            }
+            let l = generate_runtime_cond(lhs, field_names, field_types, user_structs, user_enums);
+            let r = generate_runtime_cond(rhs, field_names, field_types, user_structs, user_enums);
             match op {
                 syn::BinOp::Eq(_) => quote! { #l == #r },
                 syn::BinOp::Ne(_) => quote! { #l != #r },

@@ -7,6 +7,7 @@
 pub mod bundle;
 pub mod codegen;
 pub mod deploy_codegen;
+pub mod enum_helpers;
 pub mod transcript_codegen;
 pub mod zkir_emitter;
 

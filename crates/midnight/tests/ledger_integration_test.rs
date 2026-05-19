@@ -6433,3 +6433,271 @@ async fn map_struct_key_contains_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map<MyKey, _>::contains");
 }
+
+// ---------------------------------------------------------------------------
+// Unit-variant enums as Cell values + as Map keys. Encoded as Bytes<1>
+// carrying the variant discriminant.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod enum_state {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Status {
+        Open,
+        Closed,
+        Cancelled,
+    }
+
+    #[midnight(ledger)]
+    pub struct EnumStateLedger {
+        pub status: Cell<Status>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct EnumStateWitnesses {
+        pub new_status: Status,
+    }
+
+    impl EnumStateLedger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                status: Cell::new(Status::Open),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn transition(&mut self, witnesses: &EnumStateWitnesses) {
+            self.status.set(witnesses.new_status);
+        }
+    }
+}
+
+fn build_enum_state_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod enum_state {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            pub enum Status { Open, Closed, Cancelled }
+
+            #[midnight(ledger)]
+            pub struct EnumStateLedger { status: Cell<Status> }
+            #[midnight(witnesses)]
+            pub struct EnumStateWitnesses { pub new_status: Status }
+            impl EnumStateLedger {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { status: Cell::new(Status::Open) } }
+                #[midnight(circuit)]
+                pub fn transition(&mut self, witnesses: &EnumStateWitnesses) {
+                    self.status.set(witnesses.new_status);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+/// `Cell<Status>::set(value)` where `Status` is a user enum encoded
+/// as the Bytes<1> discriminant.
+#[tokio::test]
+async fn enum_cell_set_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_enum_state_ir("transition");
+    let witnesses = enum_state::EnumStateWitnesses {
+        new_status: enum_state::Status::Closed,
+    };
+    let nocturne_transcript =
+        enum_state::transcript::build_transition_transcript(&witnesses);
+
+    // Witness PrivateInput: 1 Fr (discriminant of Closed = 1).
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(1u8)];
+    let preimage =
+        canonical_preimage("transition", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Cell<EnumStatus>::set"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<EnumStatus>::set");
+}
+
+// ---------------------------------------------------------------------------
+// Match-on-enum: structurally equivalent to the Boolean voting circuit but
+// the conditional uses a user enum + match instead of `if witness.value()`.
+// Confirms enum-variant patterns lower to nested If with cond_select-zeroed
+// pub inputs and that runtime equality goes through `.discriminant()`.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod enum_vote {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Vote {
+        For,
+        Against,
+    }
+
+    #[midnight(ledger)]
+    pub struct EnumBallot {
+        pub votes_for: Counter,
+        pub votes_against: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct EnumBallotWitnesses {
+        pub choice: Vote,
+    }
+
+    impl EnumBallot {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                votes_for: Counter::zero(),
+                votes_against: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn cast_vote(&mut self, witnesses: &EnumBallotWitnesses) {
+            match witnesses.choice {
+                Vote::For => {
+                    self.votes_for.increment();
+                }
+                _ => {
+                    self.votes_against.increment();
+                }
+            }
+        }
+    }
+}
+
+fn build_enum_vote_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod enum_vote {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            pub enum Vote { For, Against }
+            #[midnight(ledger)]
+            pub struct EnumBallot {
+                pub votes_for: Counter,
+                pub votes_against: Counter,
+            }
+            #[midnight(witnesses)]
+            pub struct EnumBallotWitnesses { pub choice: Vote }
+            impl EnumBallot {
+                #[midnight(constructor)]
+                pub fn new() -> Self {
+                    Self { votes_for: Counter::zero(), votes_against: Counter::zero() }
+                }
+                #[midnight(circuit)]
+                pub fn cast_vote(&mut self, witnesses: &EnumBallotWitnesses) {
+                    match witnesses.choice {
+                        Vote::For => { self.votes_for.increment(); }
+                        _ => { self.votes_against.increment(); }
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "cast_vote")
+        .unwrap()
+        .ir_source
+}
+
+/// Mirror of `voting_verifies_with_ledger_shape_pis` but the conditional
+/// is driven by a user enum + match, not a Boolean witness + if.
+#[tokio::test]
+async fn enum_match_vote_verifies_with_ledger_shape_pis() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_enum_vote_ir();
+    let witnesses = enum_vote::EnumBallotWitnesses {
+        choice: enum_vote::Vote::For,
+    };
+    let nocturne_transcript = enum_vote::transcript::build_cast_vote_transcript(&witnesses);
+
+    // Vote::For is discriminant 0 → push 0 to private transcript.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(0u8)];
+    let preimage = canonical_preimage(
+        "cast_vote",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for the \
+         enum-match conditional voting circuit"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for enum-match cast_vote");
+}

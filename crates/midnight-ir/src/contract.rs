@@ -28,6 +28,12 @@ pub struct ContractIR {
     /// order. Used by codegen to layout user structs as Map/Set keys
     /// (treats them like a named tuple of their fields).
     pub user_structs: std::collections::HashMap<String, Vec<UserStructField>>,
+    /// User-defined `enum` items in the contract module. Today only
+    /// unit-variant enums are recognized (no payloads). The on-chain
+    /// encoding is `Bytes<1>` carrying the variant discriminant (0,
+    /// 1, ...). Codegen uses this to lay out enums as Cell/Map values
+    /// and to lower `match` arms to discriminant comparisons.
+    pub user_enums: std::collections::HashMap<String, Vec<UserEnumVariant>>,
 }
 
 /// One field of a user-defined struct usable as a Map/Set key.
@@ -35,6 +41,15 @@ pub struct ContractIR {
 pub struct UserStructField {
     pub name: Ident,
     pub ty: Type,
+}
+
+/// One variant of a user-defined enum. Today the IR only records the
+/// variant name and assigns a discriminant by declaration order;
+/// payload-carrying variants aren't yet supported and are rejected at
+/// parse time.
+#[derive(Debug, Clone)]
+pub struct UserEnumVariant {
+    pub name: Ident,
 }
 
 /// IR for the `#[midnight(ledger)]` struct.
