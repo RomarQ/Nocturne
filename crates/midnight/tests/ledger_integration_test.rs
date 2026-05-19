@@ -7058,3 +7058,150 @@ fn constructor_params_flow_into_initial_state() {
         "constructor's `fee_bps: u64` parameter must reach the deployed Cell<u64>"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Composition: enum + match + assert! + conditional Counter + Cell<u64>.
+// Pins on-chain compatibility for a realistic "role-gated counter" pattern
+// where the enum drives both an assertion and a match-based mutation.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod role_gated_counter {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Caller {
+        Admin,
+        Member,
+    }
+
+    #[midnight(ledger)]
+    pub struct RoleCounter {
+        pub admin_ops: Counter,
+        pub member_ops: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct RoleCallerWitnesses {
+        pub caller: Caller,
+    }
+
+    impl RoleCounter {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                admin_ops: Counter::zero(),
+                member_ops: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn record(&mut self, witnesses: &RoleCallerWitnesses) {
+            match witnesses.caller {
+                Caller::Admin => {
+                    self.admin_ops.increment_by(3);
+                }
+                _ => {
+                    self.member_ops.increment();
+                }
+            }
+        }
+    }
+}
+
+fn build_role_counter_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod role_gated_counter {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            pub enum Caller { Admin, Member }
+            #[midnight(ledger)]
+            pub struct RoleCounter {
+                pub admin_ops: Counter,
+                pub member_ops: Counter,
+            }
+            #[midnight(witnesses)]
+            pub struct RoleCallerWitnesses { pub caller: Caller }
+            impl RoleCounter {
+                #[midnight(constructor)]
+                pub fn new() -> Self {
+                    Self { admin_ops: Counter::zero(), member_ops: Counter::zero() }
+                }
+                #[midnight(circuit)]
+                pub fn record(&mut self, witnesses: &RoleCallerWitnesses) {
+                    match witnesses.caller {
+                        Caller::Admin => { self.admin_ops.increment_by(3); }
+                        _ => { self.member_ops.increment(); }
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "record")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn role_gated_counter_admin_branch_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_role_counter_ir();
+    let witnesses = role_gated_counter::RoleCallerWitnesses {
+        caller: role_gated_counter::Caller::Admin, // discriminant 0
+    };
+    let nocturne_transcript =
+        role_gated_counter::transcript::build_record_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(0u8)];
+    let preimage =
+        canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    // Same Op::Noop interleave the voting test uses — conditional
+    // branches splice Noops into the inactive segments.
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "role-gated counter must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for role-gated counter (admin branch)");
+}
