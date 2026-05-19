@@ -5675,3 +5675,178 @@ async fn mt_b16_verify_path_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for path_root + check_root with Bytes<16> leaf");
 }
+
+// ---------------------------------------------------------------------------
+// Tuple keys: Map<(K1, K2), V>. Compact supports record-typed keys; the
+// on-chain encoding is `Alignment::concat([K1::alignment(), K2::alignment()])`
+// (base-crypto/src/fab/alignments.rs:49-53) with values laid out
+// component-by-component. Start with a small `(Field, Uint<64>)` key as a
+// probe — single-Fr per component, no multi-Fr edge cases.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod map_tuple_key {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MapTupleState {
+        pub records: Map<(Field, Uint<64>), Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MapTupleWitnesses {
+        pub key: (Field, Uint<64>),
+        pub amount: Uint<64>,
+    }
+
+    impl MapTupleState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn record(&mut self, witnesses: &MapTupleWitnesses) {
+            self.records.insert(witnesses.key, witnesses.amount);
+        }
+
+        #[midnight(circuit)]
+        pub fn check_member(&self, witnesses: &MapTupleWitnesses) {
+            let _exists = self.records.contains(&witnesses.key);
+        }
+    }
+}
+
+fn build_map_tuple_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod map_tuple_key {
+            #[midnight(ledger)]
+            pub struct MapTupleState { records: Map<(Field, Uint<64>), Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct MapTupleWitnesses { pub key: (Field, Uint<64>), pub amount: Uint<64> }
+            impl MapTupleState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn record(&mut self, witnesses: &MapTupleWitnesses) {
+                    self.records.insert(witnesses.key, witnesses.amount);
+                }
+                #[midnight(circuit)]
+                pub fn check_member(&self, witnesses: &MapTupleWitnesses) {
+                    let _exists = self.records.contains(&witnesses.key);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn map_tuple_key_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_map_tuple_ir("record");
+    let key_field = Field::from(0xABCDu64);
+    let key_uint = Uint::<64>::from(7u64);
+    let witnesses = map_tuple_key::MapTupleWitnesses {
+        key: (key_field, key_uint),
+        amount: Uint::<64>::from(99u64),
+    };
+    let nocturne_transcript =
+        map_tuple_key::transcript::build_record_transcript(&witnesses);
+
+    // Witness layout: tuple expands as (Field, Uint<64>) → 2 Frs in
+    // declaration order, then `amount` → 1 Fr.
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(Fr::from(key_field.value())),
+        AlignedValue::from(key_uint.value() as u64),
+        AlignedValue::from(99u64),
+    ];
+    let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Map<(Field, Uint<64>), _>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<(Field, Uint<64>), _>::insert");
+}
+
+#[tokio::test]
+async fn map_tuple_key_contains_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_map_tuple_ir("check_member");
+    let state = map_tuple_key::MapTupleState::new();
+    let key_field = Field::from(0x1234u64);
+    let key_uint = Uint::<64>::from(5u64);
+    let witnesses = map_tuple_key::MapTupleWitnesses {
+        key: (key_field, key_uint),
+        amount: Uint::<64>::from(0u64),
+    };
+    let nocturne_transcript =
+        map_tuple_key::transcript::build_check_member_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(Fr::from(key_field.value())),
+        AlignedValue::from(key_uint.value() as u64),
+    ];
+    let preimage = canonical_preimage(
+        "check_member",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for Map<(Field, Uint<64>), _>::contains"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<(Field, Uint<64>), _>::contains");
+}

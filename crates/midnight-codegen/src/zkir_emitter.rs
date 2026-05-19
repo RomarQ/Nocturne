@@ -1844,6 +1844,31 @@ fn aligned_value_encoding_bytes(n: u32) -> AlignedValueEncoding {
 /// large `Bytes<N>`, custom ADTs). Callers fall back to the legacy
 /// 2-declare emission path.
 fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
+    // Tuples concatenate component alignments (per upstream
+    // `Aligned for (T1, ..., Tn)`) and sum value field counts. The
+    // alignment_atoms vector loses the per-component grouping but the
+    // on-chain VM only sees a flat list of AlignmentAtoms anyway, so
+    // concatenation gives the same encoding as the upstream impl.
+    if let syn::Type::Tuple(tt) = ty {
+        let mut atoms: Vec<i32> = Vec::new();
+        let mut count: usize = 0;
+        for elem in &tt.elems {
+            let inner = aligned_value_encoding(elem)?;
+            atoms.extend(inner.alignment_atoms.iter().skip(1));
+            count += inner.value_field_count;
+        }
+        // Leading atom-count: total atom count across all components,
+        // mirroring how every other arm shapes alignment_atoms as
+        // [count, ..atoms].
+        let total = atoms.len() as i32;
+        let mut alignment_atoms = vec![total];
+        alignment_atoms.extend(atoms);
+        return Some(AlignedValueEncoding {
+            alignment_atoms,
+            value_field_count: count,
+        });
+    }
+
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
 
     // Boolean and bool: encoded as Bytes<1>.
@@ -1951,6 +1976,18 @@ enum FrLayout {
 /// repetitions of `[Field, Boolean]` (one sibling + one goes_left per
 /// path entry).
 fn witness_fr_layout(ty: &syn::Type) -> Vec<FrLayout> {
+    // Tuples concatenate their components' layouts in declaration order.
+    // Mirrors `Aligned for (T1, ..., Tn)` upstream
+    // (base-crypto/src/fab/alignments.rs:49-53), and lets `Map<(K1, K2), V>`
+    // work without bespoke per-shape code at every call site.
+    if let syn::Type::Tuple(tt) = ty {
+        let mut layout = Vec::new();
+        for elem in &tt.elems {
+            layout.extend(witness_fr_layout(elem));
+        }
+        return layout;
+    }
+
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
 
     if let Some(n) = parse_bytes_n_type(&ty_str) {

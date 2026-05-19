@@ -670,6 +670,34 @@ fn generate_cell_set(field_idx: u8, args: &[ExprIR], field_ty: Option<&syn::Type
 /// - Unknown type → fall back to the raw `.value()`-style expression.
 fn aligned_value_arg_expr(expr: &ExprIR, ty: Option<&syn::Type>) -> TokenStream {
     if let Some(t) = ty {
+        // Tuple keys / values: build the upstream tuple shape that
+        // `AlignedValue::from(_)` accepts via `Aligned for (T1, .., Tn)`.
+        // Each component gets its own per-type conversion (Field → Fr,
+        // Uint<N> → primitive, etc.) and we cons up the tuple in
+        // declaration order so the on-wire layout matches
+        // `aligned_value_encoding`'s concatenated alignment.
+        if let syn::Type::Tuple(tt) = t {
+            let raw = arg_to_runtime_raw_expr(expr);
+            let n = tt.elems.len();
+            let comps: Vec<TokenStream> = tt
+                .elems
+                .iter()
+                .enumerate()
+                .map(|(i, elem)| {
+                    let idx = syn::Index::from(i);
+                    tuple_component_aligned_repr(elem, &quote! { __t.#idx })
+                })
+                .collect();
+            // A 1-tuple needs the trailing comma so Rust parses it as
+            // a tuple type and the upstream `Aligned for (T,)` kicks in.
+            let trailing = if n == 1 { quote! { , } } else { quote! {} };
+            return quote! {
+                {
+                    let __t = #raw;
+                    (#(#comps),* #trailing)
+                }
+            };
+        }
         let ty_str = quote!(#t).to_string().replace(' ', "");
         if ty_str.starts_with("Bytes<") {
             // Bytes<N>: need [u8; N] for AlignedValue::from.
@@ -700,6 +728,38 @@ fn aligned_value_arg_expr(expr: &ExprIR, ty: Option<&syn::Type>) -> TokenStream 
     match ty.and_then(primitive_cast_for_type) {
         Some(cast) => quote! { (#value_expr) #cast },
         None => value_expr,
+    }
+}
+
+/// Convert a single tuple-component expression `accessor` (e.g.
+/// `__t.0`) of declared type `ty` into the form `AlignedValue::from`
+/// accepts directly. Mirrors the per-type arms of
+/// `aligned_value_arg_expr` but takes a token-tree accessor instead of
+/// an `ExprIR` because tuple elements aren't first-class IR exprs —
+/// they're field projections on a temporary binding.
+fn tuple_component_aligned_repr(ty: &syn::Type, accessor: &TokenStream) -> TokenStream {
+    let ty_str = quote!(#ty).to_string().replace(' ', "");
+    if ty_str.starts_with("Bytes<") {
+        return quote! { *(#accessor).as_bytes() };
+    }
+    if ty_str == "Field" {
+        return quote! { Fr::from((#accessor).value()) };
+    }
+    if ty_str == "MerkleTreeDigest" {
+        return quote! {
+            Fr::from_le_bytes(&(#accessor).as_le_bytes())
+                .expect("MerkleTreeDigest bytes round-trip through Fr")
+        };
+    }
+    if ty_str == "Boolean" || ty_str == "bool" {
+        return quote! { (#accessor).value() };
+    }
+    // Uint<N> / primitive integers: snap to the matching Rust primitive
+    // so the upstream Aligned-for-primitive impl picks the right Bytes<n>
+    // alignment.
+    match primitive_cast_for_type(ty) {
+        Some(cast) => quote! { (#accessor).value() #cast },
+        None => quote! { (#accessor).value() },
     }
 }
 

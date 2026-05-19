@@ -266,6 +266,34 @@ changes needed — `aligned_value_encoding`'s general `Bytes<N>` arm and
 already covered these shapes. The tests pin down the boundary cases
 the Bytes<32>-only coverage left implicit.
 
+### Tuple keys (2026-05-19)
+
+`Map<(K1, K2), V>` (and by extension Set<(K1, K2)>) is supported via:
+
+- `aligned_value_encoding` for `syn::Type::Tuple`: concat each
+  component's atoms (`.iter().skip(1)` to drop their per-component
+  leading-count) and prepend the total atom count, sum value Fr counts.
+  Mirrors upstream `Aligned for (T1, ..., Tn)` in
+  `base-crypto/src/fab/alignments.rs:49-53`.
+- `witness_fr_layout` for tuples: concat each component's per-Fr
+  layout in declaration order.
+- `aligned_value_arg_expr` for tuples in transcript codegen:
+  binds the witness tuple to a local, projects each component, and
+  produces a Rust tuple expression where each slot has its
+  per-type aligned form (Field → Fr, Uint<N> → primitive cast,
+  Bytes<N> → `*x.as_bytes()`, MerkleTreeDigest → full Fr via
+  `Fr::from_le_bytes(&x.as_le_bytes())`, Boolean → `.value()`).
+  `AlignedValue::from(_)` on the resulting tuple picks up upstream's
+  `Aligned for (T1, ..., Tn) + Value: From<(T1, ..., Tn)>` impls.
+
+E2E coverage: `Map<(Field, Uint<64>), Uint<64>>::{insert, contains}`.
+
+Struct keys (named record types) are NOT yet supported — would need
+parser-level recognition of user-defined struct types as ledger field
+parameters plus field-by-field encoding/witness expansion. Tuples are
+the anonymous version of the same shape and cover most practical
+"compound key" use cases.
+
 ## References
 
 - VM opcodes: `reference-repos/midnight-ledger/onchain-vm/src/ops.rs:95-462`
