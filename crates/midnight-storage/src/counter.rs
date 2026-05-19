@@ -16,6 +16,13 @@ impl Counter {
         self.0 += 1;
     }
 
+    /// Bump the counter by `n`. The macro emits the on-chain `Addi`
+    /// with this immediate, so `n` must be a const literal in circuit
+    /// bodies; here at the storage level we accept any `u32`.
+    pub fn increment_by(&mut self, n: u32) {
+        self.0 += n as u64;
+    }
+
     pub fn value(&self) -> u64 {
         self.0
     }

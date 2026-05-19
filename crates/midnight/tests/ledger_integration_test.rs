@@ -6829,3 +6829,92 @@ async fn map_with_enum_value_insert_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map<Uint<64>, Status>::insert");
 }
+
+// ---------------------------------------------------------------------------
+// Counter::increment(N) with a const literal N. Mirrors the bare-increment
+// counter circuit but uses Addi { immediate: N }. Confirms the IR's
+// LoadImm(N) feeds DeclarePubInput consistently with the transcript
+// builder's Op::Addi { immediate: N }.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod counter_by_n {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct CounterByN {
+        pub count: Counter,
+    }
+
+    impl CounterByN {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn bump(&mut self) {
+            self.count.increment_by(7);
+        }
+    }
+}
+
+fn build_counter_by_n_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod counter_by_n {
+            #[midnight(ledger)]
+            pub struct CounterByN { count: Counter }
+            impl CounterByN {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { count: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn bump(&mut self) { self.count.increment_by(7); }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "bump")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn counter_increment_by_n_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_counter_by_n_ir();
+    let nocturne_transcript = counter_by_n::transcript::build_bump_transcript();
+    let preimage = canonical_preimage("bump", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for \
+         Counter::increment(7)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Counter::increment(7)");
+}

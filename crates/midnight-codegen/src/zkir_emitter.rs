@@ -277,7 +277,22 @@ impl ZkirEmitter {
                 }
 
                 match method_name.as_str() {
-                    "increment" => self.emit_counter_increment(field_idx),
+                    "increment" | "increment_by" => {
+                        // `increment()` = +1 (no arg) and
+                        // `increment_by(N)` = +N for a const literal N
+                        // fitting Addi's u32 immediate. Non-literal
+                        // arguments are rejected (would need an `Add`
+                        // opcode pulling from a witness).
+                        let n = match args.first() {
+                            None => 1u32,
+                            Some(ExprIR::Literal {
+                                value: LiteralIR::Int(v),
+                                ..
+                            }) if *v <= u32::MAX as u128 => *v as u32,
+                            Some(_) => return None,
+                        };
+                        self.emit_counter_increment(field_idx, n)
+                    }
                     "get" | "value" | "__direct_access" => {
                         // Resolve the read result type (u64 for Counter,
                         // T for Cell<T>). When unresolved, falls back to
@@ -633,7 +648,7 @@ impl ZkirEmitter {
     ///   idx [pushPath: true] [path: f]
     ///   addi [immediate: amount]
     ///   ins [cached: true] [n: len(f)]
-    fn emit_counter_increment(&mut self, field_idx: u8) -> Option<Index> {
+    fn emit_counter_increment(&mut self, field_idx: u8, n: u32) -> Option<Index> {
         let g = self.guard;
 
         // Idx { cached: false, push_path: true, path: [Value(field_idx)] }
@@ -646,11 +661,11 @@ impl ZkirEmitter {
             count: 4,
         });
 
-        // Addi { immediate: 1 } → field repr: [0x0e, 1]
+        // Addi { immediate: n } → field repr: [0x0e, n]
         let addi_op = self.emit_load_imm(Fr::from(0x0eu64));
-        let one = self.emit_load_imm(Fr::from(1u64));
+        let n_var = self.emit_load_imm(Fr::from(n as u64));
         self.push_declare_pub_input(addi_op);
-        self.push_declare_pub_input(one);
+        self.push_declare_pub_input(n_var);
         self.instructions.push(Instruction::PiSkip {
             guard: Some(g),
             count: 2,
@@ -664,7 +679,7 @@ impl ZkirEmitter {
             count: 1,
         });
 
-        Some(one)
+        Some(n_var)
     }
 
     /// Emit ZKIR for reading a ledger field: Dup + Idx + Popeq.

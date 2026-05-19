@@ -229,14 +229,34 @@ fn generate_op_stmt(
             let field_ty = field_types.get(field_idx as usize);
 
             match method_name.as_str() {
-                "increment" => quote! {
-                    ops.push(Op::Idx {
-                        cached: false,
-                        push_path: true,
-                        path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
-                    });
-                    ops.push(Op::Addi { immediate: 1 });
-                    ops.push(Op::Ins { cached: true, n: 1 });
+                "increment" | "increment_by" => {
+                    // `Counter::increment()` (no arg) or
+                    // `Counter::increment_by(N)` for a const literal N
+                    // emit the same Addi { immediate: N }. Non-literal
+                    // arguments are rejected as a compile error in the
+                    // generated module so the user sees a real diagnostic.
+                    let n: u32 = match args.first() {
+                        None => 1,
+                        Some(ExprIR::Literal { value: midnight_ir::expr::LiteralIR::Int(v), .. })
+                            if *v <= u32::MAX as u128 => *v as u32,
+                        Some(_) => {
+                            return quote! {
+                                compile_error!(
+                                    "Counter::increment_by(n) currently only \
+                                     supports a const integer literal for n"
+                                );
+                            };
+                        }
+                    };
+                    quote! {
+                        ops.push(Op::Idx {
+                            cached: false,
+                            push_path: true,
+                            path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+                        });
+                        ops.push(Op::Addi { immediate: #n });
+                        ops.push(Op::Ins { cached: true, n: 1 });
+                    }
                 },
                 "get" | "value" | "__direct_access" => {
                     // On-chain read pattern: Dup + Idx + Popeq{cached:true, result}.
