@@ -201,7 +201,7 @@ Implemented 2026-05-19:
 
 E2E test: `mt_insert_proves_and_verifies` — inserts a single `Bytes<32>` leaf into an empty `MerkleTree<10, Bytes<32>>` and confirms the 10-op transcript proves and verifies via the canonical ledger preimage path.
 
-Constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` state is still deferred — the e2e tests build state through Rust's `MerkleTree::empty()` (which mirrors the on-chain initial shape via the upstream `MerkleTree<()>` wrapper), and `construct_proof` doesn't execute on-chain VM ops, so insert proves+verifies against the canonical preimage path without explicit constructor emission.
+Constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` state (2026-05-19): `deploy_codegen::generate_deploy_module` now emits the correct `StateValue::Array { [BoundedMerkleTree<()>(blank(H).rehash()), Cell<u64>(0)] }` for `MerkleTree<H, T>` fields. The height `H` is parsed from the field's `syn::Type` (supports both `GenericArgument::Const` and the `Type::Path` fallback syn produces for ambiguous paths). Downstream tools serialize this `StateValue` directly into the deploy transaction. Verified by `test_merkle_tree_field_initial_state` in `crates/midnight/tests/deploy_test.rs`.
 
 ### Phase E notes
 
