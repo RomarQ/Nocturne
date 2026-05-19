@@ -851,12 +851,24 @@ fn parse_macro_expr(mac: &syn::Macro) -> MidnightResult<ExprIR> {
     let tokens = &mac.tokens;
 
     if path_str == "assert" || path_str.ends_with("::assert") {
-        // Parse assert!(cond).
-        let cond: Expr = syn::parse2(tokens.clone()).map_err(|e| {
+        // `assert!(cond)` or `assert!(cond, "msg", ...)`. The message
+        // is informational only — we only enforce the condition. Drop
+        // any extra args after the first.
+        let args: syn::punctuated::Punctuated<Expr, syn::Token![,]> =
+            syn::punctuated::Punctuated::parse_terminated
+                .parse2(tokens.clone())
+                .map_err(|e| {
+                    MidnightError::new(
+                        Span::call_site(),
+                        ErrorCode::UnsupportedExpression,
+                        format!("failed to parse assert arguments: {e}"),
+                    )
+                })?;
+        let cond = args.into_iter().next().ok_or_else(|| {
             MidnightError::new(
                 Span::call_site(),
                 ErrorCode::UnsupportedExpression,
-                format!("failed to parse assert condition: {e}"),
+                "assert! requires a condition argument",
             )
         })?;
         Ok(ExprIR::Assert {
@@ -864,7 +876,9 @@ fn parse_macro_expr(mac: &syn::Macro) -> MidnightResult<ExprIR> {
             kind: AssertKind::Assert(Box::new(parse_expr(&cond)?)),
         })
     } else if path_str == "assert_eq" || path_str.ends_with("::assert_eq") {
-        // Parse assert_eq!(a, b).
+        // `assert_eq!(a, b)` or `assert_eq!(a, b, "msg", ...)`. Extra
+        // args after `b` are dropped — they're only used for messaging
+        // at runtime, not for constraint generation.
         let args: syn::punctuated::Punctuated<Expr, syn::Token![,]> =
             syn::punctuated::Punctuated::parse_terminated
                 .parse2(tokens.clone())
