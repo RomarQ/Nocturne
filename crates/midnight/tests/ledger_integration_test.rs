@@ -6701,3 +6701,131 @@ async fn enum_match_vote_verifies_with_ledger_shape_pis() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for enum-match cast_vote");
 }
+
+// ---------------------------------------------------------------------------
+// Map<Uint<N>, EnumValue>: per-user state tracked as a unit-variant enum.
+// Confirms enum-value Map insert composes the Bytes<1> discriminant into
+// the value AlignedValue and pushes the discriminant Fr to the private
+// transcript in the right slot ordering.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod enum_records {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Status {
+        Pending,
+        Active,
+        Closed,
+    }
+
+    #[midnight(ledger)]
+    pub struct EnumRecords {
+        pub status_of: Map<Uint<64>, Status>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct EnumRecordsWitnesses {
+        pub user_id: Uint<64>,
+        pub new_status: Status,
+    }
+
+    impl EnumRecords {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                status_of: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn set_status(&mut self, witnesses: &EnumRecordsWitnesses) {
+            self.status_of
+                .insert(witnesses.user_id, witnesses.new_status);
+        }
+    }
+}
+
+fn build_enum_records_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod enum_records {
+            #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+            pub enum Status { Pending, Active, Closed }
+            #[midnight(ledger)]
+            pub struct EnumRecords { status_of: Map<Uint<64>, Status> }
+            #[midnight(witnesses)]
+            pub struct EnumRecordsWitnesses {
+                pub user_id: Uint<64>,
+                pub new_status: Status,
+            }
+            impl EnumRecords {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { status_of: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn set_status(&mut self, witnesses: &EnumRecordsWitnesses) {
+                    self.status_of.insert(witnesses.user_id, witnesses.new_status);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "set_status")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn map_with_enum_value_insert_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_enum_records_ir();
+    let witnesses = enum_records::EnumRecordsWitnesses {
+        user_id: Uint::<64>::from(11u64),
+        new_status: enum_records::Status::Active, // discriminant = 1
+    };
+    let nocturne_transcript =
+        enum_records::transcript::build_set_status_transcript(&witnesses);
+
+    // Private transcript: user_id (Uint<64>) then Status (Bytes<1>).
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(11u64),
+        AlignedValue::from(1u8),
+    ];
+    let preimage = canonical_preimage(
+        "set_status",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for \
+         Map<Uint<64>, Status>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Uint<64>, Status>::insert");
+}
