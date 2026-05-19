@@ -17,11 +17,26 @@ use quote::{format_ident, quote};
 /// Generate the deployment module for a contract.
 pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
     let ledger_name = &contract.ledger.name;
-    let constructor_name = contract
-        .constructors
-        .first()
+    let constructor = contract.constructors.first();
+    let constructor_name = constructor
         .map(|c| c.name.clone())
         .unwrap_or_else(|| format_ident!("new"));
+
+    // Forward the constructor's own parameter list into initial_state(_)
+    // so contracts that need deploy-time inputs (admin address, fee
+    // rate, ...) can plumb them through without the caller having to
+    // hand-roll the encoding.
+    let ctor_params: Vec<(syn::Ident, syn::Type)> = constructor
+        .map(|c| c.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+        .unwrap_or_default();
+    let param_decls: Vec<TokenStream> = ctor_params
+        .iter()
+        .map(|(n, ty)| quote! { #n: #ty })
+        .collect();
+    let param_idents: Vec<TokenStream> = ctor_params
+        .iter()
+        .map(|(n, _)| quote! { #n })
+        .collect();
 
     let user_enums = &contract.user_enums;
 
@@ -95,9 +110,11 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
 
             /// Construct the initial contract state by calling the user
             /// constructor and encoding each ledger field as a
-            /// `StateValue::Array` entry, in declaration order.
-            pub fn initial_state() -> StateValue {
-                let __state = super::#ledger_name::#constructor_name();
+            /// `StateValue::Array` entry, in declaration order. The
+            /// constructor's own parameters are forwarded verbatim so
+            /// deploy-time inputs (admin address, fee, ...) plumb through.
+            pub fn initial_state(#(#param_decls),*) -> StateValue {
+                let __state = super::#ledger_name::#constructor_name(#(#param_idents),*);
                 let mut fields: Vec<StateValue> = Vec::with_capacity(#num_fields);
 
                 #(#field_pushes)*

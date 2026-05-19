@@ -7004,3 +7004,57 @@ fn constructor_initial_values_flow_into_state_value() {
         "Counter::zero() must deploy as 0"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Constructor parameters flow into deploy::initial_state(_).
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod parametric_init {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct AdminState {
+        pub admin: Cell<Bytes<32>>,
+        pub fee_bps: Cell<u64>,
+    }
+
+    impl AdminState {
+        #[midnight(constructor)]
+        pub fn new(admin: Bytes<32>, fee_bps: u64) -> Self {
+            Self {
+                admin: Cell::new(admin),
+                fee_bps: Cell::new(fee_bps),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn noop(&mut self) {}
+    }
+}
+
+#[test]
+fn constructor_params_flow_into_initial_state() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_state::state::StateValue;
+    use midnight::runtime::storage::arena::Sp;
+
+    let admin = midnight::types::Bytes::<32>::from_slice("admin@example".as_bytes());
+    let state = parametric_init::deploy::initial_state(admin.clone(), 250u64);
+    let StateValue::Array(ref fields) = state else {
+        panic!("expected StateValue::Array");
+    };
+    let collected: Vec<StateValue> = fields.iter().map(|v| (*v).clone()).collect();
+    assert_eq!(collected.len(), 2);
+
+    assert_eq!(
+        collected[0],
+        StateValue::Cell(Sp::new(AlignedValue::from(*admin.as_bytes()))),
+        "constructor's `admin: Bytes<32>` parameter must reach the deployed Cell<Bytes<32>>"
+    );
+    assert_eq!(
+        collected[1],
+        StateValue::Cell(Sp::new(AlignedValue::from(250u64))),
+        "constructor's `fee_bps: u64` parameter must reach the deployed Cell<u64>"
+    );
+}
