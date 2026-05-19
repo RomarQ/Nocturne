@@ -6918,3 +6918,79 @@ async fn counter_increment_by_n_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Counter::increment(7)");
 }
+
+// ---------------------------------------------------------------------------
+// Constructor initial values: confirm `Cell::new(<expr>)` in the user's
+// constructor surfaces through `deploy::initial_state()` instead of the
+// previous always-zero default.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod init_values {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub enum Phase {
+        Setup,
+        Running,
+        Finished,
+    }
+
+    #[midnight(ledger)]
+    pub struct InitState {
+        pub limit: Cell<u64>,
+        pub phase: Cell<Phase>,
+        pub seen: Counter,
+    }
+
+    impl InitState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                limit: Cell::new(42u64),
+                phase: Cell::new(Phase::Running),
+                seen: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn touch(&mut self) {
+            self.seen.increment();
+        }
+    }
+}
+
+#[test]
+fn constructor_initial_values_flow_into_state_value() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_state::state::StateValue;
+    use midnight::runtime::storage::arena::Sp;
+
+    let state = init_values::deploy::initial_state();
+    let StateValue::Array(ref fields) = state else {
+        panic!("expected StateValue::Array root");
+    };
+    let collected: Vec<StateValue> = fields.iter().map(|v| (*v).clone()).collect();
+    assert_eq!(collected.len(), 3);
+
+    // Field 0: Cell<u64>(42)
+    assert_eq!(
+        collected[0],
+        StateValue::Cell(Sp::new(AlignedValue::from(42u64))),
+        "Cell<u64>::new(42) must deploy as the discriminated value, not 0"
+    );
+
+    // Field 1: Cell<Phase>(Phase::Running = discriminant 1)
+    assert_eq!(
+        collected[1],
+        StateValue::Cell(Sp::new(AlignedValue::from(1u8))),
+        "Cell<Phase>::new(Phase::Running) must deploy the variant's discriminant"
+    );
+
+    // Field 2: Counter starting at 0.
+    assert_eq!(
+        collected[2],
+        StateValue::from(0u64),
+        "Counter::zero() must deploy as 0"
+    );
+}
