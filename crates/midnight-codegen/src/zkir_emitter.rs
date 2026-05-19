@@ -255,6 +255,10 @@ impl ZkirEmitter {
                     return self.emit_set_method(field_idx, &method_name, args, &t_ty);
                 }
 
+                if field_ty.as_ref().and_then(extract_merkle_tree_type).is_some() {
+                    return self.emit_merkle_tree_method(field_idx, &method_name, args);
+                }
+
                 match method_name.as_str() {
                     "increment" => self.emit_counter_increment(field_idx),
                     "get" | "value" | "__direct_access" => {
@@ -1191,6 +1195,134 @@ impl ZkirEmitter {
         });
     }
 
+    /// Dispatch a method call on a `MerkleTree<H, T>` ledger field.
+    /// Today only `check_root` is implemented (Phase C of the staged
+    /// plan in `memories/merkle-tree-encoding.md`); `insert` lands in
+    /// Phase D.
+    fn emit_merkle_tree_method(
+        &mut self,
+        field_idx: u8,
+        method_name: &str,
+        args: &[midnight_ir::ExprIR],
+    ) -> Option<Index> {
+        match method_name {
+            "check_root" => {
+                // The argument is `&MerkleTreeDigest` (or anything that
+                // evaluates to a Field-typed Fr). emit_expr yields the
+                // Index where that Fr lives in memory; we Push it as a
+                // `Cell(Field(...))` for the on-chain Eq comparison.
+                let digest_var = args.first().and_then(|a| self.emit_expr(a))?;
+                self.emit_merkle_tree_check_root(field_idx, digest_var)
+            }
+            _ => {
+                for arg in args {
+                    self.emit_expr(arg);
+                }
+                None
+            }
+        }
+    }
+
+    /// Emit ZKIR for `MerkleTree::check_root(&digest) -> bool` at
+    /// `field_idx`. Matches compactc 0.30.0's emission for
+    /// `entries.checkRoot(disclose(r))` (see
+    /// `/tmp/mt-experiments/out/zkir/check_root.zkir`):
+    ///
+    /// ```text
+    /// Dup  { n: 0 }                                                   // [0x30]
+    /// Idx  { cached:false, push_path:false, [Bytes<1>(field_idx)] }  // [0x50, 1, 1, field_idx]
+    /// Idx  { cached:false, push_path:false, [Bytes<1>(0)] }           // [0x50, 1, 1, 0]
+    /// Root                                                              // [0x0a]
+    /// Push { storage:false, Cell(Field(user_digest)) }                 // [0x10, 1, 1, -2, digest_fr]
+    /// Eq                                                                // [0x02]
+    /// Popeq { cached:true, result:bool }                                // [0x0d, 1, 1, bool]
+    /// ```
+    ///
+    /// The two Idx ops navigate `entries` (the user's field) and then
+    /// `entries[0]` (the BoundedMerkleTree inside the 2-element Array
+    /// — the second element is the `next_index: Cell<u64>` counter,
+    /// which checkRoot doesn't touch). `Root` pops the BMT and pushes
+    /// its root as `AlignedValue<Field>`. `Eq` compares two
+    /// `StateValue::Cell` operands and pushes a bool.
+    fn emit_merkle_tree_check_root(
+        &mut self,
+        field_idx: u8,
+        digest_var: Index,
+    ) -> Option<Index> {
+        let g = self.guard;
+
+        // Dup { n: 0 }.
+        let dup_op = self.emit_load_imm(Fr::from(0x30u64));
+        self.push_declare_pub_input(dup_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Idx into the user's field.
+        let idx_op_1 = self.emit_load_imm(Fr::from(0x50u64));
+        self.push_declare_pub_input(idx_op_1);
+        self.emit_key_field_repr(field_idx);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Idx into entries[0] = BoundedMerkleTree.
+        let idx_op_2 = self.emit_load_imm(Fr::from(0x50u64));
+        self.push_declare_pub_input(idx_op_2);
+        self.emit_key_field_repr(0);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // Root { 0x0a } pops the BMT, pushes Cell(Field(root_fr)).
+        let root_op = self.emit_load_imm(Fr::from(0x0au64));
+        self.push_declare_pub_input(root_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Push { storage:false, Cell(Field(user_digest)) }. Reuse
+        // emit_push_cell with the Field encoding from Phase A.
+        let field_ty: syn::Type = syn::parse_quote!(Field);
+        let enc = aligned_value_encoding(&field_ty).expect("Field encoding must exist");
+        self.emit_push_cell(&[digest_var], Some(&enc), /* storage = */ false);
+
+        // Eq { 0x02 } compares the two Cells on the stack and pushes a bool.
+        let eq_op = self.emit_load_imm(Fr::from(0x02u64));
+        self.push_declare_pub_input(eq_op);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 1,
+        });
+
+        // Popeq { cached:true, result: bool }. Single PublicInput for
+        // the bool result (1 Fr, no alignment chunking).
+        let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
+        let result_var = self.emit_instruction(Instruction::PublicInput {
+            guard: self.current_io_guard(),
+        });
+        self.push_declare_pub_input(popeq_op);
+        let align_one = self.emit_load_imm(Fr::from(1u64));
+        self.push_declare_pub_input(align_one);
+        self.push_declare_pub_input(align_one);
+        self.push_declare_pub_input(result_var);
+        self.instructions.push(Instruction::PiSkip {
+            guard: Some(g),
+            count: 4,
+        });
+
+        // The Boolean result is in the verifier's view; constrain to
+        // boolean for safety, matching the Map::contains path.
+        self.instructions
+            .push(Instruction::ConstrainToBoolean { var: result_var });
+
+        Some(result_var)
+    }
+
     /// Emit ZKIR for `Cell::set(value)` at `field_idx`.
     ///
     /// On-chain encoding (verified empirically against compactc 0.30.0):
@@ -1616,6 +1748,28 @@ fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
     {
         return Some(inner.clone());
+    }
+    None
+}
+
+/// If `ty` is `MerkleTree<H, T>`, return `T` (the leaf type). The height
+/// `H` is encoded into the storage type's const generic and doesn't
+/// affect the IR emission — checkRoot's on-chain ops are independent of
+/// `H` because the height lives inside the upstream
+/// `BoundedMerkleTree` value itself. Returns `Some(_)` so callers know
+/// the field is a MerkleTree even when they don't need the leaf type.
+fn extract_merkle_tree_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "MerkleTree"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+    {
+        // Skip the const-generic height; pick the first type-position arg.
+        for a in &args.args {
+            if let syn::GenericArgument::Type(t) = a {
+                return Some(t.clone());
+            }
+        }
     }
     None
 }

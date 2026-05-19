@@ -154,7 +154,7 @@ A reasonable phased implementation, smallest first:
 |---|---|---|---|
 | **A** | `Cell<Field>` — single AlignmentAtom::Field test | Field alignment encoding in `aligned_value_encoding`, `LoadImm` for negative Fr values | **landed** ([[field-alignment-encoding]]) |
 | **B** | `MerkleTree<H, T>` storage type + `MerkleTreeDigest` type | `MerkleTree<H, T>: LedgerType { requires_init = true, ... }`; off-chain root() that matches on-chain Root opcode semantics | **landed** (see below) |
-| **C** | `MerkleTree::checkRoot` end-to-end | Phase A + B; `Root` and `Eq` opcodes in zkir_emitter / transcript_codegen; e2e test with empty tree | pending |
+| **C** | `MerkleTree::checkRoot` end-to-end | Phase A + B; `Root` and `Eq` opcodes in zkir_emitter / transcript_codegen; e2e test with empty tree | **landed** (see below) |
 | **D** | `MerkleTree::insert` end-to-end | `Dup{n:k}` for arbitrary k; `Ins{cached:true, n:2}`; `persistent_hash` with `"mdn:lh"` domain separator; multi-level Idx chains; e2e test; constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` | pending |
 | **E** | `MerkleTreePath<H, T>` + `merkleTreePathRoot` | Pure circuit primitive; uses existing `persistent_hash` machinery; user-side witness type | pending |
 
@@ -170,6 +170,21 @@ Implemented 2026-05-19:
 - `LedgerType::requires_init()` returns `true` for MerkleTree — first ledger primitive to do so. Constructor IR emission (the actual `Push(Array)` op sequence) is **deferred to Phase D** because today our codegen does not emit constructor IR for any ledger field. None of the e2e tests exercise the deploy path; they build state via Rust constructors and prove against circuits, so requiring constructor IR isn't blocking other phases.
 
 Five storage-layer unit tests cover empty/insert/check_root/Bytes<N> leaves/requires_init.
+
+### Phase C notes
+
+Implemented 2026-05-19:
+
+- IR (`zkir_emitter.rs::emit_merkle_tree_check_root`): emits the full 7-op encoding (Dup + Idx + Idx + Root + Push(Cell(Field)) + Eq + Popeq). Reuses Phase A's `emit_push_cell` with the Field encoding to push the user-supplied digest. The `Root` (`0x0a`) and `Eq` (`0x02`) opcodes are 1-declare each (`[opcode]` + PiSkip{count:1}).
+- Transcript codegen (`transcript_codegen.rs::generate_merkle_tree_check_root`): emits matching `Op::Root` / `Op::Eq` runtime ops and computes the bool result via `state.<field>.check_root(&__digest)`. `circuit_needs_state` extended to recognize `check_root` so the transcript fn gets the `state` parameter.
+- `MerkleTreeDigest` is now a recognized witness type: the witness push reads `.field().value()` (vs. the usual `.value()`) since it's a newtype around `Field`. Detection via `is_merkle_tree_digest` in transcript codegen, mirroring `is_bytes_witness`.
+- Storage refactor: `check_root` and `root` are `&self` (rehash happens eagerly on `insert`). Required because the transcript codegen passes `state: &<LedgerName>`, not `&mut`.
+
+E2E tests:
+- `mt_check_root_matches_empty_tree_proves_and_verifies` — digest equals the empty-tree root, Popeq result is `true`
+- `mt_check_root_mismatch_proves_and_verifies` — bogus digest, Popeq result is `false`; the proof still constructs because `check_root` is a query, not an assertion
+
+Both prove+verify through `ContractCallExt::construct_proof`. The PIs match the on-chain ledger-shape PIs declare-for-declare.
 
 ## Files implicated for any implementation
 

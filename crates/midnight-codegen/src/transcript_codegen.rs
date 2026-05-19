@@ -174,6 +174,7 @@ fn expr_needs_state(expr: &ExprIR) -> bool {
             matches!(
                 m.as_str(),
                 "contains" | "member" | "lookup" | "get" | "value" | "__direct_access"
+                    | "check_root"
             ) || args.iter().any(expr_needs_state)
         }
         ExprIR::If {
@@ -334,6 +335,9 @@ fn generate_op_stmt(
                 "lookup" if field_ty.and_then(extract_map_kv_types).is_some() => {
                     generate_map_lookup(field_idx, &field_name, args, field_ty)
                 }
+                "check_root" if field_ty.and_then(extract_merkle_tree_type).is_some() => {
+                    generate_merkle_tree_check_root(field_idx, &field_name, args)
+                }
                 _ => quote! {},
             }
         }
@@ -400,19 +404,24 @@ fn generate_op_stmt(
             // `AlignedValueExt::value_only_field_repr` to push the right
             // number of Frs in the same order the IR's PrivateInputs expect
             // (high-bytes chunk first, then full 31-byte chunks).
+            //
+            // `MerkleTreeDigest` is a thin newtype around `Field`; reach
+            // through `.field().value()` to get the underlying u128 and
+            // lift it to Fr the same way Cell<Field>::set does.
             let field_ident = format_ident!("{}", field.to_string());
             let field_str = field.to_string();
-            if witness_types
-                .get(&field_str)
-                .map(is_bytes_witness)
-                .unwrap_or(false)
-            {
+            let witness_ty = witness_types.get(&field_str);
+            if witness_ty.map(is_bytes_witness).unwrap_or(false) {
                 quote! {
                     {
                         use midnight::runtime::transient_crypto::fab::AlignedValueExt;
                         let __av = AlignedValue::from(*witnesses.#field_ident.as_bytes());
                         __av.value_only_field_repr(&mut private_transcript);
                     }
+                }
+            } else if witness_ty.map(is_merkle_tree_digest).unwrap_or(false) {
+                quote! {
+                    private_transcript.push(Fr::from(witnesses.#field_ident.field().value()));
                 }
             } else {
                 quote! {
@@ -804,6 +813,14 @@ fn is_bytes_witness(ty: &syn::Type) -> bool {
     ty_str.starts_with("Bytes<")
 }
 
+/// True if `ty` is `MerkleTreeDigest`. The witness push has to reach
+/// through `.field().value()` instead of the usual `.value()` because
+/// `MerkleTreeDigest` is a thin newtype around `Field`.
+fn is_merkle_tree_digest(ty: &syn::Type) -> bool {
+    let ty_str = quote!(#ty).to_string().replace(' ', "");
+    ty_str == "MerkleTreeDigest"
+}
+
 /// Map a Rust type that flows into `AlignedValue::from(_)` to the primitive
 /// cast suffix the runtime needs to match the IR's alignment table.
 ///
@@ -948,6 +965,81 @@ fn generate_set_remove(
         ops.push(Op::Rem { cached: false });
         ops.push(Op::Ins { cached: true, n: 1 });
     }
+}
+
+/// Emit the runtime ops for `MerkleTree::check_root(&digest) -> bool`.
+/// Mirrors compactc 0.30.0's emission for `entries.checkRoot(disclose(r))`
+/// — 7 ops, ending with a Popeq whose `result` is the actual bool the
+/// on-chain VM will compute. Off-chain we read it via
+/// `state.<field>.check_root(&__digest)`.
+///
+///   Dup{n:0}
+///   Idx{cached:false, push_path:false, [Bytes<1>(field_idx)]}   // entries field
+///   Idx{cached:false, push_path:false, [Bytes<1>(0)]}            // entries[0] = BMT
+///   Root                                                          // pop BMT, push Cell(Field(root))
+///   Push{storage:false, Cell(Field(digest.field))}               // user-supplied digest
+///   Eq                                                            // pop 2 Cells, push bool
+///   Popeq{cached:true, result: bool}
+fn generate_merkle_tree_check_root(
+    field_idx: u8,
+    field_name: &str,
+    args: &[ExprIR],
+) -> TokenStream {
+    let field_ident = format_ident!("{}", field_name);
+    let raw_digest = args
+        .first()
+        .map(arg_to_runtime_raw_expr)
+        .unwrap_or_else(|| quote! { () });
+    // Convert the user's `&MerkleTreeDigest` to the Fr the Push needs.
+    // `(&digest).field().value()` gives a u128; `Fr::from(u128)` lifts it
+    // to a Field-aligned Fr — same path Cell<Field>::set uses.
+    quote! {
+        {
+            let __digest = #raw_digest;
+            ops.push(Op::Dup { n: 0 });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: false,
+                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+            });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: false,
+                path: vec![Key::Value(AlignedValue::from(0u8))].into_iter().collect(),
+            });
+            ops.push(Op::Root);
+            ops.push(Op::Push {
+                storage: false,
+                value: StateValue::Cell(Sp::new(AlignedValue::from(
+                    Fr::from((&__digest).field().value()),
+                ))),
+            });
+            ops.push(Op::Eq);
+            let __result: bool = state.#field_ident.check_root(&__digest);
+            ops.push(Op::Popeq {
+                cached: true,
+                result: AlignedValue::from(__result),
+            });
+        }
+    }
+}
+
+/// If `ty` is `MerkleTree<H, T>`, return `T`. Mirrors
+/// `zkir_emitter::extract_merkle_tree_type` — used to detect MerkleTree
+/// fields in the dispatcher.
+fn extract_merkle_tree_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "MerkleTree"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+    {
+        for a in &args.args {
+            if let syn::GenericArgument::Type(t) = a {
+                return Some(t.clone());
+            }
+        }
+    }
+    None
 }
 
 /// If `ty` is `Set<T>`, return `T`. Mirrors `zkir_emitter::extract_set_inner_type`.

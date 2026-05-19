@@ -3837,3 +3837,156 @@ async fn cell_field_get_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell<Field>::get");
 }
+
+#[midnight::contract]
+mod mt_check {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MtCheckState {
+        pub entries: MerkleTree<10, Bytes<32>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MtCheckWitnesses {
+        pub expected_root: MerkleTreeDigest,
+    }
+
+    impl MtCheckState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                entries: MerkleTree::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn verify(&self, witnesses: &MtCheckWitnesses) {
+            let _ok = self.entries.check_root(&witnesses.expected_root);
+        }
+    }
+}
+
+fn build_mt_verify_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod mt_check {
+            #[midnight(ledger)]
+            pub struct MtCheckState { entries: MerkleTree<10, Bytes<32>> }
+            #[midnight(witnesses)]
+            pub struct MtCheckWitnesses { pub expected_root: MerkleTreeDigest }
+            impl MtCheckState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
+                #[midnight(circuit)]
+                pub fn verify(&self, witnesses: &MtCheckWitnesses) {
+                    let _ok = self.entries.check_root(&witnesses.expected_root);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "verify")
+        .unwrap()
+        .ir_source
+}
+
+/// `MerkleTree<10, Bytes<32>>::check_root(&digest)` against an empty
+/// tree, with the user-supplied digest equal to the actual empty-tree
+/// root — Member result is `true`. Exercises the full 7-op encoding
+/// (Dup + Idx + Idx + Root + Push(Cell(Field)) + Eq + Popeq) and the
+/// Phase A `AlignmentAtom::Field` work the user-digest Push depends on.
+#[tokio::test]
+async fn mt_check_root_matches_empty_tree_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::curve::Fr;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_mt_verify_ir();
+    let state = mt_check::MtCheckState::new();
+    // Use the actual empty-tree root so check_root returns true.
+    let expected_root = state.entries.root();
+    let witnesses = mt_check::MtCheckWitnesses { expected_root };
+    let nocturne_transcript =
+        mt_check::transcript::build_verify_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(Fr::from(expected_root.field().value()))];
+    let preimage = canonical_preimage("verify", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for MerkleTree::check_root (match)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for MerkleTree::check_root (match)");
+}
+
+/// Same as above but with a digest that doesn't match the tree root.
+/// The Popeq result is `false`; the circuit still proves and verifies
+/// — `check_root` is a query, not an assertion.
+#[tokio::test]
+async fn mt_check_root_mismatch_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::curve::Fr;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_mt_verify_ir();
+    let state = mt_check::MtCheckState::new();
+    // Bogus digest — doesn't match the empty-tree root.
+    let wrong = MerkleTreeDigest::new(Field::from(0xDEADu64));
+    let witnesses = mt_check::MtCheckWitnesses {
+        expected_root: wrong,
+    };
+    let nocturne_transcript =
+        mt_check::transcript::build_verify_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(Fr::from(wrong.field().value()))];
+    let preimage = canonical_preimage("verify", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for MerkleTree::check_root (mismatch)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for MerkleTree::check_root (mismatch)");
+}

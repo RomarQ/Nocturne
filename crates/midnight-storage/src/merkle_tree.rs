@@ -48,23 +48,26 @@ impl<const N: usize> MerkleLeaf for Bytes<N> {
 /// happens lazily when `root()` or `check_root()` is called.
 #[derive(Debug, Clone)]
 pub struct MerkleTree<const HEIGHT: usize, T> {
+    /// Always kept in a rehashed state so `root()` can be a `&self`
+    /// operation. The on-chain `Root` opcode requires a rehashed tree
+    /// (`onchain-vm/src/vm.rs:562-577`); we mirror that invariant by
+    /// rehashing eagerly after every `insert`.
     inner: upstream::MerkleTree<()>,
     next_index: u64,
-    /// True once a leaf has been inserted since the last rehash. `root()`
-    /// rehashes before returning so the digest matches on-chain semantics.
-    needs_rehash: bool,
     _phantom: PhantomData<T>,
 }
 
 impl<const HEIGHT: usize, T> MerkleTree<HEIGHT, T> {
     /// Build a fresh, empty tree of height `HEIGHT`. Mirrors compactc's
     /// initial state for a `MerkleTree<#HEIGHT, T>` field — a blank
-    /// `BoundedMerkleTree(HEIGHT)` paired with a `next_index = 0`.
+    /// `BoundedMerkleTree(HEIGHT)` paired with a `next_index = 0`. The
+    /// blank tree is already rehashed (no leaves), so `root()` works
+    /// immediately.
     pub fn empty() -> Self {
+        let inner = upstream::MerkleTree::blank(HEIGHT as u8).rehash();
         Self {
-            inner: upstream::MerkleTree::blank(HEIGHT as u8),
+            inner,
             next_index: 0,
-            needs_rehash: false,
             _phantom: PhantomData,
         }
     }
@@ -78,6 +81,24 @@ impl<const HEIGHT: usize, T> MerkleTree<HEIGHT, T> {
     pub fn is_empty(&self) -> bool {
         self.next_index == 0
     }
+
+    /// The current root of the tree as a [`MerkleTreeDigest`]. Always
+    /// available because we rehash eagerly after every `insert`.
+    pub fn root(&self) -> MerkleTreeDigest {
+        let upstream_root: UpstreamDigest = self
+            .inner
+            .root()
+            .expect("MerkleTree is kept rehashed; root() should always succeed");
+        upstream_digest_to_user(upstream_root)
+    }
+
+    /// Compare `digest` against the current tree root. Reserved as the
+    /// on-chain `checkRoot` semantics — Phase C compiles this directly
+    /// to the VM's `Root + Eq + Popeq` shape, so this method's return
+    /// value is what the transcript builder bakes into the Popeq result.
+    pub fn check_root(&self, digest: &MerkleTreeDigest) -> bool {
+        self.root() == *digest
+    }
 }
 
 impl<const HEIGHT: usize, T: MerkleLeaf> MerkleTree<HEIGHT, T> {
@@ -86,38 +107,19 @@ impl<const HEIGHT: usize, T: MerkleLeaf> MerkleTree<HEIGHT, T> {
     /// separator (`"mdn:lh"`, encoded as `0x6D646E3A6C68`) so the off-chain
     /// tree's root matches what the on-chain `Root` opcode computes after
     /// the same insertion sequence.
+    ///
+    /// Rehashes eagerly so subsequent `root()` / `check_root()` calls are
+    /// `&self`. The cost is O(n+h) per insert vs. O(1) amortized — fine
+    /// for the small trees the test suite exercises and avoids interior
+    /// mutability in the storage type.
     pub fn insert(&mut self, leaf: &T) {
         let leaf_hash = upstream::leaf_hash(leaf.leaf_bytes());
         self.inner = self
             .inner
             .try_update_hash(self.next_index, leaf_hash, ())
-            .expect("insert: next_index always in range for the configured HEIGHT");
+            .expect("insert: next_index always in range for the configured HEIGHT")
+            .rehash();
         self.next_index += 1;
-        self.needs_rehash = true;
-    }
-
-    /// The current root of the tree as a [`MerkleTreeDigest`]. Forces a
-    /// rehash if any inserts have happened since the last root query.
-    /// Empty (no insertions) trees still return a digest — the blank
-    /// hash for height `HEIGHT`.
-    pub fn root(&mut self) -> MerkleTreeDigest {
-        if self.needs_rehash {
-            self.inner = self.inner.rehash();
-            self.needs_rehash = false;
-        }
-        let upstream_root: UpstreamDigest = self
-            .inner
-            .root()
-            .expect("rehashed tree should have a root");
-        upstream_digest_to_user(upstream_root)
-    }
-
-    /// Compare `digest` against the current tree root. Equivalent to
-    /// `self.root() == *digest` but reserved as the on-chain
-    /// `checkRoot` semantics — Phase C will compile this directly to
-    /// the VM's `Root + Eq + Popeq` shape.
-    pub fn check_root(&mut self, digest: &MerkleTreeDigest) -> bool {
-        self.root() == *digest
     }
 }
 
@@ -155,8 +157,8 @@ mod tests {
 
     #[test]
     fn empty_tree_has_consistent_root() {
-        let mut t1 = MerkleTree::<10, [u8; 32]>::empty();
-        let mut t2 = MerkleTree::<10, [u8; 32]>::empty();
+        let t1 = MerkleTree::<10, [u8; 32]>::empty();
+        let t2 = MerkleTree::<10, [u8; 32]>::empty();
         assert_eq!(t1.root(), t2.root(), "blank trees must have the same root");
     }
 
