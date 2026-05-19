@@ -120,7 +120,7 @@ lookup,remove}_proves_and_verifies` for `Map<Bytes<32>, Uint<64>>`.
 
 ## What still needs work
 
-1. **Multi-Fr value types**: `Bytes<N>` for `N*8 > 64`, custom ADTs, and `Field` (which uses `AlignmentAtom::Field`, not `Bytes{N}`) fall back to 2-declare emission. They are NOT on-chain compatible. To support: extend `aligned_value_encoding` to return a `value_field_count > 1`, and update `emit_push_cell` to emit one declare per Fr in the value.
+1. **Custom ADTs**: structs with multiple typed fields fall back to 2-declare emission. They are NOT on-chain compatible. Multi-Fr `Bytes<N>` landed via Phase B (see below). `Cell<Field>` landed via [[field-alignment-encoding]] (Phase A of the MerkleTree staged plan).
 
 2. **Map::insert** (next stage): reuses the same Push pattern, twice — once for the K-typed key (so the generic `emit_push_cell` already covers it), once for the V-typed value. Just needs the dispatcher to route `insert` to the same emit path with K, V types resolved from the `Map<K, V>` field type. See `map-ledger-field-encoding.md`.
 

@@ -683,7 +683,7 @@ impl ZkirEmitter {
         match result_enc {
             Some(enc) if enc.value_field_count >= 1 => {
                 for atom in &enc.alignment_atoms {
-                    let v = self.emit_load_imm(Fr::from(*atom as u64));
+                    let v = self.emit_load_imm(Fr::from(*atom));
                     self.push_declare_pub_input(v);
                 }
                 let mut first_value: Option<Index> = None;
@@ -978,7 +978,7 @@ impl ZkirEmitter {
         let idx_op2 = self.emit_load_imm(Fr::from(0x50u64));
         self.push_declare_pub_input(idx_op2);
         for atom in &key_encoding.alignment_atoms {
-            let v = self.emit_load_imm(Fr::from(*atom as u64));
+            let v = self.emit_load_imm(Fr::from(*atom));
             self.push_declare_pub_input(v);
         }
         for &kv in key_vars {
@@ -1000,7 +1000,7 @@ impl ZkirEmitter {
         let popeq_op = self.emit_load_imm(Fr::from(0x0cu64));
         self.push_declare_pub_input(popeq_op);
         for atom in &val_encoding.alignment_atoms {
-            let v = self.emit_load_imm(Fr::from(*atom as u64));
+            let v = self.emit_load_imm(Fr::from(*atom));
             self.push_declare_pub_input(v);
         }
         let value_layout = read_result_fr_layout(v_ty);
@@ -1292,7 +1292,7 @@ impl ZkirEmitter {
                 let cell_disc = self.emit_load_imm(Fr::from(1u64));
                 self.push_declare_pub_input(cell_disc);
                 for atom in &enc.alignment_atoms {
-                    let v = self.emit_load_imm(Fr::from(*atom as u64));
+                    let v = self.emit_load_imm(Fr::from(*atom));
                     self.push_declare_pub_input(v);
                 }
                 for &var in value_vars {
@@ -1410,7 +1410,13 @@ impl ZkirEmitter {
 ///   through to the legacy emission.
 #[derive(Debug, Clone)]
 struct AlignedValueEncoding {
-    alignment_atoms: Vec<u32>,
+    /// Each entry is a signed Fr atom (i32 in the IR, but materialized via
+    /// `Fr::from(i32)` which routes through `derive_signed!` to handle
+    /// negative atoms). Positive values are the segment count (1) and
+    /// `Bytes{N}` length; `-2` is the on-chain encoding of
+    /// `AlignmentAtom::Field` (`transient-crypto/src/fab.rs:605`).
+    /// `-1` would be `AlignmentAtom::Compress` but we don't use it yet.
+    alignment_atoms: Vec<i32>,
     value_field_count: usize,
 }
 
@@ -1418,7 +1424,7 @@ struct AlignedValueEncoding {
 /// (callers must ensure `N * 8 ≤ 253` for the value to fit in one Fr).
 fn aligned_value_encoding_bytes(n: u32) -> AlignedValueEncoding {
     AlignedValueEncoding {
-        alignment_atoms: vec![1, n],
+        alignment_atoms: vec![1, n as i32],
         value_field_count: 1,
     }
 }
@@ -1435,6 +1441,15 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
     if ty_str == "Boolean" || ty_str == "bool" {
         return Some(AlignedValueEncoding {
             alignment_atoms: vec![1, 1],
+            value_field_count: 1,
+        });
+    }
+
+    // Field: encoded with `AlignmentAtom::Field` (`-2` after field_repr).
+    // The value occupies a single Fr — no bit-width chunking.
+    if ty_str == "Field" {
+        return Some(AlignedValueEncoding {
+            alignment_atoms: vec![1, -2],
             value_field_count: 1,
         });
     }
@@ -1464,7 +1479,7 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
         // The Fr field is ~253 bits — anything up to that fits in one Fr.
         if bits > 0 && bits <= 253 {
             return Some(AlignedValueEncoding {
-                alignment_atoms: vec![1, bytes],
+                alignment_atoms: vec![1, bytes as i32],
                 value_field_count: 1,
             });
         }
@@ -1480,7 +1495,7 @@ fn aligned_value_encoding(ty: &syn::Type) -> Option<AlignedValueEncoding> {
         && n > 0
     {
         return Some(AlignedValueEncoding {
-            alignment_atoms: vec![1, n],
+            alignment_atoms: vec![1, n as i32],
             value_field_count: n.div_ceil(FR_BYTES_STORED) as usize,
         });
     }

@@ -267,6 +267,12 @@ fn generate_op_stmt(
                         {
                             quote! { *(#accessor).as_bytes() }
                         }
+                        Some(t) if quote!(#t).to_string().replace(' ', "") == "Field" => {
+                            // `Cell<Field>::get()` returns Field; convert to
+                            // Fr for AlignedValue::from (which picks the
+                            // Field alignment via Fr's Aligned impl).
+                            quote! { Fr::from((#accessor).value()) }
+                        }
                         Some(t) => match primitive_cast_for_type(t) {
                             Some(c) => quote! { (#accessor) #c },
                             None => quote! { #accessor },
@@ -596,6 +602,14 @@ fn aligned_value_arg_expr(expr: &ExprIR, ty: Option<&syn::Type>) -> TokenStream 
             // Bytes<N>: need [u8; N] for AlignedValue::from.
             let raw = arg_to_runtime_raw_expr(expr);
             return quote! { *(#raw).as_bytes() };
+        }
+        if ty_str == "Field" {
+            // Field: `AlignedValue::from` accepts `Fr` (via Aligned impl in
+            // `transient-crypto/src/curve.rs:291`), producing an AlignedValue
+            // with `AlignmentAtom::Field`. Convert our user-side `Field`
+            // (currently a u128 wrapper) to `Fr` via `Fr::from(field.value())`.
+            let raw = arg_to_runtime_raw_expr(expr);
+            return quote! { Fr::from((#raw).value()) };
         }
     }
     let value_expr = arg_to_runtime_expr(expr);

@@ -3677,3 +3677,163 @@ async fn set_remove_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Set<Bytes<32>>::remove");
 }
+
+#[midnight::contract]
+mod field_cell {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct FieldCellState {
+        pub slot: Cell<Field>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct FieldCellWitnesses {
+        pub new_field: Field,
+    }
+
+    impl FieldCellState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                slot: Cell::new(Field::zero()),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn write_field(&mut self, witnesses: &FieldCellWitnesses) {
+            self.slot.set(witnesses.new_field);
+        }
+
+        #[midnight(circuit)]
+        pub fn read_field(&self) {
+            let _v = self.slot.get();
+        }
+    }
+}
+
+fn build_field_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod field_cell {
+            #[midnight(ledger)]
+            pub struct FieldCellState { slot: Cell<Field> }
+            #[midnight(witnesses)]
+            pub struct FieldCellWitnesses { pub new_field: Field }
+            impl FieldCellState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { slot: Cell::new(Field::zero()) } }
+                #[midnight(circuit)]
+                pub fn write_field(&mut self, witnesses: &FieldCellWitnesses) {
+                    self.slot.set(witnesses.new_field);
+                }
+                #[midnight(circuit)]
+                pub fn read_field(&self) {
+                    let _v = self.slot.get();
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
+}
+
+/// `Cell<Field>::set(v)` — the Push uses `AlignmentAtom::Field` (encoded
+/// as `-2` per `transient-crypto/src/fab.rs:605`) instead of `Bytes{N}`,
+/// and the value is a single Fr that flows through Fr's Aligned impl on
+/// the runtime side. This is the prerequisite alignment for
+/// MerkleTree::checkRoot (Phase A of the staged plan).
+#[tokio::test]
+async fn cell_field_set_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::curve::Fr;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_field_cell_circuit_ir("write_field");
+    let witnesses = field_cell::FieldCellWitnesses {
+        new_field: Field::from(42u64),
+    };
+    let nocturne_transcript = field_cell::transcript::build_write_field_transcript(&witnesses);
+
+    // Witness contributes 1 Fr to private_transcript (Field is single-Fr).
+    // AlignedValue::from(Fr) builds a Field-aligned AlignedValue whose
+    // `value_only_field_repr` flattens to that one Fr.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(Fr::from(42u64))];
+    let preimage = canonical_preimage(
+        "write_field",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Cell<Field>::set"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<Field>::set");
+}
+
+/// `Cell<Field>::get()` — the Popeq's result is an AlignedValue<Field>
+/// whose `value_only_field_repr` is a single Fr (the stored field
+/// element). The IR uses `AlignmentAtom::Field` (`-2`) in the Popeq's
+/// alignment declares, mirroring the Push side.
+#[tokio::test]
+async fn cell_field_get_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::curve::Fr;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_field_cell_circuit_ir("read_field");
+    let mut state = field_cell::FieldCellState::new();
+    // Seed the Cell so the read returns a non-trivial Field value.
+    state.slot.set(Field::from(0xCAFEu64));
+    let nocturne_transcript = field_cell::transcript::build_read_field_transcript(&state);
+
+    let preimage = canonical_preimage("read_field", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for Cell<Field>::get"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<Field>::get");
+}
