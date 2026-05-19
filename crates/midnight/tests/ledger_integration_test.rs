@@ -7430,3 +7430,94 @@ async fn witness_arithmetic_let_binding_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for witness arithmetic let binding");
 }
+
+// ---------------------------------------------------------------------------
+// `let n = self.counter.value();` — bind a ledger Counter read so the
+// downstream Rust code can use the value in subsequent expressions.
+// Pins that LedgerAccess::value flows through the let binding.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod counter_read_binding {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct CounterRead {
+        pub count: Counter,
+    }
+
+    impl CounterRead {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn snapshot(&self) {
+            let _n = self.count.value();
+        }
+    }
+}
+
+fn build_counter_read_binding_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod counter_read_binding {
+            #[midnight(ledger)]
+            pub struct CounterRead { count: Counter }
+            impl CounterRead {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { count: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn snapshot(&self) {
+                    let _n = self.count.value();
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "snapshot")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn counter_value_let_binding_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_counter_read_binding_ir();
+    let mut state = counter_read_binding::CounterRead::new();
+    state.count.increment_by(5); // make the state non-zero so the read isn't a no-op
+    let nocturne_transcript = counter_read_binding::transcript::build_snapshot_transcript(&state);
+    let preimage = canonical_preimage("snapshot", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Counter::value let-binding read must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Counter::value let-binding read");
+}

@@ -436,6 +436,17 @@ fn generate_op_stmt(
                     let #var_name = #expr;
                 };
             }
+            // Cell::get() / Counter::value() reads — bind to the live
+            // state's accessor so `let v = self.f.get(); ...; use v`
+            // works downstream. The ops side (Dup+Idx+Popeq) is
+            // already emitted via `val_stmt`.
+            if let Some(expr) = let_binding_value_for_ledger_read(value, field_names) {
+                return quote! {
+                    #val_stmt
+                    #[allow(non_snake_case, unused_variables)]
+                    let #var_name = #expr;
+                };
+            }
             quote! {
                 #[allow(non_snake_case, unused_variables)]
                 let #var_name = {
@@ -602,6 +613,27 @@ fn generate_op_stmt(
         }
 
         _ => quote! {},
+    }
+}
+
+/// If `value` is a `self.<field>.<get|value>()` ledger read, build the
+/// Rust expression that fetches the same value from the live `state`.
+/// Returns `None` for other shapes.
+fn let_binding_value_for_ledger_read(
+    value: &ExprIR,
+    field_names: &[String],
+) -> Option<TokenStream> {
+    let ExprIR::LedgerAccess { field, method, .. } = value else {
+        return None;
+    };
+    if !field_names.iter().any(|f| f == &field.to_string()) {
+        return None;
+    }
+    let f_ident = format_ident!("{}", field.to_string());
+    match method.to_string().as_str() {
+        "get" => Some(quote! { state.#f_ident.get() }),
+        "value" | "__direct_access" => Some(quote! { state.#f_ident.value() }),
+        _ => None,
     }
 }
 
