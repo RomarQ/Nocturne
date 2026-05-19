@@ -786,11 +786,7 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                 .to_string(),
         }),
 
-        Expr::ForLoop(_) => Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
-            description: "for loops not yet supported (will support const-bounded in Phase 6)"
-                .to_string(),
-        }),
+        Expr::ForLoop(for_expr) => parse_const_for_loop(for_expr),
 
         _ => Ok(ExprIR::Unsupported {
             span: Span::call_site(),
@@ -982,4 +978,135 @@ fn match_if_let_some_get(cond: &Expr) -> Option<(syn::Ident, syn::Ident, &Expr)>
 
     let (field_name, key_expr) = match_self_field_get_scrutinee(expr)?;
     Some((var_name, field_name, key_expr))
+}
+
+/// Parse `for <ident> in <lit>..<lit> { body }` (or `..=`) and unroll
+/// inline. Both bounds must be integer literals known at compile time;
+/// anything else (variable bounds, non-range iterators) is rejected so
+/// the codegen never has to deal with dynamic iteration in a circuit.
+///
+/// Unrolling = N copies of the body with `<ident>` substituted by the
+/// iteration value at each step, wrapped in `ExprIR::Block` so call
+/// sites that expect a single expression keep working. Each iteration
+/// gets its own nested Block so user `let` bindings shadow cleanly
+/// across copies without leaking between them.
+fn parse_const_for_loop(for_expr: &syn::ExprForLoop) -> MidnightResult<ExprIR> {
+    let Pat::Ident(pat) = &*for_expr.pat else {
+        return Ok(ExprIR::Unsupported {
+            span: Span::call_site(),
+            description: "for-loop pattern must be a single identifier".to_string(),
+        });
+    };
+    let loop_var = pat.ident.clone();
+
+    let Expr::Range(range) = &*for_expr.expr else {
+        return Ok(ExprIR::Unsupported {
+            span: Span::call_site(),
+            description: "for-loop iterator must be a literal `<lit>..<lit>` range".to_string(),
+        });
+    };
+    let Some(start_expr) = &range.start else {
+        return Ok(ExprIR::Unsupported {
+            span: Span::call_site(),
+            description: "for-loop range must have an explicit lower bound".to_string(),
+        });
+    };
+    let Some(end_expr) = &range.end else {
+        return Ok(ExprIR::Unsupported {
+            span: Span::call_site(),
+            description: "for-loop range must have an explicit upper bound".to_string(),
+        });
+    };
+    let start = parse_int_literal(start_expr).ok_or_else(|| {
+        MidnightError::new(
+            Span::call_site(),
+            ErrorCode::UnsupportedExpression,
+            "for-loop lower bound must be an integer literal",
+        )
+    })?;
+    let end = parse_int_literal(end_expr).ok_or_else(|| {
+        MidnightError::new(
+            Span::call_site(),
+            ErrorCode::UnsupportedExpression,
+            "for-loop upper bound must be an integer literal",
+        )
+    })?;
+    let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
+
+    let last = if inclusive { end } else { end.saturating_sub(1) };
+    if (inclusive && end < start) || (!inclusive && end <= start) {
+        return Ok(ExprIR::Block {
+            span: Span::call_site(),
+            stmts: Vec::new(),
+        });
+    }
+
+    let mut iterations: Vec<ExprIR> = Vec::new();
+    let mut i = start;
+    loop {
+        let mut body = for_expr.body.clone();
+        substitute_ident_with_int(&mut body, &loop_var, i);
+        let stmts = parse_block_stmts(&body)?;
+        iterations.push(ExprIR::Block {
+            span: Span::call_site(),
+            stmts,
+        });
+        if i == last {
+            break;
+        }
+        i += 1;
+    }
+
+    Ok(ExprIR::Block {
+        span: Span::call_site(),
+        stmts: iterations,
+    })
+}
+
+/// Parse a `usize`-valued integer literal (with or without a suffix).
+/// Returns `None` for anything that isn't an integer literal — including
+/// `1 + 1` and other expressions that *evaluate* to a constant; const
+/// evaluation isn't worth the complexity here.
+fn parse_int_literal(expr: &Expr) -> Option<u64> {
+    let Expr::Lit(lit) = expr else {
+        return None;
+    };
+    let syn::Lit::Int(int) = &lit.lit else {
+        return None;
+    };
+    int.base10_parse::<u64>().ok()
+}
+
+/// Walk `block` and replace every `Expr::Path` whose single-ident path
+/// equals `target` with the integer literal `value`. Used to inline the
+/// for-loop variable into each unrolled iteration. Doesn't try to be
+/// clever about shadowing — Rust's normal scoping would let inner
+/// bindings shadow the loop var, but in practice circuit bodies don't
+/// reuse names that way, and a paranoid substitution is simpler than
+/// tracking scope at this layer.
+fn substitute_ident_with_int(block: &mut syn::Block, target: &syn::Ident, value: u64) {
+    use syn::visit_mut::{self, VisitMut};
+
+    struct Subst<'a> {
+        target: &'a syn::Ident,
+        value: u64,
+    }
+
+    impl<'a> VisitMut for Subst<'a> {
+        fn visit_expr_mut(&mut self, e: &mut Expr) {
+            if let Expr::Path(p) = e
+                && p.qself.is_none()
+                && let Some(ident) = p.path.get_ident()
+                && ident == self.target
+            {
+                let v = self.value;
+                *e = syn::parse_quote!(#v);
+                return;
+            }
+            visit_mut::visit_expr_mut(self, e);
+        }
+    }
+
+    let mut subst = Subst { target, value };
+    subst.visit_block_mut(block);
 }

@@ -5850,3 +5850,204 @@ async fn map_tuple_key_contains_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Map<(Field, Uint<64>), _>::contains");
 }
+
+// ---------------------------------------------------------------------------
+// Const-bounded `for i in 0..N { ... }` unrolling. The parser inlines N
+// copies of the body with `i` substituted by the iteration value, so each
+// iteration emits its own VM ops as if written out by hand.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod for_counter {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct ForCounterState {
+        pub count: Counter,
+    }
+
+    impl ForCounterState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
+
+        // Unrolls to three Counter::increment() emissions.
+        #[midnight(circuit)]
+        pub fn inc_three(&mut self) {
+            for _i in 0..3 {
+                self.count.increment();
+            }
+        }
+    }
+}
+
+fn build_for_counter_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod for_counter {
+            #[midnight(ledger)]
+            pub struct ForCounterState { count: Counter }
+            impl ForCounterState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { count: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn inc_three(&mut self) {
+                    for _i in 0..3 {
+                        self.count.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "inc_three")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn for_loop_unroll_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_for_counter_ir();
+    let nocturne_transcript = for_counter::transcript::build_inc_three_transcript();
+
+    // Three increments → three Idx+Addi+Ins groups. No witnesses, no
+    // popeq result, so private_transcript_outputs is empty.
+    let preimage = canonical_preimage("inc_three", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for unrolled `for _ in 0..3` over Counter::increment"
+    );
+
+    // The transcript should contain exactly 3 Counter::increment op
+    // groups (Idx + Addi + Ins per increment = 3 ops × 3 iterations).
+    let increments = nocturne_transcript
+        .ops
+        .iter()
+        .filter(|op| matches!(op, Op::Addi { immediate: 1 }))
+        .count();
+    assert_eq!(increments, 3, "for-loop unrolled to 3 Addi ops");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for the unrolled for-loop circuit");
+}
+
+#[midnight::contract]
+mod for_var_use {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct ForVarState {
+        pub last: Cell<u64>,
+    }
+
+    impl ForVarState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                last: Cell::new(0u64),
+            }
+        }
+
+        // Three `Cell::set` calls with values 0, 1, 2 (last wins). The
+        // loop variable `i` is substituted by the iteration value at
+        // parse time, so each iteration carries a distinct literal.
+        #[midnight(circuit)]
+        pub fn fill(&mut self) {
+            for i in 0..3u64 {
+                self.last.set(i);
+            }
+        }
+    }
+}
+
+fn build_for_var_use_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod for_var_use {
+            #[midnight(ledger)]
+            pub struct ForVarState { last: Cell<u64> }
+            impl ForVarState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { last: Cell::new(0u64) } }
+                #[midnight(circuit)]
+                pub fn fill(&mut self) {
+                    for i in 0..3u64 {
+                        self.last.set(i);
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "fill")
+        .unwrap()
+        .ir_source
+}
+
+/// Loop variable substitution test: `for i in 0..3u64` with `i` used
+/// as the argument to `Cell::set`. If substitution fails (e.g. `i`
+/// stays as a Var instead of being replaced by the literal),
+/// compilation breaks because `i` isn't in scope at the call site.
+#[tokio::test]
+async fn for_loop_var_substituted_into_literals() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_for_var_use_ir();
+    let nocturne_transcript = for_var_use::transcript::build_fill_transcript();
+
+    let preimage = canonical_preimage("fill", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for `for i in 0..3` over Map::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for the loop-variable substitution circuit");
+}
