@@ -579,6 +579,19 @@ fn generate_op_stmt(
             generate_op_stmt(inner, field_names, field_types, witness_types, user_structs, user_enums)
         }
 
+        // BinaryOp at statement level only carries side effects via
+        // witness reads on either side; the arithmetic itself doesn't
+        // affect the transcript. Forward to each operand so the
+        // private-transcript pushes still get emitted in operand order.
+        ExprIR::BinaryOp { lhs, rhs, .. } => {
+            let l = generate_op_stmt(lhs, field_names, field_types, witness_types, user_structs, user_enums);
+            let r = generate_op_stmt(rhs, field_names, field_types, witness_types, user_structs, user_enums);
+            quote! { #l #r }
+        }
+        ExprIR::UnaryOp { expr: inner, .. } => {
+            generate_op_stmt(inner, field_names, field_types, witness_types, user_structs, user_enums)
+        }
+
         // An expression the IR couldn't lower (e.g. a Rust pattern Nocturne
         // doesn't model yet). Emit a `compile_error!` carrying the IR's
         // description so the user gets a real diagnostic instead of a
@@ -627,6 +640,30 @@ fn let_binding_value_for_witness_access(value: &ExprIR) -> Option<TokenStream> {
             let inner = let_binding_value_for_witness_access(expr)?;
             Some(quote! { (#inner) })
         }
+        // Arithmetic over witness reads: bind to the equivalent Rust
+        // expression so e.g. `let s = w.a + w.b;` works downstream.
+        ExprIR::BinaryOp { op, lhs, rhs, .. } => {
+            let l = let_binding_value_for_witness_access(lhs)?;
+            let r = let_binding_value_for_witness_access(rhs)?;
+            let tokens = match op {
+                syn::BinOp::Add(_) => quote! { #l + #r },
+                syn::BinOp::Sub(_) => quote! { #l - #r },
+                syn::BinOp::Mul(_) => quote! { #l * #r },
+                syn::BinOp::BitAnd(_) => quote! { #l & #r },
+                syn::BinOp::BitOr(_) => quote! { #l | #r },
+                syn::BinOp::BitXor(_) => quote! { #l ^ #r },
+                _ => return None,
+            };
+            Some(tokens)
+        }
+        ExprIR::Literal { value, .. } => match value {
+            midnight_ir::expr::LiteralIR::Int(n) => {
+                let n = *n as u64;
+                Some(quote! { #n })
+            }
+            midnight_ir::expr::LiteralIR::Bool(b) => Some(quote! { #b }),
+            midnight_ir::expr::LiteralIR::Str(_) => None,
+        },
         _ => None,
     }
 }
@@ -984,7 +1021,24 @@ fn aligned_value_arg_expr(
     }
     let value_expr = arg_to_runtime_expr(expr);
     match ty.and_then(primitive_cast_for_type) {
-        Some(cast) => quote! { (#value_expr) #cast },
+        Some(cast) => {
+            // `arg_to_runtime_expr` returns a bare identifier for
+            // `ExprIR::Var`. If the cell's wrapper type is `Uint<N>`,
+            // the bare var is the wrapper itself, so we need `.value()`
+            // before the `as u<N>` cast — `Uint<N> as u64` doesn't
+            // type-check. Witness reads emit `.value()` directly so
+            // they don't need this adjustment.
+            let needs_unwrap = matches!(expr, ExprIR::Var { .. })
+                && ty
+                    .map(|t| quote!(#t).to_string().replace(' ', ""))
+                    .map(|s| s.starts_with("Uint<"))
+                    .unwrap_or(false);
+            if needs_unwrap {
+                quote! { (#value_expr).value() #cast }
+            } else {
+                quote! { (#value_expr) #cast }
+            }
+        }
         None => value_expr,
     }
 }

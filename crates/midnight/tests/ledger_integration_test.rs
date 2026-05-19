@@ -7313,3 +7313,120 @@ async fn let_witness_bound_value_reaches_cell_set() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for let-bound witness Cell::set");
 }
+
+// ---------------------------------------------------------------------------
+// `let total = w.a + w.b; cell.set(total);` — witness arithmetic flowing
+// into a Cell<Uint<64>> write. Both witnesses must push (in declaration
+// order), the arithmetic must evaluate at runtime, and the resulting
+// AlignedValue must match what `set` would produce for the raw sum.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod witness_sum {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct SumLedger {
+        pub total: Cell<Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct SumWitnesses {
+        pub a: Uint<64>,
+        pub b: Uint<64>,
+    }
+
+    impl SumLedger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                total: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn store_sum(&mut self, witnesses: &SumWitnesses) {
+            let s = witnesses.a.clone() + witnesses.b.clone();
+            self.total.set(s);
+        }
+    }
+}
+
+fn build_witness_sum_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod witness_sum {
+            #[midnight(ledger)]
+            pub struct SumLedger { total: Cell<Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct SumWitnesses { pub a: Uint<64>, pub b: Uint<64> }
+            impl SumLedger {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { total: Cell::new(Uint::<64>::from(0u64)) } }
+                #[midnight(circuit)]
+                pub fn store_sum(&mut self, witnesses: &SumWitnesses) {
+                    let s = witnesses.a.clone() + witnesses.b.clone();
+                    self.total.set(s);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store_sum")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn witness_arithmetic_let_binding_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_witness_sum_ir();
+    let witnesses = witness_sum::SumWitnesses {
+        a: Uint::<64>::from(11u64),
+        b: Uint::<64>::from(31u64),
+    };
+    let nocturne_transcript =
+        witness_sum::transcript::build_store_sum_transcript(&witnesses);
+
+    // Private inputs in declaration order: a, then b. The Cell::set's
+    // pushed value is the sum (42), so the on-chain AlignedValue is u64(42).
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(11u64),
+        AlignedValue::from(31u64),
+    ];
+    let preimage = canonical_preimage(
+        "store_sum",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "witness arithmetic let binding must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for witness arithmetic let binding");
+}
