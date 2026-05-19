@@ -6051,3 +6051,202 @@ async fn for_loop_var_substituted_into_literals() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for the loop-variable substitution circuit");
 }
+
+// ---------------------------------------------------------------------------
+// Conditional edge-case coverage: cover paths the original conditional
+// tests left implicit — else-active (vs. then-active), and the two
+// non-deepest nested-if paths.
+//
+// All three reuse the existing `cond_writer` / `nested_cond` contracts
+// and their IRs, but exercise different witness shapes so the cond_select
+// zeroing + io_guards machinery has to handle the inactive branches in
+// the opposite direction.
+// ---------------------------------------------------------------------------
+
+/// Else-active sibling of `conditional_cell_set_proves_and_verifies`:
+/// `do_it=false` runs `self.raised.set(false)`. The then-branch's
+/// `Cell::set(true)` declares must cond_select to zero so the prove PIs
+/// line up with the Noop-padded transcript the ledger sees.
+#[tokio::test]
+async fn conditional_cell_set_else_active_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_maybe_raise_ir();
+    let witnesses = cond_writer::CondWriterWitnesses {
+        do_it: Boolean::from(false),
+    };
+    let nocturne_transcript = cond_writer::transcript::build_maybe_raise_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(false)];
+    let preimage = canonical_preimage(
+        "maybe_raise",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs when the else branch is active"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for else-active conditional Cell::set");
+}
+
+/// Nested if-else middle path: outer=true, inner=false. The outer
+/// guard activates the inner if/else; the inner else branch runs
+/// `self.b.increment()`. The inner then's `self.a.increment()` and the
+/// outer else's `self.c.increment()` must both cond_select to zero.
+#[tokio::test]
+async fn nested_conditional_inner_else_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_tick_ir();
+    let witnesses = nested_cond::NestedCondWitnesses {
+        outer: Boolean::from(true),
+        inner: Boolean::from(false),
+    };
+    let nocturne_transcript = nested_cond::transcript::build_tick_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(true), AlignedValue::from(false)];
+    let preimage = canonical_preimage("tick", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for nested (outer=true, inner=false)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for nested (outer=true, inner=false)");
+}
+
+/// Nested if-else outermost-else path: outer=false. Both inner
+/// branches sit inside the outer-true block and must collectively
+/// cond_select to zero. Only `self.c.increment()` is active.
+#[tokio::test]
+async fn nested_conditional_outer_else_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_tick_ir();
+    // `inner` is unread when `outer` is false (the inner if/else is
+    // entirely inside the outer-true branch). The IR still emits a
+    // PrivateInput for it because witness reads aren't dataflow-pruned;
+    // the io_guard ensures the inactive read is skipped on-chain, so
+    // we still supply the value here for the prover's side.
+    let witnesses = nested_cond::NestedCondWitnesses {
+        outer: Boolean::from(false),
+        inner: Boolean::from(false),
+    };
+    let nocturne_transcript = nested_cond::transcript::build_tick_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(false)];
+    let preimage = canonical_preimage("tick", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove PIs must match ledger PIs for nested (outer=false)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for nested (outer=false)");
+}
