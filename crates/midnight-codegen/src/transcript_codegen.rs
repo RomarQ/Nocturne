@@ -287,49 +287,14 @@ fn generate_op_stmt(
                     }
                 }
                 "contains" | "member" => {
-                    // On-chain pattern for `Map<K, V>::contains(k) -> bool`:
-                    //   Dup{n:0} + Idx{[Bytes<1>(field_idx)]} + Push{storage:false, Cell(key)}
-                    //   + Member + Popeq{cached:true, result: bool}
-                    //
-                    // The bool result is computed at transcript-build time by
-                    // calling the runtime stub on `state`, so the prover and
-                    // verifier agree on what the on-chain VM will compute when
-                    // it executes `Member`.
-                    let field_ident = format_ident!("{}", field_name);
-                    let raw_key = args
-                        .first()
-                        .map(arg_to_runtime_raw_expr)
-                        .unwrap_or_else(|| quote! { () });
-                    // The key expression must match the IR's alignment for K.
-                    // For Bytes<N> this is `*<raw>.as_bytes()`; for primitives
-                    // it's `<value> as u<N>` so Uint<64> emits Bytes{8} (not
-                    // the Bytes{16} that AlignedValue::from(u128) produces).
-                    let k_ty = field_ty.and_then(extract_map_key_type);
-                    let key_aligned = args
-                        .first()
-                        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
-                        .unwrap_or_else(|| quote! { () });
-                    quote! {
-                        {
-                            let __key = #raw_key;
-                            ops.push(Op::Dup { n: 0 });
-                            ops.push(Op::Idx {
-                                cached: false,
-                                push_path: false,
-                                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
-                            });
-                            ops.push(Op::Push {
-                                storage: false,
-                                value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
-                            });
-                            ops.push(Op::Member);
-                            let __result: bool = state.#field_ident.contains(&__key);
-                            ops.push(Op::Popeq {
-                                cached: true,
-                                result: AlignedValue::from(__result),
-                            });
-                        }
-                    }
+                    // Statement context: emit the contains ops and discard
+                    // the bool result. The shared `generate_map_contains_block`
+                    // builds a block expression that pushes ops and evaluates
+                    // to the bool — when used as a statement, the bool is
+                    // dropped; when used inside `if cond { ... }` as the cond
+                    // (via `generate_runtime_cond`), the bool drives branching.
+                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty);
+                    quote! { let _ = #block; }
                 }
                 "insert" => {
                     // `insert` on a Map field — see the Map::insert arm below.
@@ -367,7 +332,7 @@ fn generate_op_stmt(
         } => {
             // Collect witness values used in the condition for private_transcript.
             let witness_adds = collect_witness_private_inputs(cond);
-            let cond_expr = generate_runtime_cond(cond);
+            let cond_expr = generate_runtime_cond(cond, field_names, field_types);
             let then_stmts: Vec<TokenStream> = then_branch
                 .iter()
                 .map(|e| generate_op_stmt(e, field_names, field_types, witness_types))
@@ -532,6 +497,56 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
         // clear "the trait `From<()>` is not implemented" message, which
         // points the user at an unsupported argument shape.
         _ => quote! { () },
+    }
+}
+
+/// Generate a block expression that emits the on-chain Map::contains ops
+/// (Dup + Idx + Push + Member + Popeq) and evaluates to the contains-result
+/// bool. The block has side effects on `ops` (and reads `state`/`witnesses`),
+/// so the caller must be inside the transcript builder fn body where those
+/// names are in scope.
+///
+/// Shared between the statement-context "contains" arm (where the bool is
+/// discarded) and the condition-context use in `generate_runtime_cond`
+/// (where the bool drives `if cond { ... }`).
+fn generate_map_contains_block(
+    field_idx: u8,
+    field_name: &str,
+    args: &[ExprIR],
+    field_ty: Option<&syn::Type>,
+) -> TokenStream {
+    let field_ident = format_ident!("{}", field_name);
+    let raw_key = args
+        .first()
+        .map(arg_to_runtime_raw_expr)
+        .unwrap_or_else(|| quote! { () });
+    let k_ty = field_ty.and_then(extract_map_key_type);
+    let key_aligned = args
+        .first()
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
+
+    quote! {
+        {
+            let __key = #raw_key;
+            ops.push(Op::Dup { n: 0 });
+            ops.push(Op::Idx {
+                cached: false,
+                push_path: false,
+                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+            });
+            ops.push(Op::Push {
+                storage: false,
+                value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
+            });
+            ops.push(Op::Member);
+            let __result: bool = state.#field_ident.contains(&__key);
+            ops.push(Op::Popeq {
+                cached: true,
+                result: AlignedValue::from(__result),
+            });
+            __result
+        }
     }
 }
 
@@ -933,20 +948,54 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
 }
 
 /// Generate a runtime Rust expression for a condition.
-fn generate_runtime_cond(expr: &ExprIR) -> TokenStream {
+///
+/// For `LedgerAccess` conditions (currently just `Map::contains`), the
+/// returned expression is a *block with side effects* — it pushes the
+/// contains-pattern ops onto `ops`, computes the bool from `state`, and
+/// evaluates to that bool. This lets `if self.map.contains(&k) { ... }`
+/// emit the contains transcript ops in cond position the same way it
+/// would as a statement.
+fn generate_runtime_cond(
+    expr: &ExprIR,
+    field_names: &[String],
+    field_types: &[syn::Type],
+) -> TokenStream {
     match expr {
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
             quote! { witnesses.#field_ident.value() }
+        }
+        ExprIR::LedgerAccess {
+            field,
+            method,
+            args,
+            ..
+        } => {
+            let field_name = field.to_string();
+            let method_name = method.to_string();
+            if matches!(method_name.as_str(), "contains" | "member") {
+                let field_idx = field_names
+                    .iter()
+                    .position(|f| f == &field_name)
+                    .unwrap_or(0) as u8;
+                let field_ty = field_types.get(field_idx as usize);
+                return generate_map_contains_block(field_idx, &field_name, args, field_ty);
+            }
+            // Other LedgerAccess methods aren't bool-typed (lookup returns V,
+            // get/value return T, increment returns nothing). Fall through to
+            // `true` so the caller still gets a syntactically valid cond — at
+            // the IR level this branch isn't reachable for non-bool returns
+            // because the parser would reject the contract earlier.
+            quote! { true }
         }
         ExprIR::MethodCall {
             receiver, method, ..
         } => {
             let method_name = method.to_string();
             match method_name.as_str() {
-                "into" | "value" => generate_runtime_cond(receiver),
+                "into" | "value" => generate_runtime_cond(receiver, field_names, field_types),
                 _ => {
-                    let recv = generate_runtime_cond(receiver);
+                    let recv = generate_runtime_cond(receiver, field_names, field_types);
                     let m = format_ident!("{}", method_name);
                     quote! { #recv.#m() }
                 }
@@ -965,8 +1014,8 @@ fn generate_runtime_cond(expr: &ExprIR) -> TokenStream {
             _ => quote! { true },
         },
         ExprIR::BinaryOp { op, lhs, rhs, .. } => {
-            let l = generate_runtime_cond(lhs);
-            let r = generate_runtime_cond(rhs);
+            let l = generate_runtime_cond(lhs, field_names, field_types);
+            let r = generate_runtime_cond(rhs, field_names, field_types);
             match op {
                 syn::BinOp::Eq(_) => quote! { #l == #r },
                 syn::BinOp::Ne(_) => quote! { #l != #r },

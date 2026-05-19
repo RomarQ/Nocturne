@@ -592,6 +592,57 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
         }
 
         Expr::If(expr_if) => {
+            // Sugar: `if let Some(v) = self.<map>.get(&k) { body }` rewrites
+            // to `if self.<map>.contains(&k) { let v = self.<map>.lookup(&k);
+            // body }`. `Map::get` returns `Option<V>` at the type level (so
+            // the user's source compiles as plain Rust), but on-chain there's
+            // no Option<V> primitive — the on-chain VM panics on missing-key
+            // `Popeq.as_cell(StateValue::Null)`. The contains-then-lookup
+            // shape is the canonical Map::get expansion, and both
+            // `conditional-branch-cond-select-zeroing` and
+            // `conditional-io-guards` keep its inactive-branch reads zeroed.
+            if let Some((var_name, map_field, key_expr)) =
+                match_if_let_some_get(&expr_if.cond)
+            {
+                // Parse the key twice so both the contains and the lookup
+                // get their own owned ExprIR (no Clone on ExprIR today).
+                // The two parses produce equivalent trees because the
+                // source expr is the same.
+                let contains = ExprIR::LedgerAccess {
+                    span: Span::call_site(),
+                    field: map_field.clone(),
+                    method: syn::Ident::new("contains", Span::call_site()),
+                    args: vec![parse_expr(key_expr)?],
+                };
+                let lookup = ExprIR::LedgerAccess {
+                    span: Span::call_site(),
+                    field: map_field,
+                    method: syn::Ident::new("lookup", Span::call_site()),
+                    args: vec![parse_expr(key_expr)?],
+                };
+                let let_stmt = ExprIR::Let {
+                    span: Span::call_site(),
+                    name: var_name,
+                    value: Box::new(lookup),
+                };
+                let mut then_branch = vec![let_stmt];
+                then_branch.extend(parse_block_stmts(&expr_if.then_branch)?);
+                let else_branch = if let Some((_, else_expr)) = &expr_if.else_branch {
+                    match &**else_expr {
+                        Expr::Block(block) => Some(parse_block_stmts(&block.block)?),
+                        other => Some(vec![parse_expr(other)?]),
+                    }
+                } else {
+                    None
+                };
+                return Ok(ExprIR::If {
+                    span: Span::call_site(),
+                    cond: Box::new(contains),
+                    then_branch,
+                    else_branch,
+                });
+            }
+
             let cond = parse_expr(&expr_if.cond)?;
             let then_branch = parse_block_stmts(&expr_if.then_branch)?;
             let else_branch = if let Some((_, else_expr)) = &expr_if.else_branch {
@@ -766,4 +817,52 @@ fn parse_macro_expr(mac: &syn::Macro) -> MidnightResult<ExprIR> {
 /// Check if an expression is `self`.
 fn is_self_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Path(ExprPath { path, .. }) if path.is_ident("self"))
+}
+
+/// Match `if let Some(v) = self.<map>.get(&k)`-style conditions. Returns
+/// `(v_ident, map_field_ident, key_expr)` on a hit, `None` otherwise. The
+/// callee rewrites the surrounding `if` into the contains+lookup pattern.
+fn match_if_let_some_get(cond: &Expr) -> Option<(syn::Ident, syn::Ident, &Expr)> {
+    let Expr::Let(syn::ExprLet { pat, expr, .. }) = cond else {
+        return None;
+    };
+    // Match `Some(<ident>)` pattern.
+    let Pat::TupleStruct(pat_ts) = &**pat else {
+        return None;
+    };
+    if pat_ts.path.segments.last()?.ident != "Some" {
+        return None;
+    }
+    if pat_ts.elems.len() != 1 {
+        return None;
+    }
+    let Pat::Ident(var_pat) = pat_ts.elems.first()? else {
+        return None;
+    };
+    let var_name = var_pat.ident.clone();
+
+    // Match scrutinee: `self.<field>.get(<key>)`.
+    let Expr::MethodCall(ExprMethodCall {
+        receiver,
+        method,
+        args,
+        ..
+    }) = &**expr
+    else {
+        return None;
+    };
+    if method != "get" || args.len() != 1 {
+        return None;
+    }
+    let Expr::Field(ExprField { base, member, .. }) = &**receiver else {
+        return None;
+    };
+    if !is_self_expr(base) {
+        return None;
+    }
+    let syn::Member::Named(field_name) = member else {
+        return None;
+    };
+
+    Some((var_name, field_name.clone(), args.first()?))
 }

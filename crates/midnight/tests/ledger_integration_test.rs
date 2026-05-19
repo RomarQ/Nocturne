@@ -2181,3 +2181,402 @@ async fn conditional_map_contains_inactive_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for conditional Map::contains (inactive)");
 }
+
+#[midnight::contract]
+mod safe_lookup {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct SafeLookupState {
+        pub records: Map<Uint<64>, Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct SafeLookupWitnesses {
+        pub user_id: Uint<64>,
+    }
+
+    impl SafeLookupState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+            }
+        }
+
+        // The canonical `Map::get` expansion: contains-then-lookup. Lookup
+        // is gated by the contains result so a missing key never trips the
+        // `Popeq.as_cell()` panic on `StateValue::Null`. This is the IR
+        // shape that any `Option<V>`-returning `Map::get` sugar will compile
+        // to. Tests both branches (present + absent).
+        #[midnight(circuit)]
+        pub fn safe_get(&self, witnesses: &SafeLookupWitnesses) {
+            if self.records.contains(&witnesses.user_id) {
+                let _v = self.records.lookup(&witnesses.user_id);
+            }
+        }
+    }
+}
+
+fn build_safe_get_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod safe_lookup {
+            #[midnight(ledger)]
+            pub struct SafeLookupState { records: Map<Uint<64>, Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct SafeLookupWitnesses { pub user_id: Uint<64> }
+            impl SafeLookupState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn safe_get(&self, witnesses: &SafeLookupWitnesses) {
+                    if self.records.contains(&witnesses.user_id) {
+                        let _v = self.records.lookup(&witnesses.user_id);
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "safe_get")
+        .unwrap()
+        .ir_source
+}
+
+/// The canonical `Map::get` expansion shape: contains-then-lookup. With
+/// the key present in the state, the contains branch is active, the
+/// lookup's Popeq value is the stored V, and the proof verifies on-chain.
+#[tokio::test]
+async fn safe_get_present_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_safe_get_ir();
+    let mut state = safe_lookup::SafeLookupState::new();
+    state
+        .records
+        .insert(Uint::<64>::from(7u64), Uint::<64>::from(42u64));
+    let witnesses = safe_lookup::SafeLookupWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        safe_lookup::transcript::build_safe_get_transcript(&state, &witnesses);
+
+    // user_id is accessed by both `contains` (in the condition) and
+    // `lookup` (inside the branch). The IR caches the WitnessAccess after
+    // its first emission (the contains call) — so there's only one
+    // PrivateInput for user_id total. Active branch consumes it.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "safe_get",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for safe-get (key present)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for safe-get (key present)");
+}
+
+/// Safe-get with the key absent: contains returns false, the conditional
+/// lookup branch is inactive, and the inactive-branch Popeq's PublicInput
+/// does not consume from public_transcript_outputs (guard=0). Proof
+/// constructs and verifies through the canonical ledger path.
+#[tokio::test]
+async fn safe_get_absent_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_safe_get_ir();
+    let state = safe_lookup::SafeLookupState::new(); // empty
+    let witnesses = safe_lookup::SafeLookupWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        safe_lookup::transcript::build_safe_get_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "safe_get",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for safe-get (key absent)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for safe-get (key absent)");
+}
+
+#[midnight::contract]
+mod map_get_sugar {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct MapGetSugarState {
+        pub records: Map<Uint<64>, Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MapGetSugarWitnesses {
+        pub user_id: Uint<64>,
+    }
+
+    impl MapGetSugarState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+            }
+        }
+
+        // Idiomatic Rust `if let Some(v) = map.get(&k)`. The parser rewrites
+        // this to the contains+lookup pattern at the IR level. The user's
+        // source still type-checks against `Map::get -> Option<V>` because
+        // the storage layer keeps the HashMap-style API.
+        #[midnight(circuit)]
+        pub fn read_if_present(&self, witnesses: &MapGetSugarWitnesses) {
+            if let Some(_v) = self.records.get(&witnesses.user_id) {
+                let _hold = _v;
+            }
+        }
+    }
+}
+
+fn build_read_if_present_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod map_get_sugar {
+            #[midnight(ledger)]
+            pub struct MapGetSugarState { records: Map<Uint<64>, Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct MapGetSugarWitnesses { pub user_id: Uint<64> }
+            impl MapGetSugarState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn read_if_present(&self, witnesses: &MapGetSugarWitnesses) {
+                    if let Some(_v) = self.records.get(&witnesses.user_id) {
+                        let _hold = _v;
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "read_if_present")
+        .unwrap()
+        .ir_source
+}
+
+/// `Map::get -> Option<V>` syntactic sugar. The user writes
+/// `if let Some(v) = self.map.get(&k) { use v }`; the parser rewrites it
+/// to `if self.map.contains(&k) { let v = self.map.lookup(&k); use v }`,
+/// which is the canonical on-chain shape (contains + conditional lookup).
+/// Key present → both contains and lookup fire on the active path.
+#[tokio::test]
+async fn map_get_sugar_present_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_if_present_ir();
+    let mut state = map_get_sugar::MapGetSugarState::new();
+    state
+        .records
+        .insert(Uint::<64>::from(7u64), Uint::<64>::from(42u64));
+    let witnesses = map_get_sugar::MapGetSugarWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        map_get_sugar::transcript::build_read_if_present_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "read_if_present",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for `if let Some(v) = map.get(&k)` (present)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for `if let Some(v) = map.get(&k)` (present)");
+}
+
+/// `Map::get` sugar, key absent: contains returns false, the conditional
+/// lookup branch is inactive, no PrivateInput/PublicInput consumption.
+#[tokio::test]
+async fn map_get_sugar_absent_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_read_if_present_ir();
+    let state = map_get_sugar::MapGetSugarState::new(); // empty
+    let witnesses = map_get_sugar::MapGetSugarWitnesses {
+        user_id: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        map_get_sugar::transcript::build_read_if_present_transcript(&state, &witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage(
+        "read_if_present",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match on-chain ledger-shape PIs for `if let Some(v) = map.get(&k)` (absent)"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for `if let Some(v) = map.get(&k)` (absent)");
+}

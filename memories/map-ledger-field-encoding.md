@@ -91,9 +91,10 @@ Beyond per-operation emission, Map needs:
 `Map::get(&k) -> Option<V>` (Rust HashMap idiom) is not on-chain
 representable as a single VM op — `Popeq.as_cell()` rejects
 `StateValue::Null`, so a missing key fails the proof rather than
-returning `None`. True Option-returning semantics would need a
-higher-level IR expansion (`contains` + conditional `lookup`), which is
-deferred to future work.
+returning `None`. Option-returning semantics is provided as **parser
+sugar**: `if let Some(v) = self.map.get(&k) { body }` rewrites to
+`if self.map.contains(&k) { let v = self.map.lookup(&k); body }`. See
+[[map-get-sugar]].
 
 ### Stage 1 status
 
