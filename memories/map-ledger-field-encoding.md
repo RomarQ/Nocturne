@@ -193,14 +193,46 @@ one step (vs. insert which needs Push(value) + first Ins). The trailing
 
 E2E test: `ledger_integration_test::map_remove_proves_and_verifies`.
 
+### Multi-Fr K/V status (Bytes<N> in Map<K, V>)
+
+All four Map primitives (`contains`/`lookup`/`insert`/`remove`) now
+support multi-Fr keys and values end-to-end, matching compactc's
+reference `Map<Bytes<32>, Uint<64>>` example. The wiring:
+
+- IR (`zkir_emitter.rs::emit_map_method`) computes each method's K/V
+  encoding via `aligned_value_encoding`, then collects the contiguous
+  `value_field_count` PrivateInputs into `key_vars`/`val_vars` slices
+  via `gather_n_vars`. Relies on the multi-Fr WitnessAccess invariant
+  that PrivateInputs are emitted contiguously and uninterrupted.
+- `emit_map_member`/`emit_map_insert`/`emit_map_remove` use
+  `emit_push_cell(value_vars: &[Index], ...)` (already multi-Fr-aware
+  from Cell::set Phase B), so the Push declares one `DeclarePubInput`
+  per Fr the key/value occupies.
+- `emit_map_lookup` iterates `key_vars` directly into its second `Idx`
+  (no Cell discriminant on the path entry, just
+  `[seg_count, ..atoms, ..value_frs]`). The Popeq result now uses
+  `read_result_fr_layout` per-chunk handling for multi-Fr V (same
+  pattern as `emit_ledger_read` for Cell<Bytes<N>>::get).
+- Transcript codegen (`transcript_codegen.rs`) now uses
+  `aligned_value_arg_expr(expr, k_ty)` for keys across `contains`,
+  `insert`, `lookup`, `remove`. For Bytes<N> keys this expands to
+  `*<raw>.as_bytes()`; primitives still get `as u<N>` casts.
+- `unwrap_to_aligned_primitive` extended with a `Bytes<N>` arm
+  (`*(expr).as_bytes()`) so `Map::lookup`'s Popeq result computation
+  unwraps the wrapper for `AlignedValue::from`.
+- E2E tests in `ledger_integration_test.rs` for `Map<Bytes<32>,
+  Uint<64>>::{insert, contains, lookup, remove}` proves+verifies all
+  four through `ContractCallExt::construct_proof`.
+
 ### Stages remaining
 
 All four primitives Compact exposes for Map (`member`/`lookup`/`insert`/
-`remove`) are now on-chain compatible end-to-end in Nocturne. The Rust
+`remove`) are now on-chain compatible end-to-end in Nocturne, with both
+single-Fr K/V and multi-Fr `Bytes<N>` K/V supported. The Rust
 HashMap-style `Map::get → Option<V>` is still missing — see the note
 above the staging table. The next Map-related work is therefore either
 that Option<V> expansion or moving on to other ledger primitives
-(Bytes<N> as Map keys/values, Set/MerkleTree).
+(Set/MerkleTree, Field cells, custom ADT alignment).
 
 ## References
 

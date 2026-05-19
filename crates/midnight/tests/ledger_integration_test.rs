@@ -209,6 +209,52 @@ mod records {
 }
 
 #[midnight::contract]
+mod byte_records {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct ByteRecordsState {
+        pub records: Map<Bytes<32>, Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct ByteRecordsWitnesses {
+        pub digest: Bytes<32>,
+        pub amount: Uint<64>,
+    }
+
+    impl ByteRecordsState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                records: Map::empty(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn record(&mut self, witnesses: &ByteRecordsWitnesses) {
+            self.records
+                .insert(witnesses.digest.clone(), witnesses.amount);
+        }
+
+        #[midnight(circuit)]
+        pub fn check_member(&self, witnesses: &ByteRecordsWitnesses) {
+            let _exists = self.records.contains(&witnesses.digest);
+        }
+
+        #[midnight(circuit)]
+        pub fn fetch(&self, witnesses: &ByteRecordsWitnesses) {
+            let _v = self.records.lookup(&witnesses.digest);
+        }
+
+        #[midnight(circuit)]
+        pub fn erase(&mut self, witnesses: &ByteRecordsWitnesses) {
+            self.records.remove(&witnesses.digest);
+        }
+    }
+}
+
+#[midnight::contract]
 mod membership {
     use super::*;
 
@@ -482,6 +528,46 @@ fn build_erase_ir() -> midnight_zkir::IrSource {
 
 fn build_fetch_ir() -> midnight_zkir::IrSource {
     build_records_circuit_ir("fetch")
+}
+
+fn build_byte_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod byte_records {
+            #[midnight(ledger)]
+            pub struct ByteRecordsState { records: Map<Bytes<32>, Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct ByteRecordsWitnesses { pub digest: Bytes<32>, pub amount: Uint<64> }
+            impl ByteRecordsState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { records: Map::empty() } }
+                #[midnight(circuit)]
+                pub fn record(&mut self, witnesses: &ByteRecordsWitnesses) {
+                    self.records.insert(witnesses.digest.clone(), witnesses.amount);
+                }
+                #[midnight(circuit)]
+                pub fn check_member(&self, witnesses: &ByteRecordsWitnesses) {
+                    let _exists = self.records.contains(&witnesses.digest);
+                }
+                #[midnight(circuit)]
+                pub fn fetch(&self, witnesses: &ByteRecordsWitnesses) {
+                    let _v = self.records.lookup(&witnesses.digest);
+                }
+                #[midnight(circuit)]
+                pub fn erase(&mut self, witnesses: &ByteRecordsWitnesses) {
+                    self.records.remove(&witnesses.digest);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == circuit_name)
+        .unwrap()
+        .ir_source
 }
 
 fn build_check_member_ir() -> midnight_zkir::IrSource {
@@ -1232,4 +1318,199 @@ async fn cell_bytes32_get_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell<Bytes<32>>::get");
+}
+
+/// Confirms `Map<Bytes<32>, Uint<64>>::insert(k, v)` produces an on-chain
+/// compatible transcript with a *multi-Fr key*: the key Push declares 2 Fr
+/// chunks per the Bytes<32> alignment, and the value Push declares 1 Fr
+/// per Uint<64>. Matches compactc 0.30.0's reference Map<Bytes<32>,
+/// Uint<64>> example. This is the multi-Fr K end-to-end test.
+#[tokio::test]
+async fn map_bytes_insert_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_byte_records_circuit_ir("record");
+    let witnesses = byte_records::ByteRecordsWitnesses {
+        digest: Bytes::<32>::from([0x5Au8; 32]),
+        amount: Uint::<64>::from(99u64),
+    };
+    let nocturne_transcript = byte_records::transcript::build_record_transcript(&witnesses);
+
+    // Witnesses in IR-emission order: digest (2 Frs), then amount (1 Fr).
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> = vec![
+        midnight::runtime::base_crypto::fab::AlignedValue::from([0x5Au8; 32]),
+        midnight::runtime::base_crypto::fab::AlignedValue::from(99u64),
+    ];
+    let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Map<Bytes<32>, Uint<64>>::insert"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Bytes<32>, Uint<64>>::insert");
+}
+
+/// Confirms `Map<Bytes<32>, Uint<64>>::contains(&k)` produces an on-chain
+/// compatible transcript with a multi-Fr key: Push declares 2 Fr chunks for
+/// the Bytes<32> key. Map is empty, so the Member result is false.
+#[tokio::test]
+async fn map_bytes_contains_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_byte_records_circuit_ir("check_member");
+    let state = byte_records::ByteRecordsState::new();
+    let witnesses = byte_records::ByteRecordsWitnesses {
+        digest: Bytes::<32>::from([0x33u8; 32]),
+        amount: Uint::<64>::from(0u64),
+    };
+    let nocturne_transcript =
+        byte_records::transcript::build_check_member_transcript(&state, &witnesses);
+
+    // Only the `digest` witness is referenced by check_member, so the
+    // private transcript contains exactly its 2 Frs.
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            [0x33u8; 32],
+        )];
+    let preimage = canonical_preimage(
+        "check_member",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Map<Bytes<32>, _>::contains"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Bytes<32>, _>::contains");
+}
+
+/// Confirms `Map<Bytes<32>, Uint<64>>::lookup(&k) -> V` produces an
+/// on-chain compatible transcript with a multi-Fr key in the Idx path.
+/// State is pre-populated, so lookup returns the stored value.
+#[tokio::test]
+async fn map_bytes_lookup_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_byte_records_circuit_ir("fetch");
+    let mut state = byte_records::ByteRecordsState::new();
+    let key = Bytes::<32>::from([0x7Eu8; 32]);
+    state.records.insert(key.clone(), Uint::<64>::from(1234u64));
+
+    let witnesses = byte_records::ByteRecordsWitnesses {
+        digest: key,
+        amount: Uint::<64>::from(0u64),
+    };
+    let nocturne_transcript = byte_records::transcript::build_fetch_transcript(&state, &witnesses);
+
+    // Only `digest` is accessed by `fetch`.
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            [0x7Eu8; 32],
+        )];
+    let preimage = canonical_preimage("fetch", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Map<Bytes<32>, _>::lookup"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Bytes<32>, _>::lookup");
+}
+
+/// Confirms `Map<Bytes<32>, Uint<64>>::remove(&k)` produces an on-chain
+/// compatible transcript with a multi-Fr key in the Push path.
+#[tokio::test]
+async fn map_bytes_remove_proves_and_verifies() {
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_byte_records_circuit_ir("erase");
+    let witnesses = byte_records::ByteRecordsWitnesses {
+        digest: Bytes::<32>::from([0xC3u8; 32]),
+        amount: Uint::<64>::from(0u64),
+    };
+    let nocturne_transcript = byte_records::transcript::build_erase_transcript(&witnesses);
+
+    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
+        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+            [0xC3u8; 32],
+        )];
+    let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for Map<Bytes<32>, _>::remove"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Map<Bytes<32>, _>::remove");
 }

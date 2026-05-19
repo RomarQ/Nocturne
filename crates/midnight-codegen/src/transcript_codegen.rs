@@ -300,20 +300,15 @@ fn generate_op_stmt(
                         .first()
                         .map(arg_to_runtime_raw_expr)
                         .unwrap_or_else(|| quote! { () });
-                    let key_for_align = args
-                        .first()
-                        .map(arg_to_runtime_expr)
-                        .unwrap_or_else(|| quote! { () });
-                    // The key cast must match what the IR alignment table
-                    // expects for `K` (e.g. Uint<64> → Bytes{8}, not Bytes{16}
-                    // that AlignedValue::from(u128) would emit). Extract K
-                    // from Map<K, V> and apply the right primitive cast.
+                    // The key expression must match the IR's alignment for K.
+                    // For Bytes<N> this is `*<raw>.as_bytes()`; for primitives
+                    // it's `<value> as u<N>` so Uint<64> emits Bytes{8} (not
+                    // the Bytes{16} that AlignedValue::from(u128) produces).
                     let k_ty = field_ty.and_then(extract_map_key_type);
-                    let key_cast = k_ty
-                        .as_ref()
-                        .and_then(primitive_cast_for_type)
-                        .map(|cast| quote! { (#key_for_align) #cast })
-                        .unwrap_or_else(|| quote! { #key_for_align });
+                    let key_aligned = args
+                        .first()
+                        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+                        .unwrap_or_else(|| quote! { () });
                     quote! {
                         {
                             let __key = #raw_key;
@@ -325,7 +320,7 @@ fn generate_op_stmt(
                             });
                             ops.push(Op::Push {
                                 storage: false,
-                                value: StateValue::Cell(Sp::new(AlignedValue::from(#key_cast))),
+                                value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
                             });
                             ops.push(Op::Member);
                             let __result: bool = state.#field_ident.contains(&__key);
@@ -598,29 +593,21 @@ fn generate_map_insert(
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
 ) -> TokenStream {
-    let key_expr = args
-        .first()
-        .map(arg_to_runtime_expr)
-        .unwrap_or_else(|| quote! { () });
-    let val_expr = args
-        .get(1)
-        .map(arg_to_runtime_expr)
-        .unwrap_or_else(|| quote! { () });
-
-    // Primitive casts for K and V so the runtime AlignedValue alignment
-    // matches the IR's `aligned_value_encoding` (Uint<64> → Bytes{8}, not
-    // the Bytes{16} that `u128` would produce).
     let kv = field_ty.and_then(extract_map_kv_types);
-    let key_cast = kv
-        .as_ref()
-        .and_then(|(k, _)| primitive_cast_for_type(k))
-        .map(|c| quote! { (#key_expr) #c })
-        .unwrap_or_else(|| quote! { #key_expr });
-    let val_cast = kv
-        .as_ref()
-        .and_then(|(_, v)| primitive_cast_for_type(v))
-        .map(|c| quote! { (#val_expr) #c })
-        .unwrap_or_else(|| quote! { #val_expr });
+    let k_ty = kv.as_ref().map(|(k, _)| k.clone());
+    let v_ty = kv.as_ref().map(|(_, v)| v.clone());
+
+    // K and V both need the Bytes-aware expression so multi-Fr types
+    // (`Bytes<N>`) build the AlignedValue from the underlying `[u8; N]`
+    // while primitives still get the right `as u<N>` cast.
+    let key_aligned = args
+        .first()
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
+    let val_aligned = args
+        .get(1)
+        .map(|a| aligned_value_arg_expr(a, v_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
 
     quote! {
         ops.push(Op::Idx {
@@ -630,11 +617,11 @@ fn generate_map_insert(
         });
         ops.push(Op::Push {
             storage: false,
-            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_cast))),
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
         ops.push(Op::Push {
             storage: true,
-            value: StateValue::Cell(Sp::new(AlignedValue::from(#val_cast))),
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#val_aligned))),
         });
         ops.push(Op::Ins { cached: false, n: 1 });
         ops.push(Op::Ins { cached: true, n: 1 });
@@ -660,20 +647,19 @@ fn generate_map_lookup(
         .first()
         .map(arg_to_runtime_raw_expr)
         .unwrap_or_else(|| quote! { () });
-    let key_expr = args
-        .first()
-        .map(arg_to_runtime_expr)
-        .unwrap_or_else(|| quote! { () });
 
     let kv = field_ty.and_then(extract_map_kv_types);
-    let key_cast = kv
-        .as_ref()
-        .and_then(|(k, _)| primitive_cast_for_type(k))
-        .map(|c| quote! { (#key_expr) #c })
-        .unwrap_or_else(|| quote! { #key_expr });
-    // For the Popeq result, the value comes back from the runtime as a V
-    // (which may be a wrapper like Boolean/Uint<N>). Unwrap to the primitive
-    // type AlignedValue::from accepts.
+    let k_ty = kv.as_ref().map(|(k, _)| k.clone());
+
+    // The second `Idx`'s key path needs the same Bytes-aware AlignedValue
+    // build as `Push` does — multi-Fr K must use `*<raw>.as_bytes()`.
+    let key_aligned = args
+        .first()
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
+
+    // Popeq result: V comes back from the runtime (a wrapper like Boolean
+    // / Uint<N> / Bytes<N>). Unwrap to the form AlignedValue::from accepts.
     let val_expr = match kv.as_ref().map(|(_, v)| v) {
         Some(v_ty) => {
             unwrap_to_aligned_primitive(quote! { state.#field_ident.lookup(&__key) }, v_ty)
@@ -693,7 +679,7 @@ fn generate_map_lookup(
             ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
-                path: vec![Key::Value(AlignedValue::from(#key_cast))].into_iter().collect(),
+                path: vec![Key::Value(AlignedValue::from(#key_aligned))].into_iter().collect(),
             });
             ops.push(Op::Popeq {
                 cached: false,
@@ -717,17 +703,11 @@ fn generate_map_remove(
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
 ) -> TokenStream {
-    let key_expr = args
-        .first()
-        .map(arg_to_runtime_expr)
-        .unwrap_or_else(|| quote! { () });
-
     let k_ty = field_ty.and_then(extract_map_key_type);
-    let key_cast = k_ty
-        .as_ref()
-        .and_then(primitive_cast_for_type)
-        .map(|c| quote! { (#key_expr) #c })
-        .unwrap_or_else(|| quote! { #key_expr });
+    let key_aligned = args
+        .first()
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref()))
+        .unwrap_or_else(|| quote! { () });
 
     quote! {
         ops.push(Op::Idx {
@@ -737,7 +717,7 @@ fn generate_map_remove(
         });
         ops.push(Op::Push {
             storage: false,
-            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_cast))),
+            value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
         ops.push(Op::Rem { cached: false });
         ops.push(Op::Ins { cached: true, n: 1 });
@@ -752,6 +732,11 @@ fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     if ty_str == "Boolean" {
         return quote! { (#expr).value() };
+    }
+    // Bytes<N>: `AlignedValue::from(_)` accepts `[u8; N]`, so unwrap the
+    // wrapper to its byte array. Mirrors the Cell::set/get side.
+    if ty_str.starts_with("Bytes<") {
+        return quote! { *(#expr).as_bytes() };
     }
     if ty_str.starts_with("Uint<")
         && let Some(c) = primitive_cast_for_type(ty)

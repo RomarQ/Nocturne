@@ -707,42 +707,32 @@ impl ZkirEmitter {
         k_ty: &syn::Type,
         v_ty: &syn::Type,
     ) -> Option<Index> {
-        // Compute the key encoding once. Map<K, V> with K that doesn't fit
-        // in a single Fr (e.g. Bytes<32>) is rejected here — see
-        // memories/map-ledger-field-encoding.md for the multi-Fr work.
         let key_enc = aligned_value_encoding(k_ty)?;
-        if key_enc.value_field_count != 1 {
-            return None;
-        }
 
         match method_name {
             "contains" => {
-                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
-                self.emit_map_member(field_idx, key_var, &key_enc)
+                let first = args.first().and_then(|a| self.emit_expr(a))?;
+                let key_vars = gather_n_vars(first, key_enc.value_field_count);
+                self.emit_map_member(field_idx, &key_vars, &key_enc)
             }
             "insert" | "set" => {
-                // Value encoding requires V to fit in a single Fr too.
                 let val_enc = aligned_value_encoding(v_ty)?;
-                if val_enc.value_field_count != 1 {
-                    return None;
-                }
-                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
-                let val_var = args.get(1).and_then(|a| self.emit_expr(a))?;
-                self.emit_map_insert(field_idx, key_var, &key_enc, val_var, &val_enc)
+                let k_first = args.first().and_then(|a| self.emit_expr(a))?;
+                let v_first = args.get(1).and_then(|a| self.emit_expr(a))?;
+                let key_vars = gather_n_vars(k_first, key_enc.value_field_count);
+                let val_vars = gather_n_vars(v_first, val_enc.value_field_count);
+                self.emit_map_insert(field_idx, &key_vars, &key_enc, &val_vars, &val_enc)
             }
             "remove" => {
-                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
-                self.emit_map_remove(field_idx, key_var, &key_enc)
+                let first = args.first().and_then(|a| self.emit_expr(a))?;
+                let key_vars = gather_n_vars(first, key_enc.value_field_count);
+                self.emit_map_remove(field_idx, &key_vars, &key_enc)
             }
             "lookup" => {
-                // Value encoding requires V to fit in a single Fr today.
-                // Multi-Fr V is tracked alongside the Bytes<N>-as-value work.
                 let val_enc = aligned_value_encoding(v_ty)?;
-                if val_enc.value_field_count != 1 {
-                    return None;
-                }
-                let key_var = args.first().and_then(|a| self.emit_expr(a))?;
-                self.emit_map_lookup(field_idx, key_var, &key_enc, &val_enc)
+                let first = args.first().and_then(|a| self.emit_expr(a))?;
+                let key_vars = gather_n_vars(first, key_enc.value_field_count);
+                self.emit_map_lookup(field_idx, &key_vars, &key_enc, v_ty, &val_enc)
             }
             // `get` returns Option<V> and would require Option alignment
             // encoding plus higher-level expansion (contains + conditional
@@ -776,9 +766,9 @@ impl ZkirEmitter {
     fn emit_map_insert(
         &mut self,
         field_idx: u8,
-        key_var: Index,
+        key_vars: &[Index],
         key_encoding: &AlignedValueEncoding,
-        val_var: Index,
+        val_vars: &[Index],
         val_encoding: &AlignedValueEncoding,
     ) -> Option<Index> {
         let g = self.guard;
@@ -793,10 +783,10 @@ impl ZkirEmitter {
         });
 
         // Push { storage: false, value: Cell(key) } — the K side.
-        self.emit_push_cell(&[key_var], Some(key_encoding), /* storage = */ false);
+        self.emit_push_cell(key_vars, Some(key_encoding), /* storage = */ false);
 
         // Push { storage: true, value: Cell(value) } — the V side.
-        self.emit_push_cell(&[val_var], Some(val_encoding), /* storage = */ true);
+        self.emit_push_cell(val_vars, Some(val_encoding), /* storage = */ true);
 
         // Ins { cached: false, n: 1 } → 0x91 — first Ins: (k, v) into Map.
         let ins1_op = self.emit_load_imm(Fr::from(0x91u64));
@@ -839,7 +829,7 @@ impl ZkirEmitter {
     fn emit_map_member(
         &mut self,
         field_idx: u8,
-        key_var: Index,
+        key_vars: &[Index],
         key_encoding: &AlignedValueEncoding,
     ) -> Option<Index> {
         let g = self.guard;
@@ -864,9 +854,8 @@ impl ZkirEmitter {
 
         // Push { storage: false, value: StateValue::Cell(AlignedValue(user_key)) }.
         // Uses emit_push_cell which handles the [opcode, Cell disc, alignment,
-        // value] structure. Only single-Fr key values are supported here
-        // today; multi-Fr keys (e.g. Bytes<32>) need extended encoding work.
-        self.emit_push_cell(&[key_var], Some(key_encoding), /* storage = */ false);
+        // value] structure — supports multi-Fr K (e.g. Bytes<32>).
+        self.emit_push_cell(key_vars, Some(key_encoding), /* storage = */ false);
 
         // Member → 0x18.
         let member_op = self.emit_load_imm(Fr::from(0x18u64));
@@ -923,8 +912,9 @@ impl ZkirEmitter {
     fn emit_map_lookup(
         &mut self,
         field_idx: u8,
-        key_var: Index,
+        key_vars: &[Index],
         key_encoding: &AlignedValueEncoding,
+        v_ty: &syn::Type,
         val_encoding: &AlignedValueEncoding,
     ) -> Option<Index> {
         let g = self.guard;
@@ -948,19 +938,21 @@ impl ZkirEmitter {
         });
 
         // Second Idx: same opcode, but with the user-typed key as path. The
-        // emit path mirrors emit_push_cell's per-type alignment but the
-        // opcode is 0x50 (Idx) instead of 0x10 (Push), and there's no
-        // Cell-discriminant byte — the path entry is just `Key::Value(av)`
-        // whose field_repr is `av.field_repr` = [seg_count, ..atoms, value].
+        // path entry is `Key::Value(av)` whose field_repr is
+        // `[seg_count, ..atoms, ..value_frs]`. For multi-Fr K (Bytes<N> with
+        // N>31), value_frs spans `key_encoding.value_field_count` Frs and
+        // matches the contiguous PrivateInputs produced for the key witness.
         let idx_op2 = self.emit_load_imm(Fr::from(0x50u64));
         self.push_declare_pub_input(idx_op2);
         for atom in &key_encoding.alignment_atoms {
             let v = self.emit_load_imm(Fr::from(*atom as u64));
             self.push_declare_pub_input(v);
         }
-        self.push_declare_pub_input(key_var);
-        // Total: opcode (1) + alignment atoms (N) + value (1)
-        let count2 = 2 + key_encoding.alignment_atoms.len();
+        for &kv in key_vars {
+            self.push_declare_pub_input(kv);
+        }
+        // Total: opcode (1) + alignment atoms (N) + value frs (M)
+        let count2 = 1 + key_encoding.alignment_atoms.len() + key_vars.len();
         self.instructions.push(Instruction::PiSkip {
             guard: Some(g),
             count: count2 as u32,
@@ -969,22 +961,35 @@ impl ZkirEmitter {
         // Popeq { cached: false, result: AlignedValue<V> } → 0x0c.
         // Compactc uses 0x0c (cached:false) for lookup specifically —
         // distinct from member's cached:true — because the actual read
-        // happens here.
-        let read_value = self.emit_instruction(Instruction::PublicInput { guard: None });
+        // happens here. For multi-Fr V (e.g. Bytes<32>), the value field is
+        // itself multi-Fr: one PublicInput + DeclarePubInput per chunk,
+        // matching `read_result_fr_layout`.
         let popeq_op = self.emit_load_imm(Fr::from(0x0cu64));
         self.push_declare_pub_input(popeq_op);
         for atom in &val_encoding.alignment_atoms {
             let v = self.emit_load_imm(Fr::from(*atom as u64));
             self.push_declare_pub_input(v);
         }
-        self.push_declare_pub_input(read_value);
-        let count3 = 2 + val_encoding.alignment_atoms.len();
+        let value_layout = read_result_fr_layout(v_ty);
+        let mut first_value: Option<Index> = None;
+        for bits in value_layout.iter().take(val_encoding.value_field_count) {
+            let pi = self.emit_instruction(Instruction::PublicInput { guard: None });
+            if first_value.is_none() {
+                first_value = Some(pi);
+            }
+            if let Some(b) = bits {
+                self.instructions
+                    .push(Instruction::ConstrainBits { var: pi, bits: *b });
+            }
+            self.push_declare_pub_input(pi);
+        }
+        let count3 = 1 + val_encoding.alignment_atoms.len() + val_encoding.value_field_count;
         self.instructions.push(Instruction::PiSkip {
             guard: Some(g),
             count: count3 as u32,
         });
 
-        Some(read_value)
+        first_value
     }
 
     /// Emit ZKIR for `Map::remove(&k)` at `field_idx`. The return value
@@ -1005,7 +1010,7 @@ impl ZkirEmitter {
     fn emit_map_remove(
         &mut self,
         field_idx: u8,
-        key_var: Index,
+        key_vars: &[Index],
         key_encoding: &AlignedValueEncoding,
     ) -> Option<Index> {
         let g = self.guard;
@@ -1019,8 +1024,8 @@ impl ZkirEmitter {
             count: 4,
         });
 
-        // Push { storage: false, value: Cell(key) }.
-        self.emit_push_cell(&[key_var], Some(key_encoding), /* storage = */ false);
+        // Push { storage: false, value: Cell(key) }. Supports multi-Fr K.
+        self.emit_push_cell(key_vars, Some(key_encoding), /* storage = */ false);
 
         // Rem { cached: false } → 0x19.
         let rem_op = self.emit_load_imm(Fr::from(0x19u64));
@@ -1382,6 +1387,14 @@ fn witness_fr_layout(ty: &syn::Type) -> Vec<Option<u32>> {
     }
     // Single-Fr fallback: delegate to emit_type_constraint via None.
     vec![None]
+}
+
+/// Build a contiguous `[first, first + n)` slice of var indices. Used by
+/// dispatch sites that know they want N Frs starting at the first var the
+/// expression emitted. Relies on the multi-Fr WitnessAccess invariant that
+/// PrivateInputs are emitted contiguously and uninterrupted.
+fn gather_n_vars(first: Index, n: usize) -> Vec<Index> {
+    (first..first + n as Index).collect()
 }
 
 /// Like `witness_fr_layout` but for Popeq read-result types. Returns

@@ -95,8 +95,28 @@ The read side now mirrors the multi-Fr Push:
 
 E2E test: `ledger_integration_test::cell_bytes32_get_proves_and_verifies`.
 
-Cell<Bytes<N>> is now fully on-chain compatible end-to-end. Map<Bytes<N>, _>
-(multi-Fr key/value through Idx + Push) is the remaining gap.
+Cell<Bytes<N>> is now fully on-chain compatible end-to-end.
+
+### Map<Bytes<N>, _> also landed (multi-Fr K through Idx + Push)
+
+All four Map primitives (`contains`, `lookup`, `insert`, `remove`) now
+support multi-Fr `Bytes<N>` keys and values:
+
+- `emit_map_method` collects `key_vars`/`val_vars` via `gather_n_vars`
+  based on each side's `value_field_count`.
+- `emit_map_member`/`emit_map_insert`/`emit_map_remove` reuse the
+  multi-Fr `emit_push_cell(value_vars: &[Index], ...)` from Cell::set.
+- `emit_map_lookup` iterates `key_vars` into its second `Idx`
+  (path entry = `[seg_count, ..atoms, ..value_frs]`) and uses
+  `read_result_fr_layout` for the multi-Fr Popeq result (same pattern
+  as Cell<Bytes<N>>::get).
+- Transcript codegen unified to use `aligned_value_arg_expr(expr, ty)`
+  for all Map K/V expressions (Bytes<N> → `*<raw>.as_bytes()`,
+  primitives → `as u<N>`). `unwrap_to_aligned_primitive` gained a
+  `Bytes<N>` arm for `Map::lookup`'s Popeq result.
+
+E2E tests: `ledger_integration_test::map_bytes_{insert,contains,
+lookup,remove}_proves_and_verifies` for `Map<Bytes<32>, Uint<64>>`.
 
 ## What still needs work
 
