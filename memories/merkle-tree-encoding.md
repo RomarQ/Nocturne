@@ -150,15 +150,26 @@ The Nocturne API would mirror these as Rust types. `MerkleTreeDigest` is just a 
 
 A reasonable phased implementation, smallest first:
 
-| Phase | Scope | Substrate needed |
-|---|---|---|
-| **A** | `Cell<Field>` — single AlignmentAtom::Field test | Field alignment encoding in `aligned_value_encoding`, `LoadImm` for negative Fr values |
-| **B** | `MerkleTree<H, T>` storage type + `MerkleTreeDigest` type | `MerkleTree<H, T>: LedgerType { requires_init = true, ... }`; constructor IR for `Array<BoundedMerkleTree, Cell<u64>>` |
-| **C** | `MerkleTree::checkRoot` end-to-end | Phase A + B; `Root` and `Eq` opcodes in zkir_emitter / transcript_codegen; e2e test with empty tree |
-| **D** | `MerkleTree::insert` end-to-end | `Dup{n:k}` for arbitrary k; `Ins{cached:true, n:2}`; `persistent_hash` with `"mdn:lh"` domain separator; multi-level Idx chains; e2e test |
-| **E** | `MerkleTreePath<H, T>` + `merkleTreePathRoot` | Pure circuit primitive; uses existing `persistent_hash` machinery; user-side witness type |
+| Phase | Scope | Substrate needed | Status |
+|---|---|---|---|
+| **A** | `Cell<Field>` — single AlignmentAtom::Field test | Field alignment encoding in `aligned_value_encoding`, `LoadImm` for negative Fr values | **landed** ([[field-alignment-encoding]]) |
+| **B** | `MerkleTree<H, T>` storage type + `MerkleTreeDigest` type | `MerkleTree<H, T>: LedgerType { requires_init = true, ... }`; off-chain root() that matches on-chain Root opcode semantics | **landed** (see below) |
+| **C** | `MerkleTree::checkRoot` end-to-end | Phase A + B; `Root` and `Eq` opcodes in zkir_emitter / transcript_codegen; e2e test with empty tree | pending |
+| **D** | `MerkleTree::insert` end-to-end | `Dup{n:k}` for arbitrary k; `Ins{cached:true, n:2}`; `persistent_hash` with `"mdn:lh"` domain separator; multi-level Idx chains; e2e test; constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` | pending |
+| **E** | `MerkleTreePath<H, T>` + `merkleTreePathRoot` | Pure circuit primitive; uses existing `persistent_hash` machinery; user-side witness type | pending |
 
 Each phase is roughly the scope of the Set or Cell::set work we've already shipped — together they're 3-5 sessions of focused work.
+
+### Phase B notes
+
+Implemented 2026-05-19:
+
+- `midnight-storage::MerkleTree<const HEIGHT: usize, T>` wraps the upstream `midnight_transient_crypto::merkle_tree::MerkleTree<()>` plus a `next_index: u64` counter, mirroring the on-chain 2-element Array shape. Insertion drives `next_index` and forwards to `try_update_hash`; `root()` lazily rehashes before reading.
+- `midnight-types::MerkleTreeDigest { field: Field }` mirrors Compact's stdlib struct. Conversion from the upstream `MerkleTreeDigest(Fr)` truncates to the low 128 bits because our `Field` is still a u128 wrapper — same accepted limitation as Phase A.
+- New `MerkleLeaf` trait (in midnight-storage) bridges `T` to `[u8]` so the upstream `leaf_hash` (with the `"mdn:lh"` domain separator) consumes it. Impls for `[u8; N]` and `Bytes<N>`. This sidesteps the orphan-rule issue with adding `BinaryHashRepr` to `Bytes<N>` directly.
+- `LedgerType::requires_init()` returns `true` for MerkleTree — first ledger primitive to do so. Constructor IR emission (the actual `Push(Array)` op sequence) is **deferred to Phase D** because today our codegen does not emit constructor IR for any ledger field. None of the e2e tests exercise the deploy path; they build state via Rust constructors and prove against circuits, so requiring constructor IR isn't blocking other phases.
+
+Five storage-layer unit tests cover empty/insert/check_root/Bytes<N> leaves/requires_init.
 
 ## Files implicated for any implementation
 

@@ -7,3 +7,5 @@ version.workspace = true
 
 [dependencies]
 midnight-types = { workspace = true }
+midnight-base-crypto = { workspace = true }
+midnight-transient-crypto = { workspace = true }
