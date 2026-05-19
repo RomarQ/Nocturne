@@ -557,6 +557,15 @@ fn generate_op_stmt(
             generate_op_stmt(inner, field_names, field_types, witness_types, user_structs, user_enums)
         }
 
+        // An expression the IR couldn't lower (e.g. a Rust pattern Nocturne
+        // doesn't model yet). Emit a `compile_error!` carrying the IR's
+        // description so the user gets a real diagnostic instead of a
+        // silently-zero side-effect.
+        ExprIR::Unsupported { description, .. } => {
+            let msg = format!("midnight-edsl: unsupported expression in circuit body: {description}");
+            quote! { compile_error!(#msg); }
+        }
+
         _ => quote! {},
     }
 }
