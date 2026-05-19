@@ -7205,3 +7205,111 @@ async fn role_gated_counter_admin_branch_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for role-gated counter (admin branch)");
 }
+
+// ---------------------------------------------------------------------------
+// `let v = witnesses.x; self.cell.set(v);` previously bound `v` to `()`
+// (the let block evaluated to unit). This test pins that the binding
+// now carries the real witness value through to the Cell::set call.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod let_witness_roundtrip {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct LetWitnessState {
+        pub stored: Cell<Bytes<32>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct LetWitnessWitnesses {
+        pub incoming: Bytes<32>,
+    }
+
+    impl LetWitnessState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Bytes::<32>::zeroed()),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn store(&mut self, witnesses: &LetWitnessWitnesses) {
+            let v = witnesses.incoming.clone();
+            self.stored.set(v);
+        }
+    }
+}
+
+fn build_let_witness_roundtrip_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod let_witness_roundtrip {
+            #[midnight(ledger)]
+            pub struct LetWitnessState { stored: Cell<Bytes<32>> }
+            #[midnight(witnesses)]
+            pub struct LetWitnessWitnesses { pub incoming: Bytes<32> }
+            impl LetWitnessState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Bytes::<32>::zeroed()) } }
+                #[midnight(circuit)]
+                pub fn store(&mut self, witnesses: &LetWitnessWitnesses) {
+                    let v = witnesses.incoming.clone();
+                    self.stored.set(v);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn let_witness_bound_value_reaches_cell_set() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_let_witness_roundtrip_ir();
+    let digest = Bytes::<32>::from_slice(b"deadbeefcafebabe0123456789abcdef");
+    let witnesses = let_witness_roundtrip::LetWitnessWitnesses {
+        incoming: digest.clone(),
+    };
+    let nocturne_transcript =
+        let_witness_roundtrip::transcript::build_store_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(*digest.as_bytes())];
+    let preimage =
+        canonical_preimage("store", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "let-bound witness must reach Cell::set with the same digest bytes the witness carries"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for let-bound witness Cell::set");
+}

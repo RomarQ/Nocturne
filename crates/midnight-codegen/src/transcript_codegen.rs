@@ -407,13 +407,35 @@ fn generate_op_stmt(
         }
 
         ExprIR::Let { name, value, .. } => {
-            // Preserve the user-side binding name verbatim so a later
-            // `ExprIR::Var { name }` reference (which lowers to the raw
-            // ident) can find this binding. A user-chosen `_v` keeps the
-            // leading underscore so the `unused_variables` lint is
-            // already satisfied for ignored bindings.
+            // The block form lets `generate_op_stmt`'s trailing
+            // expression (e.g. `merkle_tree_path_root(arg)` for that
+            // FnCall arm) flow into the binding. Plain witness reads
+            // produce `()` because `WitnessAccess` is statement-only;
+            // we patch that single case below so `let v = w.f; ...
+            // cell.set(v);` binds to the real witness value instead of
+            // unit.
             let var_name = format_ident!("{}", name.to_string());
-            let val_stmt = generate_op_stmt(value, field_names, field_types, witness_types, user_structs, user_enums);
+            let val_stmt = generate_op_stmt(
+                value,
+                field_names,
+                field_types,
+                witness_types,
+                user_structs,
+                user_enums,
+            );
+            // Pull the witness binding out separately so the block
+            // evaluates to a real value rather than `()`. Handles bare
+            // `witnesses.f` and `witnesses.f.<method>()` (most commonly
+            // `.clone()`) — both produce statement-only side effects
+            // in `generate_op_stmt` so the let block otherwise binds
+            // unit.
+            if let Some(expr) = let_binding_value_for_witness_access(value) {
+                return quote! {
+                    #val_stmt
+                    #[allow(non_snake_case, unused_variables)]
+                    let #var_name = #expr;
+                };
+            }
             quote! {
                 #[allow(non_snake_case, unused_variables)]
                 let #var_name = {
@@ -567,6 +589,45 @@ fn generate_op_stmt(
         }
 
         _ => quote! {},
+    }
+}
+
+/// If `value` is a witness read (or a method-chain rooted at one),
+/// build the Rust expression that binds the same value, so the let
+/// binding holds the witness value instead of unit. Returns `None`
+/// for any other shape — caller falls back to the historical
+/// block-wrapping path.
+fn let_binding_value_for_witness_access(value: &ExprIR) -> Option<TokenStream> {
+    match value {
+        ExprIR::WitnessAccess { field, .. } => {
+            let f = format_ident!("{}", field.to_string());
+            Some(quote! { witnesses.#f.clone() })
+        }
+        ExprIR::MethodCall { receiver, method, args, .. } => {
+            let recv = let_binding_value_for_witness_access(receiver)?;
+            let m = format_ident!("{}", method.to_string());
+            let arg_exprs: Vec<TokenStream> = args
+                .iter()
+                .map(|a| match a {
+                    ExprIR::Literal {
+                        value: midnight_ir::expr::LiteralIR::Int(n), ..
+                    } => {
+                        let n = *n as u64;
+                        quote! { #n }
+                    }
+                    ExprIR::Literal {
+                        value: midnight_ir::expr::LiteralIR::Bool(b), ..
+                    } => quote! { #b },
+                    _ => quote! { () },
+                })
+                .collect();
+            Some(quote! { (#recv).#m(#(#arg_exprs),*) })
+        }
+        ExprIR::Reference { expr, .. } => {
+            let inner = let_binding_value_for_witness_access(expr)?;
+            Some(quote! { (#inner) })
+        }
+        _ => None,
     }
 }
 
