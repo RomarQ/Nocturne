@@ -71,7 +71,7 @@ Then from the contract crate directory:
 cargo midnight build
 ```
 
-This runs `cargo build` (which fires the proc macro) and lists the artifacts the macro wrote to `target/midnight/<contract_name>/`:
+This runs `cargo build` (which fires the proc macro), lists the artifacts, and runs keygen for any circuit whose prover/verifier files are missing or older than its `.zkir`:
 
 ```
 Building contract...
@@ -80,12 +80,21 @@ Contract 'counter':
   compiler/contract-info.json
 
 Artifacts at: ./target/midnight/
+
+Generating keys for 1 circuit(s) with missing/stale prover/verifier files...
+  Compiling circuit 'increment'...
+    → target/midnight/counter/keys/increment.prover
+    → target/midnight/counter/keys/increment.verifier
+    k=5, rows=24
+    Keys written to target/midnight/counter/keys
 ```
+
+The keygen step is skipped on subsequent builds when nothing has changed — the proc macro writes ZKIR with `write_if_changed` semantics, so a contract whose source didn't change leaves its `.zkir` mtime untouched and its keys are considered up to date.
 
 If `cargo midnight build` reports "No contract artifacts found," the macro didn't fire — usually because the crate doesn't apply `#[midnight::contract]` to any module, or the build cache made the macro skip (run `cargo clean -p <crate>` to force a re-expansion).
 
 > [!NOTE]
-> `cargo midnight build` is a thin wrapper around `cargo build`. You can use plain `cargo build` if you don't want the artifact summary printed.
+> `cargo midnight build` is a thin wrapper around `cargo build` plus the conditional keygen pass. Plain `cargo build` gives you the ZKIR + `contract-info.json` only; use `cargo midnight keygen` to derive prover/verifier keys separately.
 
 ## 3. Inspect the artifacts
 
@@ -124,9 +133,9 @@ In addition, the macro injects two submodules inside the user's contract module 
 - `contract::transcript` — `build_<circuit>_transcript(witnesses?, state?)` builders that produce the on-chain transcript `Op` sequence at call time.
 - `contract::deploy::initial_state(...)` — constructs the `StateValue` tree the ledger expects at deploy, forwarding any constructor parameters.
 
-## 4. Generate keys with `cargo midnight keygen`
+## 4. Force-regenerate keys with `cargo midnight keygen`
 
-ZKIR alone isn't enough to prove or verify — you need Plonk prover and verifier keys derived from each circuit. Run keygen once per release:
+`cargo midnight build` runs keygen automatically for new or out-of-date circuits, so you usually don't need to call this directly. Use it when you want to re-keygen every circuit unconditionally — typically after the upstream universal setup parameters change, or to verify a clean build from a fresh `target/`:
 
 ```sh
 cargo midnight keygen

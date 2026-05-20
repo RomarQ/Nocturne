@@ -176,17 +176,29 @@ fn write_artifacts(
             );
         }
         let json = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
-        std::fs::write(
-            zkir_dir.join(format!("{}.zkir", circuit.circuit_name)),
-            json,
-        )?;
+        write_if_changed(&zkir_dir.join(format!("{}.zkir", circuit.circuit_name)), json.as_bytes())?;
     }
 
     // Write contract metadata.
-    std::fs::write(
-        compiler_dir.join("contract-info.json"),
-        &artifacts.contract_info_json,
+    write_if_changed(
+        &compiler_dir.join("contract-info.json"),
+        artifacts.contract_info_json.as_bytes(),
     )?;
 
     Ok(())
+}
+
+/// Write `content` to `path` only when the existing content differs.
+/// Stops the proc macro from touching `.zkir` and `contract-info.json`
+/// on every build — without this, downstream tools that key off file
+/// mtimes (e.g. `cargo midnight build`'s "is this circuit's keygen
+/// stale?" check) would re-run on every invocation even when nothing
+/// actually changed.
+fn write_if_changed(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+    if let Ok(existing) = std::fs::read(path)
+        && existing == content
+    {
+        return Ok(());
+    }
+    std::fs::write(path, content)
 }

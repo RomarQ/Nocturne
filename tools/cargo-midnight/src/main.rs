@@ -39,7 +39,10 @@ fn print_usage() {
     println!("  deploy   Deploy contract to a Midnight node");
 }
 
-/// Run `cargo build` and collect generated artifacts.
+/// Run `cargo build`, list emitted artifacts, then keygen any circuit
+/// whose `.prover`/`.verifier` are missing or older than its `.zkir`.
+/// Existing keys are left untouched — fast iteration doesn't re-pay
+/// the keygen cost on every build.
 fn cmd_build() {
     println!("Building contract...");
 
@@ -53,7 +56,6 @@ fn cmd_build() {
         std::process::exit(1);
     }
 
-    // Artifacts are written to target/midnight/ by the proc macro.
     let target_dir = find_target_dir();
     let midnight_dir = target_dir.join("midnight");
 
@@ -63,43 +65,97 @@ fn cmd_build() {
         return;
     }
 
-    // List all contract directories.
     let mut found = false;
+    let mut needs_keygen: Vec<PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&midnight_dir) {
         for entry in entries.flatten() {
-            if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                found = true;
-                let name = entry.file_name().to_string_lossy().to_string();
-                println!("Contract '{name}':");
+            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            found = true;
+            let name = entry.file_name().to_string_lossy().to_string();
+            println!("Contract '{name}':");
 
-                let zkir_dir = entry.path().join("zkir");
-                if zkir_dir.exists()
-                    && let Ok(files) = std::fs::read_dir(&zkir_dir)
-                {
-                    for f in files.flatten() {
-                        let fname = f.file_name().to_string_lossy().to_string();
-                        if fname.ends_with(".zkir") {
-                            println!("  zkir/{fname}");
-                        }
+            let zkir_dir = entry.path().join("zkir");
+            if zkir_dir.exists()
+                && let Ok(files) = std::fs::read_dir(&zkir_dir)
+            {
+                for f in files.flatten() {
+                    let fname = f.file_name().to_string_lossy().to_string();
+                    if !fname.ends_with(".zkir") {
+                        continue;
+                    }
+                    println!("  zkir/{fname}");
+                    let zkir_path = f.path();
+                    if keys_need_update(&zkir_path) {
+                        needs_keygen.push(zkir_path);
                     }
                 }
+            }
 
-                let info = entry.path().join("compiler").join("contract-info.json");
-                if info.exists() {
-                    println!("  compiler/contract-info.json");
-                }
+            let info = entry.path().join("compiler").join("contract-info.json");
+            if info.exists() {
+                println!("  compiler/contract-info.json");
             }
         }
     }
 
-    if found {
-        println!("\nArtifacts at: {}", midnight_dir.display());
-    } else {
+    if !found {
         println!("Build succeeded, but no contract artifacts found.");
+        return;
+    }
+
+    println!("\nArtifacts at: {}", midnight_dir.display());
+
+    if needs_keygen.is_empty() {
+        println!("Keys are up to date.");
+        return;
+    }
+
+    println!(
+        "\nGenerating keys for {} circuit(s) with missing/stale prover/verifier files...",
+        needs_keygen.len()
+    );
+    keygen_paths(&needs_keygen);
+}
+
+/// True if either the prover or verifier file is missing, or any of
+/// them is older than the `.zkir` source. Lets `cmd_build` skip keygen
+/// for circuits that are already up to date — a clean re-build still
+/// only pays the keygen cost for what actually changed.
+fn keys_need_update(zkir_path: &Path) -> bool {
+    let Some(zkir_dir) = zkir_path.parent() else {
+        return true;
+    };
+    let Some(contract_dir) = zkir_dir.parent() else {
+        return true;
+    };
+    let stem = match zkir_path.file_stem().map(|s| s.to_string_lossy().to_string()) {
+        Some(s) => s,
+        None => return true,
+    };
+    let keys_dir = contract_dir.join("keys");
+    let pk = keys_dir.join(format!("{stem}.prover"));
+    let vk = keys_dir.join(format!("{stem}.verifier"));
+    let zkir_mtime = std::fs::metadata(zkir_path).and_then(|m| m.modified()).ok();
+    let key_pair_mtimes = [pk.as_path(), vk.as_path()]
+        .iter()
+        .map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok())
+        .collect::<Vec<_>>();
+    if key_pair_mtimes.iter().any(|m| m.is_none()) {
+        return true; // missing file
+    }
+    match zkir_mtime {
+        Some(zm) => key_pair_mtimes
+            .iter()
+            .any(|km| km.map(|k| k < zm).unwrap_or(true)),
+        None => true, // weird case — be conservative
     }
 }
 
-/// Run `IrSource::keygen()` on each .zkir file to generate prover/verifier keys.
+/// Run `IrSource::keygen()` on every .zkir file under `target/midnight/`.
+/// Unlike `cmd_build`, this re-keygens unconditionally — useful when
+/// the universal setup params change or you want to refresh stale keys.
 fn cmd_keygen() {
     let target_dir = find_target_dir();
     let midnight_dir = target_dir.join("midnight");
@@ -122,13 +178,26 @@ fn cmd_keygen() {
         zkir_files.len()
     );
 
-    for zkir_path in &zkir_files {
-        let circuit_name = zkir_path.file_stem().unwrap().to_string_lossy().to_string();
+    keygen_paths(&zkir_files);
+}
 
+/// Per-zkir keygen loop shared between `cmd_build` and `cmd_keygen`.
+/// Each circuit's keygen is wrapped in `catch_unwind` so a single
+/// upstream panic (e.g. midnight-circuits constraint failures on a
+/// pathological zkir) doesn't abort the run — the user gets the
+/// keys that did succeed and a clear error for the ones that didn't.
+fn keygen_paths(zkir_files: &[PathBuf]) {
+    use std::panic::AssertUnwindSafe;
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    for zkir_path in zkir_files {
+        let circuit_name = zkir_path.file_stem().unwrap().to_string_lossy().to_string();
         println!("  Compiling circuit '{circuit_name}'...");
 
-        match load_and_keygen(zkir_path) {
-            Ok((k, rows)) => {
+        let result =
+            std::panic::catch_unwind(AssertUnwindSafe(|| load_and_keygen(zkir_path)));
+        match result {
+            Ok(Ok((k, rows))) => {
                 println!("    k={k}, rows={rows}");
                 let keys_dir = zkir_path
                     .parent()
@@ -137,12 +206,36 @@ fn cmd_keygen() {
                 if let Some(d) = keys_dir {
                     println!("    Keys written to {}", d.display());
                 }
+                succeeded += 1;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 eprintln!("    Failed: {e}");
+                failed += 1;
+            }
+            Err(payload) => {
+                let msg = panic_message(&payload);
+                eprintln!("    Failed: upstream panic during keygen: {msg}");
+                failed += 1;
             }
         }
     }
+    if failed > 0 {
+        println!(
+            "\nKeygen summary: {succeeded} succeeded, {failed} failed. \
+             Failed circuits won't have prover/verifier files."
+        );
+    }
+}
+
+/// Extract a readable string from a `catch_unwind` panic payload.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "<non-string panic payload>".to_string()
 }
 
 /// Run `cargo test`.
