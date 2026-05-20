@@ -88,17 +88,32 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                 // anything carrying a payload would need ADT
                 // encoding work and bumps from Bytes<1> discriminant.
                 let mut variants: Vec<UserEnumVariant> = Vec::new();
-                let mut payload_seen = false;
+                let mut payload_variant: Option<syn::Ident> = None;
                 for v in &e.variants {
                     if !matches!(v.fields, syn::Fields::Unit) {
-                        payload_seen = true;
+                        payload_variant = Some(v.ident.clone());
                         break;
                     }
                     variants.push(UserEnumVariant {
                         name: v.ident.clone(),
                     });
                 }
-                if !payload_seen && !variants.is_empty() {
+                if let Some(bad) = payload_variant {
+                    // Don't silently drop the enum from `user_enums` — the
+                    // user would then get a downstream "type not found"
+                    // diagnostic that doesn't point at the real cause.
+                    diagnostics.push(MidnightError::new(
+                        bad.span(),
+                        ErrorCode::UnsupportedExpression,
+                        format!(
+                            "enum `{}` variant `{}` carries a payload; \
+                             only unit-variant enums are supported today. \
+                             See memories/scope-blockers.md for the \
+                             encoding ADR this is waiting on.",
+                            e.ident, bad
+                        ),
+                    ));
+                } else if !variants.is_empty() {
                     user_enums.insert(e.ident.to_string(), variants);
                 }
                 other_items.push(item);
