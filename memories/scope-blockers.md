@@ -96,3 +96,20 @@ These were on prior "remaining items" lists and were resolved in-tree:
 - `as` cast as a transparent IR passthrough (commit fd0f123).
 - `midnight::disclose` runtime stub + `ExprIR::Tuple` arg lowering (commit
   b612508).
+- `Uint<N>` audit for `64 < N ≤ 128` (commit 3efaeb5). The codegen was
+  already generic; the commit added the `as u128` cast branch + a
+  pipeline test (`uint128_pipeline_proves_and_verifies`).
+- `Option<T>` as a synthetic homogeneous-payload enum-like (commit
+  3e4a086). Wire shape `(Bytes<1>, T)` matches Compact's `Maybe<T>`
+  via `impl<T: Aligned> Aligned for Option<T>`. `match` on `Some`/`None`
+  with payload binding works without a synthetic accessor. Supersedes
+  the "Maybe<T> wrapper" entry from earlier lists.
+- `[T; N]` arrays (`N ≤ 11`) (commit 6601cc8) via new `ExprIR::Index`
+  variant. Wire shape: N-tuple of T (same as Compact's `Vector<N, T>`).
+  Scoped to witness-sourced arrays today — let-bound and ledger-stored
+  arrays still need the variables-map type-carrying refactor; see
+  `memories/option-and-array-encoding.md`.
+- `if`-as-expression (commit 96bfdf9). `let x = if c { a } else { b };`
+  multiplexes branch result wires via ZKIR `cond_select` and emits a
+  Rust `if`-expression on the transcript side. Statement-only branches
+  keep the prior if-as-statement behaviour.

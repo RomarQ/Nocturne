@@ -45,6 +45,24 @@ Optional:
 - `#[midnight(query)]` methods for off-chain reads (plain Rust, never on-chain).
 - Plain `pub struct` / `pub enum` declarations are picked up as user types and can be used as `Cell<T>` values, `Map<K, V>` keys, witness fields, etc.
 
+### Supported value types
+
+The eDSL is plain Rust syntax. The following types are recognised in witness fields, ledger field payloads (`Cell<T>`, `Map<K, V>`, `Set<T>`), and circuit local bindings:
+
+| Type | Wire shape | Notes |
+|---|---|---|
+| `Boolean` | `Bytes<1>` | Conditions use `.value()` to unwrap to native `bool`. |
+| `Field` | one Fr (low 128 bits) | Field element, lossy for the full 254-bit range. |
+| `Uint<N>` for `N ≤ 128` | `Bytes<ceil(N/8)>` | Maps to `u8`/`u16`/`u32`/`u64`/`u128` for primitive casts. |
+| `Bytes<N>` for `N ≤ 32` | `Bytes<N>` | Fixed-size byte arrays. |
+| `Option<T>` | `(Bytes<1>, T)` | Same wire shape as Compact's `Maybe<T>`. `None` synthesises `T::default()` for the payload slot. |
+| `[T; N]` for `1 ≤ N ≤ 11` | N-tuple of `T` | Same wire shape as Compact's `Vector<N, T>`. Index reads (`arr[i]`) accept compile-time integer literals; use `for i in 0..N { ... arr[i] ... }` to unroll a const range to literal indices. |
+| `MerkleTreeDigest`, `MerkleTreePath<H, T>` | Field-aligned | See `memories/merkle-tree-encoding.md`. |
+| Tuples `(T1, ..., Tn)` for `n ≤ 11` | concatenated component layouts | Upstream tuple `Aligned` impl. |
+| User `struct` / homogeneous-payload `enum` | as tuple / `(Bytes<1>, T)` | See `memories/compactc-vs-nocturne-divergences.md`. |
+
+`if`-as-expression is supported: `let x = if cond { a } else { b };` multiplexes the branch result wires via ZKIR `cond_select` and emits a Rust `if`-expression on the transcript side. Either branch must yield a value (no missing `else`); rustc enforces this at the macro output.
+
 The contract crate is an ordinary Rust library — its `Cargo.toml` just depends on the `midnight` umbrella crate:
 
 ```toml

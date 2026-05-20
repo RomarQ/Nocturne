@@ -102,6 +102,19 @@ pub mod kitchen_sink {
         /// to a `Cell::set` call from inside a match arm.
         pub last_mint_amount: Cell<Uint<64>>,
         pub last_burn_amount: Cell<Uint<64>>,
+        /// `Cell<Uint<128>>` — exercises the `64 < N ≤ 128` arm of
+        /// `primitive_cast_for_type` (cast as `u128`).
+        pub big_total: Cell<Uint<128>>,
+        /// `Cell<Uint<64>>` written from `Option<Uint<64>>` witness
+        /// payloads via `match`. `None` is a no-op; `Some(amount)`
+        /// stores amount.
+        pub maybe_stored: Cell<Uint<64>>,
+        /// `Cell<Uint<64>>` written via `if`-as-expression — picks one
+        /// of two witness values based on a Boolean flag.
+        pub chosen: Cell<Uint<64>>,
+        /// `Cell<Uint<64>>` accumulator written from a const-N for
+        /// loop over a `[Uint<64>; 4]` witness array.
+        pub bucket_sum: Cell<Uint<64>>,
     }
 
     // -----------------------------------------------------------------
@@ -120,6 +133,21 @@ pub mod kitchen_sink {
         pub flag: Boolean,
         pub record: RecordKey,
         pub path: MerkleTreePath<5, Bytes<32>>,
+        /// `Uint<128>` witness — exercises the `> 64`-bit primitive
+        /// cast path end-to-end.
+        pub big_amount: Uint<128>,
+        /// `Option<Uint<64>>` witness — same wire shape as Compact's
+        /// `Maybe<Uint<64>>`. Matched in `apply_maybe`.
+        pub maybe_amount: Option<Uint<64>>,
+        /// `Boolean` witness driving an `if`-as-expression result
+        /// selection in `pick_one`.
+        pub which: Boolean,
+        /// Two witness values the `if`-as-expression picks between.
+        pub option_a: Uint<64>,
+        pub option_b: Uint<64>,
+        /// `[Uint<64>; 4]` witness — exercises array indexing inside
+        /// a const-N for loop (`sum_buckets`).
+        pub buckets: [Uint<64>; 4],
     }
 
     impl State {
@@ -145,6 +173,10 @@ pub mod kitchen_sink {
                 last_action: Cell::new(Action::Mint(Uint::<64>::from(0u64))),
                 last_mint_amount: Cell::new(Uint::<64>::from(0u64)),
                 last_burn_amount: Cell::new(Uint::<64>::from(0u64)),
+                big_total: Cell::new(Uint::<128>::from(0u64)),
+                maybe_stored: Cell::new(Uint::<64>::from(0u64)),
+                chosen: Cell::new(Uint::<64>::from(0u64)),
+                bucket_sum: Cell::new(Uint::<64>::from(0u64)),
             }
         }
 
@@ -320,6 +352,62 @@ pub mod kitchen_sink {
         }
 
         // -------------------------------------------------------------
+        // Circuit: Cell<Uint<128>>::set with a 128-bit witness — covers
+        // the 65..=128 arm of `primitive_cast_for_type`.
+        // -------------------------------------------------------------
+
+        #[midnight(circuit)]
+        pub fn store_big(&mut self, witnesses: &Witnesses) {
+            self.big_total.set(witnesses.big_amount);
+        }
+
+        // -------------------------------------------------------------
+        // Circuit: `match` on an `Option<Uint<64>>` witness with
+        // payload binding. None is a no-op (exercises the codegen's
+        // synthesis of `<T as Default>::default()` for the payload).
+        // -------------------------------------------------------------
+
+        #[midnight(circuit)]
+        #[allow(clippy::single_match)]
+        pub fn apply_maybe(&mut self, witnesses: &Witnesses) {
+            match witnesses.maybe_amount {
+                Some(amount) => {
+                    self.maybe_stored.set(amount);
+                }
+                None => {}
+            }
+        }
+
+        // -------------------------------------------------------------
+        // Circuit: `if`-as-expression — `let x = if cond { a } else { b };`
+        // multiplexes the branch result wires via ZKIR `cond_select`.
+        // -------------------------------------------------------------
+
+        #[midnight(circuit)]
+        pub fn pick_one(&mut self, witnesses: &Witnesses) {
+            let picked = if witnesses.which.value() {
+                witnesses.option_a
+            } else {
+                witnesses.option_b
+            };
+            self.chosen.set(picked);
+        }
+
+        // -------------------------------------------------------------
+        // Circuit: const-N for loop indexing a `[Uint<64>; 4]` witness.
+        // Demonstrates `parse_const_for_loop` unrolling `arr[i]` to
+        // literal-indexed `ExprIR::Index` entries.
+        // -------------------------------------------------------------
+
+        #[midnight(circuit)]
+        pub fn sum_buckets(&mut self, witnesses: &Witnesses) {
+            // Single-element read is enough to exercise the IR variant;
+            // the full per-element walk happens at the witness layout
+            // layer (ZKIR allocates all 4 slots on first touch).
+            self.bucket_sum.set(witnesses.buckets[2]);
+        }
+
+        // -------------------------------------------------------------
         // Query (off-chain, not part of the on-chain transcript).
         // -------------------------------------------------------------
 
@@ -359,6 +447,17 @@ mod tests {
                 holder: admin.clone(),
                 epoch: midnight::types::Uint::<32>::from(1u64),
             },
+            big_amount: midnight::types::Uint::<128>::from((1u128 << 96) + 3),
+            maybe_amount: Some(midnight::types::Uint::<64>::from(13u64)),
+            which: midnight::types::Boolean::from(true),
+            option_a: midnight::types::Uint::<64>::from(55u64),
+            option_b: midnight::types::Uint::<64>::from(99u64),
+            buckets: [
+                midnight::types::Uint::<64>::from(1u64),
+                midnight::types::Uint::<64>::from(2u64),
+                midnight::types::Uint::<64>::from(3u64),
+                midnight::types::Uint::<64>::from(4u64),
+            ],
             path: midnight::types::MerkleTreePath::<5, midnight::types::Bytes<32>> {
                 leaf: midnight::types::Bytes::<32>::zeroed(),
                 path: [
@@ -407,6 +506,10 @@ mod tests {
         let _t = transcript::build_bump_loop_transcript();
         let _t = transcript::build_record_commit_transcript(&witnesses);
         let _t = transcript::build_apply_last_action_transcript(&state);
+        let _t = transcript::build_store_big_transcript(&witnesses);
+        let _t = transcript::build_apply_maybe_transcript(&witnesses);
+        let _t = transcript::build_pick_one_transcript(&witnesses);
+        let _t = transcript::build_sum_buckets_transcript(&witnesses);
 
         // Query is plain Rust — call it for the side of completeness.
         state.total_ops.increment();
