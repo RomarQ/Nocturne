@@ -859,6 +859,24 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
                 _ => quote! { () },
             }
         }
+        // Inline tuple literal — reconstruct the tuple from its
+        // components. Mirrors the existing `arg_to_runtime_raw_expr`
+        // Tuple arm so a tuple in non-Bytes argument position still
+        // composes its values instead of silently collapsing to `()`.
+        ExprIR::Tuple { elements, .. } => {
+            let parts: Vec<TokenStream> = elements.iter().map(arg_to_runtime_expr).collect();
+            let trailing = if elements.len() == 1 { quote! { , } } else { quote! {} };
+            quote! { (#(#parts),* #trailing) }
+        }
+        // Unary minus / not — compose the inner expression.
+        ExprIR::UnaryOp { op, expr: inner, .. } => {
+            let i = arg_to_runtime_expr(inner);
+            match op {
+                syn::UnOp::Neg(_) => quote! { (-#i) },
+                syn::UnOp::Not(_) => quote! { (!#i) },
+                _ => quote! { () },
+            }
+        }
         // Anything else falls back to `()` and will fail to compile with a
         // clear "the trait `From<()>` is not implemented" message, which
         // points the user at an unsupported argument shape.
