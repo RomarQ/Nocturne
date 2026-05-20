@@ -988,8 +988,15 @@ fn parse_macro_expr(mac: &syn::Macro) -> MidnightResult<ExprIR> {
             kind: AssertKind::AssertEq(Box::new(parse_expr(&a)?), Box::new(parse_expr(&b)?)),
         })
     } else {
+        // Carry the macro's own span so the diagnostic points at the
+        // call site instead of `Span::call_site()`.
         Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+            span: mac
+                .path
+                .segments
+                .last()
+                .map(|s| s.ident.span())
+                .unwrap_or_else(Span::call_site),
             description: format!("unsupported macro: {path_str}"),
         })
     }

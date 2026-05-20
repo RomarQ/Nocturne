@@ -624,10 +624,6 @@ impl ZkirEmitter {
     // Transcript VM op encoding as ZKIR public inputs
     // -----------------------------------------------------------------------
 
-    // -----------------------------------------------------------------------
-    // Emit a key's AlignedValue field representation as declare_pub_input
-    // -----------------------------------------------------------------------
-
     /// Emit the field representation of a Uint<8> key (field index).
     ///
     /// AlignedValue for Bytes<1>:
@@ -647,10 +643,6 @@ impl ZkirEmitter {
         // value: [field_idx]
         self.push_declare_pub_input(key_val);
     }
-
-    // -----------------------------------------------------------------------
-    // Transcript VM op encoding as ZKIR public inputs
-    // -----------------------------------------------------------------------
 
     /// Emit ZKIR for Counter.increment(1): Idx(push_path) + Addi(1) + Ins.
     ///

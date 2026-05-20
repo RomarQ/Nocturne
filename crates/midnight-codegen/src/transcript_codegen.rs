@@ -781,21 +781,16 @@ fn let_binding_runtime_value(
         ExprIR::MethodCall { receiver, method, args, .. } => {
             let recv = let_binding_runtime_value(receiver, ctx)?;
             let m = format_ident!("{}", method.to_string());
-            let arg_exprs: Vec<TokenStream> = args
-                .iter()
-                .map(|a| match a {
-                    ExprIR::Literal {
-                        value: midnight_ir::expr::LiteralIR::Int(n), ..
-                    } => {
-                        let n = *n as u64;
-                        quote! { #n }
-                    }
-                    ExprIR::Literal {
-                        value: midnight_ir::expr::LiteralIR::Bool(b), ..
-                    } => quote! { #b },
-                    _ => quote! { () },
-                })
-                .collect();
+            // Each method-call argument needs its own runtime value; we
+            // recurse through the same `let_binding_runtime_value`
+            // dispatch so witness reads, vars, references, and the
+            // rest stay consistent with how the let binding evaluates
+            // its own RHS. Bail if any arg has no usable shape so the
+            // outer caller falls back to the block-wrapping path.
+            let mut arg_exprs: Vec<TokenStream> = Vec::with_capacity(args.len());
+            for a in args {
+                arg_exprs.push(let_binding_runtime_value(a, ctx)?);
+            }
             Some(quote! { (#recv).#m(#(#arg_exprs),*) })
         }
         ExprIR::Reference { expr, .. } => {
