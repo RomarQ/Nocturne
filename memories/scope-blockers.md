@@ -36,12 +36,18 @@ start it autonomously.
 
 **Unblocker**: explicit owner instruction.
 
-## Enum sum types with payloads (e.g. `enum Action { Mint(u64), Burn(u64) }`)
+## Enum sum types with HETEROGENEOUS payloads
 
-**Blocker**: no agreed encoding.
+**Status**: homogeneous-payload variants landed in commit 27c8228.
+`enum Action { Mint(Uint<64>), Burn(Uint<64>) }` (same `T` in every variant)
+encodes as `(Bytes<1>, T)` on-chain. The heterogeneous case below is still
+open.
 
-Compactc's approach is to NOT have true sum-of-products — it provides
-`Maybe<T>` and `Either<A, B>` as structs where all fields are always
+**Blocker**: no agreed encoding for heterogeneous variants.
+
+`enum Action { Mint(Uint<64>), Burn(Bytes<32>) }` has variants with different
+payload shapes. Compactc's approach is to NOT have true sum-of-products — it
+provides `Maybe<T>` and `Either<A, B>` as structs where all fields are always
 materialized (the tag is a boolean discriminant, the payloads coexist
 unconditionally). True payload-carrying variants would need either that same
 all-fields-always-allocated layout (which wastes wire space for unused
@@ -54,6 +60,10 @@ decision, not a session-time call.
 
 **Unblocker**: a written ADR picking the encoding (compactc-style
 all-fields-always vs. tagged-union) so the codegen has a target to hit.
+
+**Also deferred**: match-on-payload binding (`match a { Action::Mint(x) => f(x) }`).
+Users access the payload via the generated `.payload()` accessor today;
+match-binding needs a new `ExprIR` shape and a parse_match enhancement.
 
 ## Cross-contract calls
 
