@@ -213,7 +213,7 @@ fn keygen_paths(zkir_files: &[PathBuf]) {
                 failed += 1;
             }
             Err(payload) => {
-                let msg = panic_message(&payload);
+                let msg = panic_message(&*payload);
                 eprintln!("    Failed: upstream panic during keygen: {msg}");
                 failed += 1;
             }
@@ -228,7 +228,7 @@ fn keygen_paths(zkir_files: &[PathBuf]) {
 }
 
 /// Extract a readable string from a `catch_unwind` panic payload.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         return (*s).to_string();
     }
@@ -315,18 +315,3 @@ fn find_zkir_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-#[allow(dead_code)]
-fn copy_dir_recursive(src: &Path, dest: &Path) {
-    std::fs::create_dir_all(dest).ok();
-    if let Ok(entries) = std::fs::read_dir(src) {
-        for entry in entries.flatten() {
-            let src_path = entry.path();
-            let dest_path = dest.join(entry.file_name());
-            if src_path.is_dir() {
-                copy_dir_recursive(&src_path, &dest_path);
-            } else {
-                std::fs::copy(&src_path, &dest_path).ok();
-            }
-        }
-    }
-}

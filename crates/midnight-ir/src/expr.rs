@@ -6,7 +6,7 @@ use syn::{BinOp, Lit, UnOp};
 /// This is the key divergence from ink!: we must deeply analyze function
 /// bodies to emit ZKIR instructions and VM bytecode. ink! passes bodies
 /// through verbatim to the Wasm compiler.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ExprIR {
     /// Access a ledger field's method: `self.field.method(args)`.
     LedgerAccess {
@@ -126,7 +126,7 @@ pub enum ExprIR {
 }
 
 /// Classification of assert expressions.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AssertKind {
     /// `assert!(cond)`
     Assert(Box<ExprIR>),

@@ -406,7 +406,11 @@ fn parse_fn_params(sig: &syn::Signature) -> MidnightResult<Vec<ParamIR>> {
         {
             let name = &pat_ident.ident;
             // Skip witness parameters (detected by type containing "Witnesses").
-            let ty_str = quote::quote!(#pat_type.ty).to_string();
+            // `quote!(#pat_type.ty)` renders the whole `PatType` followed by
+            // a literal `. ty` token sequence — not the type. Reach into the
+            // parsed field instead.
+            let ty = &*pat_type.ty;
+            let ty_str = quote::quote!(#ty).to_string();
             if ty_str.contains("Witnesses") {
                 continue;
             }
@@ -438,7 +442,11 @@ fn parse_circuit_params(
                 if let Pat::Ident(pat_ident) = &*pat_type.pat {
                     let name = &pat_ident.ident;
                     let name_str = name.to_string();
-                    let ty_str = quote::quote!(#pat_type.ty).to_string();
+                    // `quote!(#pat_type.ty)` renders the whole `PatType` followed by
+            // a literal `. ty` token sequence — not the type. Reach into the
+            // parsed field instead.
+            let ty = &*pat_type.ty;
+            let ty_str = quote::quote!(#ty).to_string();
 
                     // Detect witness parameter by:
                     // 1. Parameter name is "witnesses" or ends with "_witnesses"
@@ -1108,7 +1116,7 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
                 name: binding.clone(),
                 value: Box::new(ExprIR::EnumPayload {
                     span: Span::call_site(),
-                    scrutinee: Box::new(clone_expr_ir(&scrutinee)),
+                    scrutinee: Box::new(scrutinee.clone()),
                     enum_name,
                 }),
             });
@@ -1117,7 +1125,7 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
         let cond = ExprIR::BinaryOp {
             span: Span::call_site(),
             op: syn::BinOp::Eq(syn::token::EqEq(Span::call_site())),
-            lhs: Box::new(clone_expr_ir(&scrutinee)),
+            lhs: Box::new(scrutinee.clone()),
             rhs: Box::new(ExprIR::Path {
                 span: Span::call_site(),
                 path: (*path).clone(),
@@ -1135,56 +1143,6 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
     Ok(else_branch.and_then(|mut v| v.pop()))
 }
 
-/// Deep-clone an `ExprIR`. We avoid implementing `Clone` on the enum so
-/// the codegen layer can keep pattern-matching against `&ExprIR` without
-/// worrying about accidental copies; the cloning is only needed here to
-/// reuse the scrutinee across multiple comparison arms.
-fn clone_expr_ir(expr: &ExprIR) -> ExprIR {
-    match expr {
-        ExprIR::Var { span, name } => ExprIR::Var { span: *span, name: name.clone() },
-        ExprIR::Path { span, path } => ExprIR::Path { span: *span, path: path.clone() },
-        ExprIR::WitnessAccess { span, field } => ExprIR::WitnessAccess {
-            span: *span,
-            field: field.clone(),
-        },
-        ExprIR::LedgerAccess {
-            span,
-            field,
-            method,
-            args,
-        } => ExprIR::LedgerAccess {
-            span: *span,
-            field: field.clone(),
-            method: method.clone(),
-            args: args.iter().map(clone_expr_ir).collect(),
-        },
-        ExprIR::Literal { span, value } => ExprIR::Literal {
-            span: *span,
-            value: value.clone(),
-        },
-        ExprIR::MethodCall {
-            span,
-            receiver,
-            method,
-            args,
-        } => ExprIR::MethodCall {
-            span: *span,
-            receiver: Box::new(clone_expr_ir(receiver)),
-            method: method.clone(),
-            args: args.iter().map(clone_expr_ir).collect(),
-        },
-        ExprIR::Reference { span, expr } => ExprIR::Reference {
-            span: *span,
-            expr: Box::new(clone_expr_ir(expr)),
-        },
-        // Other variants aren't expected as match scrutinees; render as
-        // Unsupported so misuse surfaces clearly at the next step.
-        other => ExprIR::Unsupported {
-            span: Span::call_site(),
-            description: format!("cannot clone {other:?} as match scrutinee"),
-        },
-    }
-}
 
 /// Parse a match arm's body, which is either a block or a bare expression.
 fn parse_arm_body(body: &Expr) -> MidnightResult<Vec<ExprIR>> {

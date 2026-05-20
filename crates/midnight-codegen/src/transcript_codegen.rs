@@ -12,6 +12,18 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::HashMap;
 
+/// Cross-cutting state every transcript-codegen helper threads through.
+/// Bundling these into one borrow lets helpers stay readable instead of
+/// growing 5–8 parameter lists, and matches the shape of the per-contract
+/// information the proc macro already collects once at the top.
+struct TranscriptCtx<'a> {
+    field_names: &'a [String],
+    field_types: &'a [syn::Type],
+    witness_types: &'a HashMap<String, syn::Type>,
+    user_structs: &'a HashMap<String, Vec<UserStructField>>,
+    user_enums: &'a HashMap<String, Vec<UserEnumVariant>>,
+}
+
 /// Generate the transcript builder module for a contract.
 pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
     let field_names: Vec<String> = contract
@@ -36,21 +48,18 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
         .map(witness_type_map)
         .unwrap_or_default();
 
+    let ctx = TranscriptCtx {
+        field_names: &field_names,
+        field_types: &field_types,
+        witness_types: &witness_types,
+        user_structs: &contract.user_structs,
+        user_enums: &contract.user_enums,
+    };
+
     let circuit_fns: Vec<TokenStream> = contract
         .circuits
         .iter()
-        .map(|circuit| {
-            generate_circuit_transcript_fn(
-                circuit,
-                &field_names,
-                &field_types,
-                witnesses_name,
-                ledger_name,
-                &witness_types,
-                &contract.user_structs,
-                &contract.user_enums,
-            )
-        })
+        .map(|circuit| generate_circuit_transcript_fn(circuit, witnesses_name, ledger_name, &ctx))
         .collect();
 
     quote! {
@@ -90,12 +99,9 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
 /// minimal signature for backwards compatibility with existing call sites.
 fn generate_circuit_transcript_fn(
     circuit: &CircuitIR,
-    field_names: &[String],
-    field_types: &[syn::Type],
     witnesses_name: Option<&syn::Ident>,
     ledger_name: &syn::Ident,
-    witness_types: &HashMap<String, syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+    ctx: &TranscriptCtx<'_>,
 ) -> TokenStream {
     let fn_name = format_ident!("build_{}_transcript", circuit.name);
     let doc = format!("Build the transcript for the `{}` circuit.", circuit.name);
@@ -103,7 +109,7 @@ fn generate_circuit_transcript_fn(
     let body_stmts: Vec<TokenStream> = circuit
         .body
         .iter()
-        .map(|expr| generate_op_stmt(expr, field_names, field_types, witness_types, user_structs, user_enums))
+        .map(|expr| generate_op_stmt(expr, ctx))
         .collect();
 
     let needs_state = circuit_needs_state(&circuit.body);
@@ -206,13 +212,11 @@ fn expr_needs_state(expr: &ExprIR) -> bool {
 }
 
 /// Generate Rust statements that push VM Ops.
-fn generate_op_stmt(
-    expr: &ExprIR,
-    field_names: &[String],
-    field_types: &[syn::Type],
-    witness_types: &HashMap<String, syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
+    let field_names = ctx.field_names;
+    let field_types = ctx.field_types;
+    let witness_types = ctx.witness_types;
+    let user_structs = ctx.user_structs;
     match expr {
         ExprIR::LedgerAccess {
             field,
@@ -273,10 +277,21 @@ fn generate_op_stmt(
                             quote! { state.#field_ident.get() },
                             extract_cell_inner_type(t),
                         ),
-                        // Unknown field type — best-effort placeholder. Will
-                        // not match on-chain encoding; user-visible if it ever
-                        // surfaces because the verifier will reject the proof.
-                        _ => (quote! { 0u8 }, None),
+                        // Unknown field type — emit a compile_error so the
+                        // user sees the source of the mismatch instead of
+                        // an on-chain verifier rejection. The previous
+                        // `0u8` placeholder produced a passing build whose
+                        // Popeq result didn't match the live state.
+                        _ => {
+                            let kind = field_ty
+                                .map(|t| quote!(#t).to_string())
+                                .unwrap_or_else(|| "<missing>".to_string());
+                            let msg = format!(
+                                "midnight-edsl: ledger read on field `{}` (type `{}`) — only Counter and Cell<T> are supported",
+                                field_name, kind,
+                            );
+                            return quote! { compile_error!(#msg); };
+                        }
                     };
                     // Choose the AlignedValue construction expression based
                     // on whether T is a multi-Fr `Bytes<N>` or a single-Fr
@@ -303,15 +318,13 @@ fn generate_op_stmt(
                         // payload enums. The payload is extracted with an
                         // inline match — same shape used in the deploy
                         // codegen and the set/AlignedValue paths.
-                        Some(t) if is_user_enum(t, user_enums) => {
-                            match user_enum_payload_type(t, user_enums) {
+                        Some(t) if is_user_enum(t, ctx.user_enums) => {
+                            match user_enum_payload_type(t, ctx.user_enums) {
                                 None => quote! { (#accessor).discriminant() },
                                 Some(p) => {
                                     let payload_match = enum_payload_match_expr(
                                         &quote! { __e.clone() },
-                                        t,
-                                        user_enums,
-                                    )
+                                        t, ctx)
                                     .unwrap_or_else(|| quote! { unreachable!() });
                                     let payload_repr = tuple_component_aligned_repr(
                                         &p,
@@ -355,7 +368,7 @@ fn generate_op_stmt(
                     // (via `generate_runtime_cond`), the bool drives branching.
                     // Works for both Map and Set fields (same Member opcode,
                     // K type resolved via extract_field_key_type).
-                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs, user_enums);
+                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty, ctx);
                     quote! { let _ = #block; }
                 }
                 "insert" => {
@@ -363,38 +376,50 @@ fn generate_op_stmt(
                     // Set → Set::insert (k, Null), MerkleTree → 10-op
                     // append-and-rehash sequence, Cell → Cell::set (v).
                     if field_ty.and_then(extract_map_kv_types).is_some() {
-                        generate_map_insert(field_idx, args, field_ty, user_structs, user_enums)
+                        generate_map_insert(field_idx, args, field_ty, ctx)
                     } else if field_ty.and_then(extract_set_inner_type).is_some() {
-                        generate_set_insert(field_idx, args, field_ty, user_structs, user_enums)
+                        generate_set_insert(field_idx, args, field_ty, ctx)
                     } else if field_ty.and_then(extract_merkle_tree_type).is_some() {
                         generate_merkle_tree_insert(field_idx, args)
                     } else {
-                        generate_cell_set(field_idx, args, field_ty, user_structs, user_enums)
+                        generate_cell_set(field_idx, args, field_ty, ctx)
                     }
                 }
                 "set" => {
                     // `set` is also used as an alias for Map::insert. Route
                     // based on the field type.
                     if field_ty.and_then(extract_map_kv_types).is_some() {
-                        generate_map_insert(field_idx, args, field_ty, user_structs, user_enums)
+                        generate_map_insert(field_idx, args, field_ty, ctx)
                     } else {
-                        generate_cell_set(field_idx, args, field_ty, user_structs, user_enums)
+                        generate_cell_set(field_idx, args, field_ty, ctx)
                     }
                 }
                 "remove" if field_ty.and_then(extract_map_kv_types).is_some() => {
-                    generate_map_remove(field_idx, args, field_ty, user_structs, user_enums)
+                    generate_map_remove(field_idx, args, field_ty, ctx)
                 }
                 "remove" if field_ty.and_then(extract_set_inner_type).is_some() => {
                     // Set::remove has the same on-chain pattern as Map::remove.
-                    generate_set_remove(field_idx, args, field_ty, user_structs, user_enums)
+                    generate_set_remove(field_idx, args, field_ty, ctx)
                 }
                 "lookup" if field_ty.and_then(extract_map_kv_types).is_some() => {
-                    generate_map_lookup(field_idx, &field_name, args, field_ty, user_structs, user_enums)
+                    generate_map_lookup(field_idx, &field_name, args, field_ty, ctx)
                 }
                 "check_root" if field_ty.and_then(extract_merkle_tree_type).is_some() => {
                     generate_merkle_tree_check_root(field_idx, &field_name, args)
                 }
-                _ => quote! {},
+                other => {
+                    // Unknown ledger-method call — emit a compile_error
+                    // pointing at the call site instead of silently
+                    // dropping the op. Silent fallthrough produces a
+                    // transcript that doesn't match what ZKIR emitted,
+                    // which only surfaces at on-chain verify with no
+                    // hint at the source.
+                    let msg = format!(
+                        "midnight-edsl: unknown ledger method `{}` on field `{}` (or wrong field kind for this method)",
+                        other, field_name
+                    );
+                    quote! { compile_error!(#msg); }
+                }
             }
         }
 
@@ -405,17 +430,17 @@ fn generate_op_stmt(
             ..
         } => {
             // Collect witness values used in the condition for private_transcript.
-            let witness_adds = collect_witness_private_inputs(cond, witness_types, user_enums);
-            let cond_expr = generate_runtime_cond(cond, field_names, field_types, user_structs, user_enums);
+            let witness_adds = collect_witness_private_inputs(cond, ctx);
+            let cond_expr = generate_runtime_cond(cond, ctx);
             let then_stmts: Vec<TokenStream> = then_branch
                 .iter()
-                .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs, user_enums))
+                .map(|e| generate_op_stmt(e, ctx))
                 .collect();
 
             if let Some(else_exprs) = else_branch {
                 let else_stmts: Vec<TokenStream> = else_exprs
                     .iter()
-                    .map(|e| generate_op_stmt(e, field_names, field_types, witness_types, user_structs, user_enums))
+                    .map(|e| generate_op_stmt(e, ctx))
                     .collect();
                 quote! {
                     #witness_adds
@@ -445,20 +470,14 @@ fn generate_op_stmt(
             // unit.
             let var_name = format_ident!("{}", name.to_string());
             let val_stmt = generate_op_stmt(
-                value,
-                field_names,
-                field_types,
-                witness_types,
-                user_structs,
-                user_enums,
-            );
+                value, ctx);
             // Pull the witness binding out separately so the block
             // evaluates to a real value rather than `()`. Handles bare
             // `witnesses.f` and `witnesses.f.<method>()` (most commonly
             // `.clone()`) — both produce statement-only side effects
             // in `generate_op_stmt` so the let block otherwise binds
             // unit.
-            if let Some(expr) = let_binding_value_for_witness_access(value, user_enums) {
+            if let Some(expr) = let_binding_runtime_value(value, ctx) {
                 return quote! {
                     #val_stmt
                     #[allow(non_snake_case, unused_variables)]
@@ -469,7 +488,7 @@ fn generate_op_stmt(
             // state's accessor so `let v = self.f.get(); ...; use v`
             // works downstream. The ops side (Dup+Idx+Popeq) is
             // already emitted via `val_stmt`.
-            if let Some(expr) = let_binding_value_for_ledger_read(value, field_names) {
+            if let Some(expr) = let_binding_value_for_ledger_read(value, ctx) {
                 return quote! {
                     #val_stmt
                     #[allow(non_snake_case, unused_variables)]
@@ -547,30 +566,26 @@ fn generate_op_stmt(
                     .map(|f| {
                         let fname = f.name.clone();
                         let accessor = quote! { witnesses.#field_ident.#fname };
-                        component_private_push(&f.ty, &accessor, user_enums)
+                        component_private_push(&f.ty, &accessor, ctx)
                     })
                     .collect();
                 quote! { #(#pushes)* }
-            } else if witness_ty.map(|t| is_user_enum(t, user_enums)).unwrap_or(false) {
+            } else if witness_ty.map(|t| is_user_enum(t, ctx.user_enums)).unwrap_or(false) {
                 // User-defined enum witness: push the discriminant first.
                 // For payload-carrying enums, also push the payload's
                 // per-component Frs. The payload is extracted via an
                 // inline `match` over the witness value — the same way
                 // user code would extract it via pattern matching.
-                let payload = witness_ty.and_then(|t| user_enum_payload_type(t, user_enums));
+                let payload = witness_ty.and_then(|t| user_enum_payload_type(t, ctx.user_enums));
                 match (witness_ty, payload) {
                     (Some(ty), Some(p)) => {
                         let payload_match = enum_payload_match_expr(
                             &quote! { witnesses.#field_ident.clone() },
-                            ty,
-                            user_enums,
-                        )
+                            ty, ctx)
                         .unwrap_or_else(|| quote! { unreachable!() });
                         let payload_pushes = component_private_push(
                             &p,
-                            &quote! { __payload },
-                            user_enums,
-                        );
+                            &quote! { __payload }, ctx);
                         quote! {
                             private_transcript.push(
                                 Fr::from(witnesses.#field_ident.discriminant() as u64),
@@ -597,7 +612,7 @@ fn generate_op_stmt(
         ExprIR::Block { stmts, .. } => {
             let inner: Vec<TokenStream> = stmts
                 .iter()
-                .map(|s| generate_op_stmt(s, field_names, field_types, witness_types, user_structs, user_enums))
+                .map(|s| generate_op_stmt(s, ctx))
                 .collect();
             quote! { #(#inner)* }
         }
@@ -608,7 +623,7 @@ fn generate_op_stmt(
             // `private_transcript`) are emitted. Method-specific runtime
             // behavior is generated elsewhere; this arm is just about
             // side effects on the transcript builder's state.
-            generate_op_stmt(receiver, field_names, field_types, witness_types, user_structs, user_enums)
+            generate_op_stmt(receiver, ctx)
         }
 
         // Free-function calls used as RHS of `let` or as standalone
@@ -622,7 +637,7 @@ fn generate_op_stmt(
             // Emit witness pushes from any path-typed args first.
             let witness_emits: Vec<TokenStream> = args
                 .iter()
-                .map(|a| generate_op_stmt(a, field_names, field_types, witness_types, user_structs, user_enums))
+                .map(|a| generate_op_stmt(a, ctx))
                 .collect();
             let name_str = name.to_string();
             let value_expr = match name_str.as_str() {
@@ -644,7 +659,7 @@ fn generate_op_stmt(
         // Reference (`&expr`) forwards to its inner so side effects
         // bubble up through `&witnesses.path` etc.
         ExprIR::Reference { expr: inner, .. } => {
-            generate_op_stmt(inner, field_names, field_types, witness_types, user_structs, user_enums)
+            generate_op_stmt(inner, ctx)
         }
 
         // BinaryOp at statement level only carries side effects via
@@ -652,12 +667,12 @@ fn generate_op_stmt(
         // affect the transcript. Forward to each operand so the
         // private-transcript pushes still get emitted in operand order.
         ExprIR::BinaryOp { lhs, rhs, .. } => {
-            let l = generate_op_stmt(lhs, field_names, field_types, witness_types, user_structs, user_enums);
-            let r = generate_op_stmt(rhs, field_names, field_types, witness_types, user_structs, user_enums);
+            let l = generate_op_stmt(lhs, ctx);
+            let r = generate_op_stmt(rhs, ctx);
             quote! { #l #r }
         }
         ExprIR::UnaryOp { expr: inner, .. } => {
-            generate_op_stmt(inner, field_names, field_types, witness_types, user_structs, user_enums)
+            generate_op_stmt(inner, ctx)
         }
 
         // An expression the IR couldn't lower (e.g. a Rust pattern Nocturne
@@ -677,24 +692,21 @@ fn generate_op_stmt(
         ExprIR::Assert { kind, .. } => match kind {
             midnight_ir::expr::AssertKind::Assert(cond) => {
                 let witness_pushes =
-                    collect_witness_private_inputs(cond, witness_types, user_enums);
+                    collect_witness_private_inputs(cond, ctx);
                 let cond_expr = generate_runtime_cond(
-                    cond, field_names, field_types, user_structs, user_enums,
-                );
+                    cond, ctx);
                 quote! {
                     #witness_pushes
                     assert!(#cond_expr, "midnight-edsl: circuit assertion failed");
                 }
             }
             midnight_ir::expr::AssertKind::AssertEq(a, b) => {
-                let wa = collect_witness_private_inputs(a, witness_types, user_enums);
-                let wb = collect_witness_private_inputs(b, witness_types, user_enums);
+                let wa = collect_witness_private_inputs(a, ctx);
+                let wb = collect_witness_private_inputs(b, ctx);
                 let la = generate_runtime_cond(
-                    a, field_names, field_types, user_structs, user_enums,
-                );
+                    a, ctx);
                 let lb = generate_runtime_cond(
-                    b, field_names, field_types, user_structs, user_enums,
-                );
+                    b, ctx);
                 quote! {
                     #wa
                     #wb
@@ -712,8 +724,8 @@ fn generate_op_stmt(
 /// Returns `None` for other shapes.
 fn let_binding_value_for_ledger_read(
     value: &ExprIR,
-    field_names: &[String],
-) -> Option<TokenStream> {
+    ctx: &TranscriptCtx<'_>,) -> Option<TokenStream> {
+    let field_names = ctx.field_names;
     let ExprIR::LedgerAccess { field, method, .. } = value else {
         return None;
     };
@@ -728,15 +740,18 @@ fn let_binding_value_for_ledger_read(
     }
 }
 
-/// If `value` is a witness read (or a method-chain rooted at one),
-/// build the Rust expression that binds the same value, so the let
-/// binding holds the witness value instead of unit. Returns `None`
-/// for any other shape — caller falls back to the historical
-/// block-wrapping path.
-fn let_binding_value_for_witness_access(
+/// Build the right-hand side Rust expression for a `let` binding when
+/// the value has a usable Rust shape — covers witness reads (and
+/// method chains rooted at them), bare locals, literals, references,
+/// arithmetic, and enum-payload projections. Returns `None` for any
+/// shape we don't model, so the caller falls back to the historical
+/// block-wrapping path that captures `generate_op_stmt`'s trailing
+/// expression instead.
+fn let_binding_runtime_value(
     value: &ExprIR,
-    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+    ctx: &TranscriptCtx<'_>,
 ) -> Option<TokenStream> {
+    let user_enums = ctx.user_enums;
     match value {
         ExprIR::WitnessAccess { field, .. } => {
             let f = format_ident!("{}", field.to_string());
@@ -748,7 +763,7 @@ fn let_binding_value_for_witness_access(
         // accessor on the enum — the user-facing surface is plain pattern
         // matching, and the generated code uses the same construct.
         ExprIR::EnumPayload { scrutinee, enum_name, .. } => {
-            let scrutinee_expr = let_binding_value_for_witness_access(scrutinee, user_enums)?;
+            let scrutinee_expr = let_binding_runtime_value(scrutinee, ctx)?;
             let variants = user_enums.get(&enum_name.to_string())?;
             let arms: Vec<TokenStream> = variants
                 .iter()
@@ -764,7 +779,7 @@ fn let_binding_value_for_witness_access(
             })
         }
         ExprIR::MethodCall { receiver, method, args, .. } => {
-            let recv = let_binding_value_for_witness_access(receiver, user_enums)?;
+            let recv = let_binding_runtime_value(receiver, ctx)?;
             let m = format_ident!("{}", method.to_string());
             let arg_exprs: Vec<TokenStream> = args
                 .iter()
@@ -784,14 +799,14 @@ fn let_binding_value_for_witness_access(
             Some(quote! { (#recv).#m(#(#arg_exprs),*) })
         }
         ExprIR::Reference { expr, .. } => {
-            let inner = let_binding_value_for_witness_access(expr, user_enums)?;
+            let inner = let_binding_runtime_value(expr, ctx)?;
             Some(quote! { (#inner) })
         }
         // Arithmetic over witness reads: bind to the equivalent Rust
         // expression so e.g. `let s = w.a + w.b;` works downstream.
         ExprIR::BinaryOp { op, lhs, rhs, .. } => {
-            let l = let_binding_value_for_witness_access(lhs, user_enums)?;
-            let r = let_binding_value_for_witness_access(rhs, user_enums)?;
+            let l = let_binding_runtime_value(lhs, ctx)?;
+            let r = let_binding_runtime_value(rhs, ctx)?;
             let tokens = match op {
                 syn::BinOp::Add(_) => quote! { #l + #r },
                 syn::BinOp::Sub(_) => quote! { #l - #r },
@@ -827,16 +842,15 @@ fn let_binding_value_for_witness_access(
 /// `WitnessAccess` arm of `generate_op_stmt`.
 fn collect_witness_private_inputs(
     expr: &ExprIR,
-    witness_types: &HashMap<String, syn::Type>,
-    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    let witness_types = ctx.witness_types;
     match expr {
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
             let field_str = field.to_string();
             let witness_ty = witness_types.get(&field_str);
             if witness_ty
-                .map(|t| is_user_enum(t, user_enums))
+                .map(|t| is_user_enum(t, ctx.user_enums))
                 .unwrap_or(false)
             {
                 quote! {
@@ -851,21 +865,21 @@ fn collect_witness_private_inputs(
             }
         }
         ExprIR::MethodCall { receiver, .. } => {
-            collect_witness_private_inputs(receiver, witness_types, user_enums)
+            collect_witness_private_inputs(receiver, ctx)
         }
         ExprIR::BinaryOp { lhs, rhs, .. } => {
-            let l = collect_witness_private_inputs(lhs, witness_types, user_enums);
-            let r = collect_witness_private_inputs(rhs, witness_types, user_enums);
+            let l = collect_witness_private_inputs(lhs, ctx);
+            let r = collect_witness_private_inputs(rhs, ctx);
             quote! { #l #r }
         }
         ExprIR::UnaryOp { expr: inner, .. } => {
-            collect_witness_private_inputs(inner, witness_types, user_enums)
+            collect_witness_private_inputs(inner, ctx)
         }
         ExprIR::Reference { expr: inner, .. } => {
-            collect_witness_private_inputs(inner, witness_types, user_enums)
+            collect_witness_private_inputs(inner, ctx)
         }
         ExprIR::Disclose { value: inner, .. } => {
-            collect_witness_private_inputs(inner, witness_types, user_enums)
+            collect_witness_private_inputs(inner, ctx)
         }
         ExprIR::FnCall { args, .. } => {
             // `merkle_tree_path_root(&witnesses.path)` and similar
@@ -873,7 +887,7 @@ fn collect_witness_private_inputs(
             // they carry get pushed before the condition evaluates.
             let pushes: Vec<TokenStream> = args
                 .iter()
-                .map(|a| collect_witness_private_inputs(a, witness_types, user_enums))
+                .map(|a| collect_witness_private_inputs(a, ctx))
                 .collect();
             quote! { #(#pushes)* }
         }
@@ -985,8 +999,7 @@ fn generate_map_contains_block(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
         .first()
@@ -997,7 +1010,7 @@ fn generate_map_contains_block(
     let k_ty = field_ty.and_then(extract_field_key_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1030,8 +1043,7 @@ fn generate_cell_set(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     // `Counter::set` shares the Cell<u64> wire shape (both deploy as
     // `StateValue::Cell(AlignedValue<u64>)`), so route Counter through
     // the same code with `u64` as the implicit inner type.
@@ -1046,7 +1058,7 @@ fn generate_cell_set(
     });
     let value_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
     quote! {
         ops.push(Op::Push {
@@ -1061,26 +1073,22 @@ fn generate_cell_set(
     }
 }
 
-/// If `ty` is a user-defined homogeneous-payload enum, return the
-/// shared payload type T. Returns `None` for unit-only enums and for
-/// non-enum types.
-/// Build the inline `match` expression that pulls the payload out of a
-/// homogeneous-payload enum value. Mirrors what plain Rust pattern
+/// Build the inline `match` expression that pulls the payload out of
+/// a homogeneous-payload enum value. Mirrors what plain Rust pattern
 /// matching looks like: one arm per variant, all binding the same
 /// payload (homogeneity guarantees the inner type is identical).
 /// Returns `None` if the type isn't a known user enum or the enum has
 /// no payload — caller falls back to whatever non-payload path applies.
 ///
-/// Replaces the previous `.payload()` accessor that lived on the enum
-/// itself: keeping that helper made user-visible API non-idiomatic
-/// (Rust enums don't have a `.payload()` method), and threading the
-/// match through the call site instead leaves the user-facing surface
-/// as plain pattern matching.
+/// Replaces a previous `.payload()` accessor that lived on the enum
+/// itself: Rust enums don't have a `.payload()` method, and threading
+/// the match through the call site leaves the user-facing surface as
+/// plain pattern matching.
 fn enum_payload_match_expr(
     scrutinee: &TokenStream,
     ty: &syn::Type,
-    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> Option<TokenStream> {
+    ctx: &TranscriptCtx<'_>,) -> Option<TokenStream> {
+    let user_enums = ctx.user_enums;
     let syn::Type::Path(tp) = ty else { return None };
     let seg = tp.path.segments.last()?;
     let enum_ident = seg.ident.clone();
@@ -1154,8 +1162,7 @@ fn user_struct_fields<'a>(
 fn component_private_push(
     ty: &syn::Type,
     accessor: &TokenStream,
-    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     if ty_str.starts_with("Bytes<") {
         return quote! {
@@ -1184,8 +1191,8 @@ fn component_private_push(
             private_transcript.push(Fr::from((#accessor).value() as u64));
         };
     }
-    if is_user_enum(ty, user_enums) {
-        let payload = user_enum_payload_type(ty, user_enums);
+    if is_user_enum(ty, ctx.user_enums) {
+        let payload = user_enum_payload_type(ty, ctx.user_enums);
         return match payload {
             None => quote! {
                 private_transcript.push(Fr::from((#accessor).discriminant() as u64));
@@ -1198,15 +1205,11 @@ fn component_private_push(
                 // accessor.
                 let payload_match = enum_payload_match_expr(
                     &quote! { (#accessor).clone() },
-                    ty,
-                    user_enums,
-                )
+                    ty, ctx)
                 .unwrap_or_else(|| quote! { unreachable!() });
                 let payload_pushes = component_private_push(
                     &p,
-                    &quote! { __payload },
-                    user_enums,
-                );
+                    &quote! { __payload }, ctx);
                 quote! {
                     private_transcript.push(Fr::from((#accessor).discriminant() as u64));
                     {
@@ -1231,8 +1234,8 @@ fn component_private_push(
 fn aligned_value_arg_expr(
     expr: &ExprIR,
     ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    let user_structs = ctx.user_structs;
     if let Some(t) = ty {
         // Tuple keys / values: build the upstream tuple shape that
         // `AlignedValue::from(_)` accepts via `Aligned for (T1, .., Tn)`.
@@ -1314,17 +1317,15 @@ fn aligned_value_arg_expr(
         //     is extracted with an inline `match` over the enum value
         //     — no synthetic accessor; same shape as user-facing
         //     pattern matching.
-        if is_user_enum(t, user_enums) {
+        if is_user_enum(t, ctx.user_enums) {
             let raw = arg_to_runtime_raw_expr(expr);
-            let payload_ty = user_enum_payload_type(t, user_enums);
+            let payload_ty = user_enum_payload_type(t, ctx.user_enums);
             return match payload_ty {
                 None => quote! { (#raw).discriminant() },
                 Some(p) => {
                     let payload_match = enum_payload_match_expr(
                         &quote! { __e.clone() },
-                        t,
-                        user_enums,
-                    )
+                        t, ctx)
                     .unwrap_or_else(|| quote! { unreachable!() });
                     let payload_repr =
                         tuple_component_aligned_repr(&p, &quote! { __payload });
@@ -1414,8 +1415,7 @@ fn generate_map_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     let kv = field_ty.and_then(extract_map_kv_types);
     let k_ty = kv.as_ref().map(|(k, _)| k.clone());
     let v_ty = kv.as_ref().map(|(_, v)| v.clone());
@@ -1425,11 +1425,11 @@ fn generate_map_insert(
     // while primitives still get the right `as u<N>` cast.
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
     let val_aligned = args
         .get(1)
-        .map(|a| aligned_value_arg_expr(a, v_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, v_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1464,8 +1464,7 @@ fn generate_map_lookup(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
         .first()
@@ -1479,7 +1478,7 @@ fn generate_map_lookup(
     // build as `Push` does — multi-Fr K must use `*<raw>.as_bytes()`.
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
 
     // Popeq result: V comes back from the runtime (a wrapper like Boolean
@@ -1526,12 +1525,11 @@ fn generate_map_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     let k_ty = field_ty.and_then(extract_map_key_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1698,12 +1696,11 @@ fn generate_set_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -1731,12 +1728,11 @@ fn generate_set_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
-        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs, user_enums))
+        .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
 
     quote! {
@@ -2069,8 +2065,8 @@ fn is_enum_variant_path_expr(
 /// reads (`witnesses.f`), local bindings, and variant literals.
 fn runtime_enum_disc_expr(
     expr: &ExprIR,
-    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    let user_enums = ctx.user_enums;
     match expr {
         ExprIR::Path { path, .. } => {
             // Payload-carrying variants like `Action::Mint` are
@@ -2101,10 +2097,10 @@ fn runtime_enum_disc_expr(
             let n = format_ident!("{}", name.to_string());
             quote! { (#n.discriminant() as u64) }
         }
-        ExprIR::Reference { expr: inner, .. } => runtime_enum_disc_expr(inner, user_enums),
+        ExprIR::Reference { expr: inner, .. } => runtime_enum_disc_expr(inner, ctx),
         // Method calls (e.g. `witnesses.action.clone()`) — recurse
         // into the receiver and ask for its discriminant.
-        ExprIR::MethodCall { receiver, .. } => runtime_enum_disc_expr(receiver, user_enums),
+        ExprIR::MethodCall { receiver, .. } => runtime_enum_disc_expr(receiver, ctx),
         // Fallback: trust that the underlying expression evaluates to
         // the user-facing enum type so `.discriminant()` resolves.
         other => {
@@ -2116,10 +2112,9 @@ fn runtime_enum_disc_expr(
 
 fn generate_runtime_cond(
     expr: &ExprIR,
-    field_names: &[String],
-    field_types: &[syn::Type],
-    user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    let field_names = ctx.field_names;
+    let field_types = ctx.field_types;
     match expr {
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
@@ -2139,23 +2134,27 @@ fn generate_runtime_cond(
                     .position(|f| f == &field_name)
                     .unwrap_or(0) as u8;
                 let field_ty = field_types.get(field_idx as usize);
-                return generate_map_contains_block(field_idx, &field_name, args, field_ty, user_structs, user_enums);
+                return generate_map_contains_block(field_idx, &field_name, args, field_ty, ctx);
             }
             // Other LedgerAccess methods aren't bool-typed (lookup returns V,
-            // get/value return T, increment returns nothing). Fall through to
-            // `true` so the caller still gets a syntactically valid cond — at
-            // the IR level this branch isn't reachable for non-bool returns
-            // because the parser would reject the contract earlier.
-            quote! { true }
+            // get/value return T, increment returns nothing). The IR parser
+            // doesn't actually reject these, so a user writing
+            // `if self.cell.get() { ... }` would silently take the
+            // always-true branch. Surface it as a real diagnostic.
+            let msg = format!(
+                "midnight-edsl: ledger method `{}` on field `{}` doesn't return bool — not usable as an `if` condition",
+                method, field_name
+            );
+            quote! { { compile_error!(#msg); true } }
         }
         ExprIR::MethodCall {
             receiver, method, ..
         } => {
             let method_name = method.to_string();
             match method_name.as_str() {
-                "into" | "value" => generate_runtime_cond(receiver, field_names, field_types, user_structs, user_enums),
+                "into" | "value" => generate_runtime_cond(receiver, ctx),
                 _ => {
-                    let recv = generate_runtime_cond(receiver, field_names, field_types, user_structs, user_enums);
+                    let recv = generate_runtime_cond(receiver, ctx);
                     let m = format_ident!("{}", method_name);
                     quote! { #recv.#m() }
                 }
@@ -2182,29 +2181,60 @@ fn generate_runtime_cond(
             // expose `.value()`, not the raw enum). Compare discriminants
             // on both sides instead.
             if matches!(op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
-                && (is_enum_variant_path_expr(lhs, user_enums)
-                    || is_enum_variant_path_expr(rhs, user_enums))
+                && (is_enum_variant_path_expr(lhs, ctx.user_enums)
+                    || is_enum_variant_path_expr(rhs, ctx.user_enums))
             {
-                let l = runtime_enum_disc_expr(lhs, user_enums);
-                let r = runtime_enum_disc_expr(rhs, user_enums);
+                let l = runtime_enum_disc_expr(lhs, ctx);
+                let r = runtime_enum_disc_expr(rhs, ctx);
                 return match op {
                     syn::BinOp::Eq(_) => quote! { #l == #r },
                     syn::BinOp::Ne(_) => quote! { #l != #r },
                     _ => unreachable!(),
                 };
             }
-            let l = generate_runtime_cond(lhs, field_names, field_types, user_structs, user_enums);
-            let r = generate_runtime_cond(rhs, field_names, field_types, user_structs, user_enums);
+            let l = generate_runtime_cond(lhs, ctx);
+            let r = generate_runtime_cond(rhs, ctx);
             match op {
                 syn::BinOp::Eq(_) => quote! { #l == #r },
                 syn::BinOp::Ne(_) => quote! { #l != #r },
                 syn::BinOp::Lt(_) => quote! { #l < #r },
                 syn::BinOp::Gt(_) => quote! { #l > #r },
+                syn::BinOp::Le(_) => quote! { #l <= #r },
+                syn::BinOp::Ge(_) => quote! { #l >= #r },
                 syn::BinOp::And(_) => quote! { #l && #r },
                 syn::BinOp::Or(_) => quote! { #l || #r },
-                _ => quote! { true },
+                other => {
+                    let msg = format!(
+                        "midnight-edsl: binary operator `{other:?}` not supported in `if` conditions"
+                    );
+                    quote! { { compile_error!(#msg); true } }
+                }
             }
         }
-        _ => quote! { true },
+        ExprIR::UnaryOp { op, expr: inner, .. } => {
+            let i = generate_runtime_cond(inner, ctx);
+            match op {
+                syn::UnOp::Not(_) => quote! { (!#i) },
+                syn::UnOp::Neg(_) => quote! { (-#i) },
+                other => {
+                    let msg = format!(
+                        "midnight-edsl: unary operator `{other:?}` not supported in `if` conditions"
+                    );
+                    quote! { { compile_error!(#msg); true } }
+                }
+            }
+        }
+        ExprIR::Reference { expr: inner, .. } => generate_runtime_cond(inner, ctx),
+        ExprIR::Disclose { value, .. } => generate_runtime_cond(value, ctx),
+        other => {
+            // Unsupported expression in cond position — silent `true` would
+            // make the branch always fire. Surface the IR shape so the user
+            // can see what's wrong.
+            let msg = format!(
+                "midnight-edsl: unsupported expression in `if` condition: {:?}",
+                std::mem::discriminant(other)
+            );
+            quote! { { compile_error!(#msg); true } }
+        }
     }
 }

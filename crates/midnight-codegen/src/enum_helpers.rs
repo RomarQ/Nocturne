@@ -30,7 +30,7 @@ pub fn generate_enum_helpers(contract: &ContractIR) -> TokenStream {
         .iter()
         .map(|(name, variants)| {
             let enum_ident = format_ident!("{}", name);
-            let payload_ty = variants.first().and_then(|v| v.payload.clone());
+            let has_payload = variants.first().is_some_and(|v| v.payload.is_some());
 
             let disc_arms: Vec<TokenStream> = variants
                 .iter()
@@ -49,7 +49,7 @@ pub fn generate_enum_helpers(contract: &ContractIR) -> TokenStream {
             // Unit-only enums get the inverse `from_discriminant`; the
             // payload-carrying form can't manufacture a payload value
             // from just a u8, so we skip the helper there.
-            let from_discriminant = if payload_ty.is_none() {
+            let from_discriminant = if !has_payload {
                 let from_arms: Vec<TokenStream> = variants
                     .iter()
                     .enumerate()
@@ -80,11 +80,6 @@ pub fn generate_enum_helpers(contract: &ContractIR) -> TokenStream {
             // No `payload()` accessor — payload extraction is handled
             // by inline `match` expressions in the transcript codegen,
             // matching how a user would extract via pattern matching.
-            // The unused `payload_ty` binding stays as a marker that
-            // homogeneous-payload enums are recognized; future
-            // additions (e.g. a derived From impl for the
-            // single-payload-type case) would consume it here.
-            let _ = &payload_ty;
 
             quote! {
                 impl #enum_ident {

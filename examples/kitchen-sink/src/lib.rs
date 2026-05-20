@@ -197,7 +197,7 @@ pub mod kitchen_sink {
 
         #[midnight(circuit)]
         pub fn store_fee(&mut self, witnesses: &Witnesses) {
-            let total = witnesses.amount.clone() + witnesses.extra.clone();
+            let total = witnesses.amount + witnesses.extra;
             self.fee_bps.set(total);
             self.total_ops.increment();
         }
@@ -221,7 +221,7 @@ pub mod kitchen_sink {
         #[midnight(circuit)]
         pub fn flip_flag(&mut self, witnesses: &Witnesses) {
             assert!(witnesses.flag.value() || !witnesses.flag.value(), "tautology");
-            self.flagged.set(midnight::disclose(witnesses.flag.clone()));
+            self.flagged.set(midnight::disclose(witnesses.flag));
         }
 
         // -------------------------------------------------------------
@@ -231,7 +231,7 @@ pub mod kitchen_sink {
 
         #[midnight(circuit)]
         pub fn deposit(&mut self, witnesses: &Witnesses) {
-            self.balances.insert(witnesses.caller.clone(), witnesses.amount.clone());
+            self.balances.insert(witnesses.caller.clone(), witnesses.amount);
             self.members.insert(witnesses.caller.clone());
             self.total_ops.increment();
         }
@@ -272,7 +272,7 @@ pub mod kitchen_sink {
         #[midnight(circuit)]
         pub fn index_record(&mut self, witnesses: &Witnesses) {
             self.pair_index
-                .insert((witnesses.caller.clone(), witnesses.epoch.clone()), witnesses.amount.clone());
+                .insert((witnesses.caller.clone(), witnesses.epoch), witnesses.amount);
             let _present = self.records.contains(&witnesses.record);
         }
 
@@ -315,7 +315,7 @@ pub mod kitchen_sink {
 
         #[midnight(circuit)]
         pub fn record_commit(&mut self, witnesses: &Witnesses) {
-            let v = witnesses.commit_value.clone();
+            let v = witnesses.commit_value;
             self.last_commit.set(midnight::disclose(v));
         }
 
@@ -344,7 +344,7 @@ mod tests {
     fn transcripts_build() {
         let admin = midnight::types::Bytes::<32>::zeroed();
         let fee = midnight::types::Uint::<64>::from(100u64);
-        let _deploy = super::kitchen_sink::deploy::initial_state(admin.clone(), fee.clone());
+        let _deploy = super::kitchen_sink::deploy::initial_state(admin.clone(), fee);
 
         let witnesses = Witnesses {
             caller: admin.clone(),
@@ -386,7 +386,7 @@ mod tests {
             },
         };
 
-        let mut state = State::new(admin.clone(), fee.clone());
+        let mut state = State::new(admin.clone(), fee);
 
         // Build a few transcripts — anything that compiles here means
         // the per-circuit generated module is wired up correctly. The

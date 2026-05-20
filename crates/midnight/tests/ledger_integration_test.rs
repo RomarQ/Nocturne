@@ -7346,7 +7346,7 @@ mod witness_sum {
 
         #[midnight(circuit)]
         pub fn store_sum(&mut self, witnesses: &SumWitnesses) {
-            let s = witnesses.a.clone() + witnesses.b.clone();
+            let s = witnesses.a + witnesses.b;
             self.total.set(s);
         }
     }
@@ -7659,7 +7659,7 @@ mod inline_sum {
         #[midnight(circuit)]
         pub fn put(&mut self, witnesses: &InlineSumWitnesses) {
             self.total
-                .set(witnesses.a.clone() + witnesses.b.clone());
+                .set(witnesses.a + witnesses.b);
         }
     }
 }
