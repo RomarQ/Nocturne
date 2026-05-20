@@ -61,9 +61,7 @@ decision, not a session-time call.
 **Unblocker**: a written ADR picking the encoding (compactc-style
 all-fields-always vs. tagged-union) so the codegen has a target to hit.
 
-**Also deferred**: match-on-payload binding (`match a { Action::Mint(x) => f(x) }`).
-Users access the payload via the generated `.payload()` accessor today;
-match-binding needs a new `ExprIR` shape and a parse_match enhancement.
+**Also landed (commit b35b580)**: match-on-payload binding (`match a { Action::Mint(x) => f(x), Action::Burn(y) => g(y) }`). The parser lowers tuple-struct patterns with an ident binding to an `ExprIR::EnumPayload` projection prepended to the arm body. ZKIR returns the scrutinee's wire shifted by the discriminant width (offset 1); transcript codegen emits an inline `match` over the user enum — same shape as user-facing pattern matching. The `.payload()` synthetic accessor is gone; Rust enums don't have one and the codebase no longer pretends they do.
 
 ## Cross-contract calls
 
