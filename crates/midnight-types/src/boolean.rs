@@ -25,6 +25,12 @@ impl From<bool> for Boolean {
     }
 }
 
+impl Default for Boolean {
+    fn default() -> Self {
+        Self::false_val()
+    }
+}
+
 impl From<Boolean> for bool {
     fn from(v: Boolean) -> bool {
         v.0

@@ -55,6 +55,12 @@ impl MerkleTreeDigest {
     }
 }
 
+impl Default for MerkleTreeDigest {
+    fn default() -> Self {
+        Self::from_le_bytes([0u8; 32])
+    }
+}
+
 impl From<Field> for MerkleTreeDigest {
     fn from(field: Field) -> Self {
         Self::new(field)

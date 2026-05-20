@@ -41,6 +41,18 @@ impl<const N: u32> From<u64> for Uint<N> {
     }
 }
 
+impl<const N: u32> From<u128> for Uint<N> {
+    fn from(v: u128) -> Self {
+        Self::new(v)
+    }
+}
+
+impl<const N: u32> Default for Uint<N> {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 impl<const N: u32> Add for Uint<N> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {

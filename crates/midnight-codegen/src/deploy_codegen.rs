@@ -218,7 +218,7 @@ fn cell_aligned_value_expr(
         }
         return quote! { (#accessor).value() };
     }
-    if matches!(s.as_str(), "u8" | "u16" | "u32" | "u64") {
+    if matches!(s.as_str(), "u8" | "u16" | "u32" | "u64" | "u128") {
         if let Some(cast) = primitive_cast_for_type(t) {
             return quote! { ((#accessor) #cast) };
         }
@@ -240,7 +240,12 @@ fn primitive_cast_for_type(ty: &syn::Type) -> Option<TokenStream> {
             1..=8 => quote! { as u8 },
             9..=16 => quote! { as u16 },
             17..=32 => quote! { as u32 },
-            _ => quote! { as u64 },
+            33..=64 => quote! { as u64 },
+            // 65..=128 → `as u128`; matches the upstream `Aligned for u128`
+            // impl that picks Bytes<16> alignment. Without this branch a
+            // `Cell<Uint<128>>::new(witness)` initializer would silently
+            // truncate to u64 at the AlignedValue::from call site.
+            _ => quote! { as u128 },
         });
     }
     match s.as_str() {
@@ -248,6 +253,7 @@ fn primitive_cast_for_type(ty: &syn::Type) -> Option<TokenStream> {
         "u16" => Some(quote! { as u16 }),
         "u32" => Some(quote! { as u32 }),
         "u64" => Some(quote! { as u64 }),
+        "u128" => Some(quote! { as u128 }),
         _ => None,
     }
 }

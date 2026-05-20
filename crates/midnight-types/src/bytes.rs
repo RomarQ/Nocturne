@@ -26,6 +26,12 @@ impl<const N: usize> Bytes<N> {
     }
 }
 
+impl<const N: usize> Default for Bytes<N> {
+    fn default() -> Self {
+        Self::zeroed()
+    }
+}
+
 impl<const N: usize> From<[u8; N]> for Bytes<N> {
     fn from(data: [u8; N]) -> Self {
         Self(data)

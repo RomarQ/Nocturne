@@ -29,6 +29,12 @@ impl From<u64> for Field {
     }
 }
 
+impl Default for Field {
+    fn default() -> Self {
+        Self::zero()
+    }
+}
+
 impl From<u128> for Field {
     fn from(v: u128) -> Self {
         Self(v)

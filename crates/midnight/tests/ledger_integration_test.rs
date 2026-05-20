@@ -8060,3 +8060,109 @@ fn assert_in_circuit_body_panics_on_violation() {
     };
     let _t = assert_runtime::transcript::build_require_flag_transcript(&bad);
 }
+
+// ---------------------------------------------------------------------------
+// Uint<128> end-to-end. Witness a 128-bit value into a Cell<Uint<128>>.
+// Confirms the wire encoding (`Bytes<16>` alignment via upstream
+// `impl Aligned for u128`), the `Uint<128>` → `u128` cast path in
+// `primitive_cast_for_type`, and the prove + verify round-trip.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod uint128_pipeline {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct U128Ledger {
+        pub big: Cell<Uint<128>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct U128Witnesses {
+        pub w: Uint<128>,
+    }
+
+    impl U128Ledger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                big: Cell::new(Uint::<128>::from(0u64)),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn set_big(&mut self, witnesses: &U128Witnesses) {
+            self.big.set(witnesses.w);
+        }
+    }
+}
+
+fn build_uint128_pipeline_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod uint128_pipeline {
+            #[midnight(ledger)]
+            pub struct U128Ledger { big: Cell<Uint<128>> }
+            #[midnight(witnesses)]
+            pub struct U128Witnesses { pub w: Uint<128> }
+            impl U128Ledger {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { big: Cell::new(Uint::<128>::from(0u64)) } }
+                #[midnight(circuit)]
+                pub fn set_big(&mut self, witnesses: &U128Witnesses) {
+                    self.big.set(witnesses.w);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "set_big")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn uint128_pipeline_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_uint128_pipeline_ir();
+    // A value that wouldn't fit in u64: 2^96 + 7.
+    let payload: u128 = (1u128 << 96) + 7;
+    let witnesses = uint128_pipeline::U128Witnesses {
+        w: Uint::<128>::from(payload),
+    };
+    let nocturne_transcript = uint128_pipeline::transcript::build_set_big_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(payload)];
+    let preimage =
+        canonical_preimage("set_big", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Cell<Uint<128>>::set(witness) must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<Uint<128>>::set");
+}
