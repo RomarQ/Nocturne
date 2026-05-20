@@ -387,6 +387,16 @@ impl ZkirEmitter {
                 .resolve_enum_variant_discriminant(path)
                 .map(|d| self.emit_load_imm(Fr::from(d as u64))),
 
+            // Payload projection from a homogeneous-payload enum value.
+            // The enum's `WitnessAccess` / `LedgerAccess` allocates the
+            // discriminant wire first, then the payload wires
+            // (`witness_fr_layout` for `enum E { V(T) }` returns
+            // `[Bits(8), …T_layout]`). The payload's first wire is
+            // therefore offset 1 from the scrutinee's first wire.
+            ExprIR::EnumPayload { scrutinee, .. } => {
+                self.emit_expr(scrutinee).map(|first| first + 1)
+            }
+
             ExprIR::BinaryOp { op, lhs, rhs, .. } => {
                 let a = self.emit_expr(lhs)?;
                 let b = self.emit_expr(rhs)?;

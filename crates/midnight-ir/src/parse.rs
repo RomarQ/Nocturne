@@ -1001,10 +1001,16 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
     if expr_match.arms.is_empty() {
         return Ok(None);
     }
-    // Classify arms.
+    // Classify arms. `Variant` carries the discriminator path; the
+    // optional payload binding name comes from a single-ident tuple-
+    // struct sub-pattern (`Action::Mint(amount)`). Wildcard payloads
+    // (`Action::Mint(_)`) drop into `Variant` with `payload: None`.
     #[derive(Debug)]
     enum ArmShape<'a> {
-        Path(&'a syn::Path),
+        Variant {
+            path: &'a syn::Path,
+            payload: Option<syn::Ident>,
+        },
         Wild,
     }
     let mut shapes: Vec<(ArmShape<'_>, &syn::Expr)> = Vec::with_capacity(expr_match.arms.len());
@@ -1014,7 +1020,27 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
         }
         match &arm.pat {
             Pat::Path(p) if p.path.segments.len() >= 2 => {
-                shapes.push((ArmShape::Path(&p.path), arm.body.as_ref()));
+                shapes.push((
+                    ArmShape::Variant { path: &p.path, payload: None },
+                    arm.body.as_ref(),
+                ));
+            }
+            Pat::TupleStruct(ts) if ts.path.segments.len() >= 2 && ts.elems.len() == 1 => {
+                // `Variant(ident)` or `Variant(_)`. Multi-field tuple
+                // and named-field variants need a separate encoding
+                // ADR and fall through to the generic `None` return.
+                let inner = ts.elems.first().unwrap();
+                let payload = match inner {
+                    Pat::Wild(_) => None,
+                    Pat::Ident(pi) if pi.subpat.is_none() && pi.by_ref.is_none() => {
+                        Some(pi.ident.clone())
+                    }
+                    _ => return Ok(None),
+                };
+                shapes.push((
+                    ArmShape::Variant { path: &ts.path, payload },
+                    arm.body.as_ref(),
+                ));
             }
             Pat::Wild(_) => shapes.push((ArmShape::Wild, arm.body.as_ref())),
             Pat::Ident(pi) if pi.subpat.is_none() => {
@@ -1030,36 +1056,64 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
     // wildcard, the final variant arm's body is used directly as the bare
     // else (the user is responsible for exhaustiveness).
     let wild_idx = shapes.iter().position(|(s, _)| matches!(s, ArmShape::Wild));
-    let (variant_arms, default_body): (Vec<_>, Option<Vec<ExprIR>>) = if let Some(idx) = wild_idx {
-        let default_body = parse_arm_body(shapes[idx].1)?;
-        let variants: Vec<_> = shapes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (s, body))| match s {
-                ArmShape::Path(p) if i != idx => Some((*p, *body)),
-                _ => None,
-            })
-            .collect();
-        (variants, Some(default_body))
-    } else {
-        let variants: Vec<_> = shapes
-            .iter()
-            .filter_map(|(s, body)| match s {
-                ArmShape::Path(p) => Some((*p, *body)),
-                _ => None,
-            })
-            .collect();
-        (variants, None)
-    };
+    type VariantArm<'a> = (&'a syn::Path, Option<syn::Ident>, &'a syn::Expr);
+    let (variant_arms, default_body): (Vec<VariantArm<'_>>, Option<Vec<ExprIR>>) =
+        if let Some(idx) = wild_idx {
+            let default_body = parse_arm_body(shapes[idx].1)?;
+            let variants: Vec<VariantArm<'_>> = shapes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (s, body))| match s {
+                    ArmShape::Variant { path, payload } if i != idx => {
+                        Some((*path, payload.clone(), *body))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (variants, Some(default_body))
+        } else {
+            let variants: Vec<VariantArm<'_>> = shapes
+                .iter()
+                .filter_map(|(s, body)| match s {
+                    ArmShape::Variant { path, payload } => {
+                        Some((*path, payload.clone(), *body))
+                    }
+                    ArmShape::Wild => None,
+                })
+                .collect();
+            (variants, None)
+        };
 
     if variant_arms.is_empty() {
         return Ok(None);
     }
 
-    // Build the if chain from the last variant outward.
+    // Build the if chain from the last variant outward. Payload-binding
+    // arms prepend `let <name> = EnumPayload { scrutinee, enum_name }`
+    // to the arm body — the discriminant check still happens via the
+    // discriminant equality comparison; the binding is a separate
+    // projection that codegen handles per-target.
     let mut else_branch: Option<Vec<ExprIR>> = default_body;
-    for (path, body) in variant_arms.iter().rev() {
-        let then_branch = parse_arm_body(body)?;
+    for (path, payload, body) in variant_arms.iter().rev() {
+        let mut then_branch = Vec::new();
+        if let Some(binding) = payload {
+            // The enum name is the second-to-last path segment
+            // (`Action::Mint` → `Action`). The parser doesn't have
+            // `user_enums` in scope, so codegen will validate the
+            // ident actually refers to a known enum.
+            let n = path.segments.len();
+            let enum_name = path.segments[n - 2].ident.clone();
+            then_branch.push(ExprIR::Let {
+                span: Span::call_site(),
+                name: binding.clone(),
+                value: Box::new(ExprIR::EnumPayload {
+                    span: Span::call_site(),
+                    scrutinee: Box::new(clone_expr_ir(&scrutinee)),
+                    enum_name,
+                }),
+            });
+        }
+        then_branch.extend(parse_arm_body(body)?);
         let cond = ExprIR::BinaryOp {
             span: Span::call_site(),
             op: syn::BinOp::Eq(syn::token::EqEq(Span::call_site())),

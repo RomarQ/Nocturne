@@ -82,6 +82,23 @@ pub enum ExprIR {
     /// valid single `Ident`.
     Path { span: Span, path: syn::Path },
 
+    /// Projection of the payload out of a homogeneous-payload enum
+    /// value. Lowered by `match` arm parsing: `match a { V(x) => … }`
+    /// prepends `let x = EnumPayload { scrutinee: a, enum_name: "V's enum" }`
+    /// to the arm body. Codegen specialises both sides:
+    ///
+    /// - ZKIR: returns the scrutinee's wire shifted by the
+    ///   discriminant width (1 wire today), pointing at the payload's
+    ///   first PrivateInput.
+    /// - Runtime: emits a Rust `match` over `scrutinee` that binds
+    ///   the inner payload from every variant arm (all arms bind the
+    ///   same name since the payload type is homogeneous).
+    EnumPayload {
+        span: Span,
+        scrutinee: Box<ExprIR>,
+        enum_name: Ident,
+    },
+
     /// A block of statements.
     Block { span: Span, stmts: Vec<ExprIR> },
 
