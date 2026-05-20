@@ -791,6 +791,24 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             }
         }
         ExprIR::Reference { expr: inner, .. } => arg_to_runtime_expr(inner),
+        // Arithmetic in argument position — e.g. `cell.set(w.a + w.b)`.
+        // Compose each operand's value expression so the bare argument
+        // form works without the user having to introduce a let
+        // binding. Witness pushes still fire through the surrounding
+        // `generate_op_stmt` BinaryOp arm.
+        ExprIR::BinaryOp { op, lhs, rhs, .. } => {
+            let l = arg_to_runtime_expr(lhs);
+            let r = arg_to_runtime_expr(rhs);
+            match op {
+                syn::BinOp::Add(_) => quote! { (#l + #r) },
+                syn::BinOp::Sub(_) => quote! { (#l - #r) },
+                syn::BinOp::Mul(_) => quote! { (#l * #r) },
+                syn::BinOp::BitAnd(_) => quote! { (#l & #r) },
+                syn::BinOp::BitOr(_) => quote! { (#l | #r) },
+                syn::BinOp::BitXor(_) => quote! { (#l ^ #r) },
+                _ => quote! { () },
+            }
+        }
         // Anything else falls back to `()` and will fail to compile with a
         // clear "the trait `From<()>` is not implemented" message, which
         // points the user at an unsupported argument shape.
