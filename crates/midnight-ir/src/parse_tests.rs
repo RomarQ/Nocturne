@@ -349,4 +349,35 @@ mod tests {
         assert_eq!(fields[4].type_kind, LedgerTypeKind::Array);
         assert_eq!(fields[5].type_kind, LedgerTypeKind::Set);
     }
+
+    #[test]
+    fn payload_enum_surfaces_diagnostic_at_offending_variant() {
+        let err = parse(quote::quote! {
+            mod bad {
+                #[derive(Clone)]
+                pub enum Action {
+                    Mint,
+                    Burn(u64),
+                }
+
+                #[midnight(ledger)]
+                pub struct State {
+                    seen: Counter,
+                }
+
+                impl State {
+                    #[midnight(constructor)]
+                    pub fn new() -> Self { Self { seen: Counter::zero() } }
+                    #[midnight(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+            }
+        })
+        .expect_err("payload-carrying enum variant must produce a parse error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Burn") && msg.contains("payload"),
+            "diagnostic must name the offending variant + cite payload as the reason; got: {msg}"
+        );
+    }
 }
