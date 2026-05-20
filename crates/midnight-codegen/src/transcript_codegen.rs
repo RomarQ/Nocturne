@@ -429,7 +429,7 @@ fn generate_op_stmt(
             // `.clone()`) — both produce statement-only side effects
             // in `generate_op_stmt` so the let block otherwise binds
             // unit.
-            if let Some(expr) = let_binding_value_for_witness_access(value) {
+            if let Some(expr) = let_binding_value_for_witness_access(value, user_enums) {
                 return quote! {
                     #val_stmt
                     #[allow(non_snake_case, unused_variables)]
@@ -525,27 +525,38 @@ fn generate_op_stmt(
             } else if witness_ty.map(|t| is_user_enum(t, user_enums)).unwrap_or(false) {
                 // User-defined enum witness: push the discriminant first.
                 // For payload-carrying enums, also push the payload's
-                // per-component Frs via the regular tuple-component path.
+                // per-component Frs. The payload is extracted via an
+                // inline `match` over the witness value — the same way
+                // user code would extract it via pattern matching.
                 let payload = witness_ty.and_then(|t| user_enum_payload_type(t, user_enums));
-                match payload {
-                    None => quote! {
-                        private_transcript.push(
-                            Fr::from(witnesses.#field_ident.discriminant() as u64),
-                        );
-                    },
-                    Some(p) => {
+                match (witness_ty, payload) {
+                    (Some(ty), Some(p)) => {
+                        let payload_match = enum_payload_match_expr(
+                            &quote! { witnesses.#field_ident.clone() },
+                            ty,
+                            user_enums,
+                        )
+                        .unwrap_or_else(|| quote! { unreachable!() });
                         let payload_pushes = component_private_push(
                             &p,
-                            &quote! { witnesses.#field_ident.payload().clone() },
+                            &quote! { __payload },
                             user_enums,
                         );
                         quote! {
                             private_transcript.push(
                                 Fr::from(witnesses.#field_ident.discriminant() as u64),
                             );
-                            #payload_pushes
+                            {
+                                let __payload = #payload_match;
+                                #payload_pushes
+                            }
                         }
                     }
+                    _ => quote! {
+                        private_transcript.push(
+                            Fr::from(witnesses.#field_ident.discriminant() as u64),
+                        );
+                    },
                 }
             } else {
                 quote! {
@@ -693,14 +704,38 @@ fn let_binding_value_for_ledger_read(
 /// binding holds the witness value instead of unit. Returns `None`
 /// for any other shape — caller falls back to the historical
 /// block-wrapping path.
-fn let_binding_value_for_witness_access(value: &ExprIR) -> Option<TokenStream> {
+fn let_binding_value_for_witness_access(
+    value: &ExprIR,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> Option<TokenStream> {
     match value {
         ExprIR::WitnessAccess { field, .. } => {
             let f = format_ident!("{}", field.to_string());
             Some(quote! { witnesses.#f.clone() })
         }
+        // Match-arm payload binding: `let amount = EnumPayload(scrutinee, EnumName)`
+        // lowers to an inline Rust `match` over the scrutinee, binding the
+        // homogeneous payload from whichever variant carries it. No synthetic
+        // accessor on the enum — the user-facing surface is plain pattern
+        // matching, and the generated code uses the same construct.
+        ExprIR::EnumPayload { scrutinee, enum_name, .. } => {
+            let scrutinee_expr = let_binding_value_for_witness_access(scrutinee, user_enums)?;
+            let variants = user_enums.get(&enum_name.to_string())?;
+            let arms: Vec<TokenStream> = variants
+                .iter()
+                .map(|v| {
+                    let v_ident = v.name.clone();
+                    quote! { #enum_name::#v_ident(__p) => __p }
+                })
+                .collect();
+            Some(quote! {
+                match #scrutinee_expr {
+                    #(#arms),*
+                }
+            })
+        }
         ExprIR::MethodCall { receiver, method, args, .. } => {
-            let recv = let_binding_value_for_witness_access(receiver)?;
+            let recv = let_binding_value_for_witness_access(receiver, user_enums)?;
             let m = format_ident!("{}", method.to_string());
             let arg_exprs: Vec<TokenStream> = args
                 .iter()
@@ -720,14 +755,14 @@ fn let_binding_value_for_witness_access(value: &ExprIR) -> Option<TokenStream> {
             Some(quote! { (#recv).#m(#(#arg_exprs),*) })
         }
         ExprIR::Reference { expr, .. } => {
-            let inner = let_binding_value_for_witness_access(expr)?;
+            let inner = let_binding_value_for_witness_access(expr, user_enums)?;
             Some(quote! { (#inner) })
         }
         // Arithmetic over witness reads: bind to the equivalent Rust
         // expression so e.g. `let s = w.a + w.b;` works downstream.
         ExprIR::BinaryOp { op, lhs, rhs, .. } => {
-            let l = let_binding_value_for_witness_access(lhs)?;
-            let r = let_binding_value_for_witness_access(rhs)?;
+            let l = let_binding_value_for_witness_access(lhs, user_enums)?;
+            let r = let_binding_value_for_witness_access(rhs, user_enums)?;
             let tokens = match op {
                 syn::BinOp::Add(_) => quote! { #l + #r },
                 syn::BinOp::Sub(_) => quote! { #l - #r },
@@ -747,6 +782,12 @@ fn let_binding_value_for_witness_access(value: &ExprIR) -> Option<TokenStream> {
             midnight_ir::expr::LiteralIR::Bool(b) => Some(quote! { #b }),
             midnight_ir::expr::LiteralIR::Str(_) => None,
         },
+        // Var ident from an earlier let binding — re-bind by cloning so the
+        // downstream consumer treats it as an owned value.
+        ExprIR::Var { name, .. } => {
+            let ident = format_ident!("{}", name.to_string());
+            Some(quote! { #ident.clone() })
+        }
         _ => None,
     }
 }
@@ -994,6 +1035,42 @@ fn generate_cell_set(
 /// If `ty` is a user-defined homogeneous-payload enum, return the
 /// shared payload type T. Returns `None` for unit-only enums and for
 /// non-enum types.
+/// Build the inline `match` expression that pulls the payload out of a
+/// homogeneous-payload enum value. Mirrors what plain Rust pattern
+/// matching looks like: one arm per variant, all binding the same
+/// payload (homogeneity guarantees the inner type is identical).
+/// Returns `None` if the type isn't a known user enum or the enum has
+/// no payload — caller falls back to whatever non-payload path applies.
+///
+/// Replaces the previous `.payload()` accessor that lived on the enum
+/// itself: keeping that helper made user-visible API non-idiomatic
+/// (Rust enums don't have a `.payload()` method), and threading the
+/// match through the call site instead leaves the user-facing surface
+/// as plain pattern matching.
+fn enum_payload_match_expr(
+    scrutinee: &TokenStream,
+    ty: &syn::Type,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> Option<TokenStream> {
+    let syn::Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    let enum_ident = seg.ident.clone();
+    let variants = user_enums.get(&enum_ident.to_string())?;
+    variants.first().and_then(|v| v.payload.clone())?;
+    let arms: Vec<TokenStream> = variants
+        .iter()
+        .map(|v| {
+            let v_ident = v.name.clone();
+            quote! { #enum_ident::#v_ident(__p) => __p }
+        })
+        .collect();
+    Some(quote! {
+        match #scrutinee {
+            #(#arms),*
+        }
+    })
+}
+
 fn user_enum_payload_type(
     ty: &syn::Type,
     user_enums: &HashMap<String, Vec<UserEnumVariant>>,
@@ -1086,15 +1163,27 @@ fn component_private_push(
             },
             Some(p) => {
                 // Discriminant first, then the payload's own per-Fr
-                // pushes via the regular tuple-component path.
+                // pushes via the regular tuple-component path. Pull
+                // the payload out with an inline match — same shape
+                // as user-facing pattern matching, no synthetic
+                // accessor.
+                let payload_match = enum_payload_match_expr(
+                    &quote! { (#accessor).clone() },
+                    ty,
+                    user_enums,
+                )
+                .unwrap_or_else(|| quote! { unreachable!() });
                 let payload_pushes = component_private_push(
                     &p,
-                    &quote! { (#accessor).payload().clone() },
+                    &quote! { __payload },
                     user_enums,
                 );
                 quote! {
                     private_transcript.push(Fr::from((#accessor).discriminant() as u64));
-                    #payload_pushes
+                    {
+                        let __payload = #payload_match;
+                        #payload_pushes
+                    }
                 }
             }
         };
@@ -1192,22 +1281,28 @@ fn aligned_value_arg_expr(
         //   - All-unit variants → just the u8 discriminant.
         //   - Homogeneous payload `enum E { V(T), ... }` → the
         //     `(Bytes<1>, T)` tuple `AlignedValue::from(_)` accepts
-        //     via the upstream `Aligned for (A, B)` impl. The
-        //     macro-generated `payload()` accessor extracts the inner
-        //     T from any variant.
+        //     via the upstream `Aligned for (A, B)` impl. The payload
+        //     is extracted with an inline `match` over the enum value
+        //     — no synthetic accessor; same shape as user-facing
+        //     pattern matching.
         if is_user_enum(t, user_enums) {
             let raw = arg_to_runtime_raw_expr(expr);
             let payload_ty = user_enum_payload_type(t, user_enums);
             return match payload_ty {
                 None => quote! { (#raw).discriminant() },
                 Some(p) => {
-                    let payload_repr = tuple_component_aligned_repr(
-                        &p,
-                        &quote! { __e.payload().clone() },
-                    );
+                    let payload_match = enum_payload_match_expr(
+                        &quote! { __e.clone() },
+                        t,
+                        user_enums,
+                    )
+                    .unwrap_or_else(|| quote! { unreachable!() });
+                    let payload_repr =
+                        tuple_component_aligned_repr(&p, &quote! { __payload });
                     quote! {
                         {
                             let __e = #raw;
+                            let __payload = #payload_match;
                             (__e.discriminant(), #payload_repr)
                         }
                     }
@@ -1943,9 +2038,32 @@ fn is_enum_variant_path_expr(
 /// discriminant expression. The macro-generated `discriminant()` method
 /// is in scope for every user enum, so this works uniformly on witness
 /// reads (`witnesses.f`), local bindings, and variant literals.
-fn runtime_enum_disc_expr(expr: &ExprIR) -> TokenStream {
+fn runtime_enum_disc_expr(
+    expr: &ExprIR,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> TokenStream {
     match expr {
-        ExprIR::Path { path, .. } => quote! { ((#path).discriminant() as u64) },
+        ExprIR::Path { path, .. } => {
+            // Payload-carrying variants like `Action::Mint` are
+            // constructor functions, not values — calling
+            // `.discriminant()` on them doesn't compile. Resolve to
+            // the literal discriminant when we recognize the path as a
+            // payload variant. Unit variants still go through the
+            // method call so the generated impl gets exercised.
+            let n = path.segments.len();
+            if n >= 2 {
+                let enum_name = path.segments[n - 2].ident.to_string();
+                let variant_name = path.segments[n - 1].ident.to_string();
+                if let Some(variants) = user_enums.get(&enum_name)
+                    && let Some(idx) = variants.iter().position(|v| v.name == variant_name)
+                    && variants[idx].payload.is_some()
+                {
+                    let d = idx as u64;
+                    return quote! { (#d as u64) };
+                }
+            }
+            quote! { ((#path).discriminant() as u64) }
+        }
         ExprIR::WitnessAccess { field, .. } => {
             let f = format_ident!("{}", field.to_string());
             quote! { (witnesses.#f.discriminant() as u64) }
@@ -1954,7 +2072,10 @@ fn runtime_enum_disc_expr(expr: &ExprIR) -> TokenStream {
             let n = format_ident!("{}", name.to_string());
             quote! { (#n.discriminant() as u64) }
         }
-        ExprIR::Reference { expr: inner, .. } => runtime_enum_disc_expr(inner),
+        ExprIR::Reference { expr: inner, .. } => runtime_enum_disc_expr(inner, user_enums),
+        // Method calls (e.g. `witnesses.action.clone()`) — recurse
+        // into the receiver and ask for its discriminant.
+        ExprIR::MethodCall { receiver, .. } => runtime_enum_disc_expr(receiver, user_enums),
         // Fallback: trust that the underlying expression evaluates to
         // the user-facing enum type so `.discriminant()` resolves.
         other => {
@@ -2035,8 +2156,8 @@ fn generate_runtime_cond(
                 && (is_enum_variant_path_expr(lhs, user_enums)
                     || is_enum_variant_path_expr(rhs, user_enums))
             {
-                let l = runtime_enum_disc_expr(lhs);
-                let r = runtime_enum_disc_expr(rhs);
+                let l = runtime_enum_disc_expr(lhs, user_enums);
+                let r = runtime_enum_disc_expr(rhs, user_enums);
                 return match op {
                     syn::BinOp::Eq(_) => quote! { #l == #r },
                     syn::BinOp::Ne(_) => quote! { #l != #r },

@@ -8,10 +8,14 @@
 //! }
 //! ```
 //!
-//! For homogeneous-payload enums `enum E { V1(T), V2(T), ... }` we
-//! additionally emit `payload(&self) -> &T` extracting the inner value
-//! regardless of which variant carries it. `from_discriminant` isn't
-//! sensible here (it'd need a payload value too), so we skip it.
+//! For homogeneous-payload enums `enum E { V1(T), V2(T), ... }` we emit
+//! `discriminant()` only — the variant tag is a real on-chain concept.
+//! Payload extraction happens via plain Rust pattern matching at the
+//! call site (the transcript codegen emits inline `match` expressions
+//! over the user enum); there's no synthetic `.payload()` accessor
+//! because Rust enums don't have one and shouldn't grow one.
+//! `from_discriminant` isn't sensible for payload enums (a u8 can't
+//! manufacture a payload), so we skip it there too.
 
 use midnight_ir::ContractIR;
 use proc_macro2::TokenStream;
@@ -73,30 +77,14 @@ pub fn generate_enum_helpers(contract: &ContractIR) -> TokenStream {
                 quote! {}
             };
 
-            // Payload-carrying enums additionally expose `payload()`
-            // returning a reference to the inner T regardless of which
-            // variant carries it. Codegen for `AlignedValue::from(_)`
-            // uses this to read the payload without re-matching at
-            // every call site.
-            let payload_accessor = match &payload_ty {
-                Some(p_ty) => {
-                    let arms: Vec<TokenStream> = variants
-                        .iter()
-                        .map(|v| {
-                            let v_ident = v.name.clone();
-                            quote! { #enum_ident::#v_ident(__p) => __p }
-                        })
-                        .collect();
-                    quote! {
-                        pub fn payload(&self) -> &#p_ty {
-                            match self {
-                                #(#arms),*
-                            }
-                        }
-                    }
-                }
-                None => quote! {},
-            };
+            // No `payload()` accessor — payload extraction is handled
+            // by inline `match` expressions in the transcript codegen,
+            // matching how a user would extract via pattern matching.
+            // The unused `payload_ty` binding stays as a marker that
+            // homogeneous-payload enums are recognized; future
+            // additions (e.g. a derived From impl for the
+            // single-payload-type case) would consume it here.
+            let _ = &payload_ty;
 
             quote! {
                 impl #enum_ident {
@@ -106,7 +94,6 @@ pub fn generate_enum_helpers(contract: &ContractIR) -> TokenStream {
                         }
                     }
                     #from_discriminant
-                    #payload_accessor
                 }
             }
         })

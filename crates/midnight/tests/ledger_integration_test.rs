@@ -7900,6 +7900,155 @@ async fn payload_enum_cell_set_proves_and_verifies() {
         .expect("on-chain verify must succeed for payload enum Cell::set");
 }
 
+// ---------------------------------------------------------------------------
+// Match-on-payload binding: native Rust pattern matching binds the
+// homogeneous payload from each variant arm, no synthetic accessor.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod match_payload {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub enum Action {
+        Mint(Uint<64>),
+        Burn(Uint<64>),
+    }
+
+    #[midnight(ledger)]
+    pub struct MintBurn {
+        pub minted: Cell<Uint<64>>,
+        pub burned: Cell<Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct MintBurnWitnesses {
+        pub action: Action,
+    }
+
+    impl MintBurn {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                minted: Cell::new(Uint::<64>::from(0u64)),
+                burned: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn apply(&mut self, witnesses: &MintBurnWitnesses) {
+            match witnesses.action.clone() {
+                Action::Mint(amount) => {
+                    self.minted.set(amount);
+                }
+                Action::Burn(amount) => {
+                    self.burned.set(amount);
+                }
+            }
+        }
+    }
+}
+
+fn build_match_payload_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod match_payload {
+            #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+            pub enum Action { Mint(Uint<64>), Burn(Uint<64>) }
+            #[midnight(ledger)]
+            pub struct MintBurn {
+                pub minted: Cell<Uint<64>>,
+                pub burned: Cell<Uint<64>>,
+            }
+            #[midnight(witnesses)]
+            pub struct MintBurnWitnesses { pub action: Action }
+            impl MintBurn {
+                #[midnight(constructor)]
+                pub fn new() -> Self {
+                    Self {
+                        minted: Cell::new(Uint::<64>::from(0u64)),
+                        burned: Cell::new(Uint::<64>::from(0u64)),
+                    }
+                }
+                #[midnight(circuit)]
+                pub fn apply(&mut self, witnesses: &MintBurnWitnesses) {
+                    match witnesses.action.clone() {
+                        Action::Mint(amount) => { self.minted.set(amount); }
+                        Action::Burn(amount) => { self.burned.set(amount); }
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "apply")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn match_on_payload_binding_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_match_payload_ir();
+    let witnesses = match_payload::MintBurnWitnesses {
+        action: match_payload::Action::Burn(Uint::<64>::from(99u64)),
+    };
+    let nocturne_transcript = match_payload::transcript::build_apply_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(1u8),
+        AlignedValue::from(99u64),
+    ];
+    let preimage =
+        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "match-on-payload binding must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for match-on-payload binding");
+}
+
 #[test]
 #[should_panic(expected = "midnight-edsl: circuit assertion failed")]
 fn assert_in_circuit_body_panics_on_violation() {
