@@ -8166,3 +8166,195 @@ async fn uint128_pipeline_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell<Uint<128>>::set");
 }
+
+// ---------------------------------------------------------------------------
+// Option<T> end-to-end. Witness an `Option<Uint<64>>` and dispatch with a
+// `match` over Some/None — uses the same `(Bytes<1>, T)` wire shape as
+// Compact's `Maybe<T>` via the upstream `Aligned for Option<T>` impl.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod option_round_trip {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct OptLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct OptWitnesses {
+        pub maybe: Option<Uint<64>>,
+    }
+
+    impl OptLedger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[midnight(circuit)]
+        #[allow(clippy::single_match)]
+        pub fn apply(&mut self, witnesses: &OptWitnesses) {
+            // Use a `match` (not `if let Some(_)`) so we exercise the
+            // generic match-on-Option lowering. Clippy would simplify
+            // this in production code, but the test is asserting on the
+            // codegen behaviour for both arms.
+            match witnesses.maybe {
+                Some(amount) => {
+                    self.stored.set(amount);
+                }
+                None => {}
+            }
+        }
+    }
+}
+
+fn build_option_round_trip_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod option_round_trip {
+            #[midnight(ledger)]
+            pub struct OptLedger { stored: Cell<Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct OptWitnesses { pub maybe: Option<Uint<64>> }
+            impl OptLedger {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[midnight(circuit)]
+                pub fn apply(&mut self, witnesses: &OptWitnesses) {
+                    match witnesses.maybe {
+                        Some(amount) => { self.stored.set(amount); }
+                        None => {}
+                    }
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "apply")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn option_some_payload_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_option_round_trip_ir();
+    let witnesses = option_round_trip::OptWitnesses {
+        maybe: Some(Uint::<64>::from(42u64)),
+    };
+    let nocturne_transcript = option_round_trip::transcript::build_apply_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(1u8),  // Some discriminant
+        AlignedValue::from(42u64), // payload
+    ];
+    let preimage =
+        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Option<Uint<64>> = Some(_) must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Option<Uint<64>> = Some(_)");
+}
+
+#[tokio::test]
+async fn option_none_branch_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::onchain_vm::ops::Op as VmOp;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_option_round_trip_ir();
+    let witnesses = option_round_trip::OptWitnesses { maybe: None };
+    let nocturne_transcript = option_round_trip::transcript::build_apply_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(0u8),  // None discriminant
+        AlignedValue::from(0u64), // payload = T::default()
+    ];
+    let preimage =
+        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let mut on_chain_program: Vec<VmOp<_, _>> = Vec::new();
+    let mut skips_iter = skips.iter().peekable();
+    for op in &nocturne_transcript.ops {
+        while matches!(skips_iter.peek(), Some(Some(_))) {
+            if let Some(Some(n)) = skips_iter.next() {
+                on_chain_program.push(VmOp::Noop { n: *n as u32 });
+            }
+        }
+        on_chain_program.push(op.clone());
+        let _ = skips_iter.next();
+    }
+    for n in skips_iter.flatten() {
+        on_chain_program.push(VmOp::Noop { n: *n as u32 });
+    }
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &on_chain_program {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Option<Uint<64>> = None must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Option<Uint<64>> = None");
+}

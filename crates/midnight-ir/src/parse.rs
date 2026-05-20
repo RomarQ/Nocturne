@@ -787,13 +787,11 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
         // matcher produces. Both arms must be present; arm order doesn't
         // matter (Some-first and None-first both work).
         Expr::Match(expr_match) => {
-            // Unit-variant enum match: lower
-            //   match s { A => body_a, B => body_b, _ => default }
-            // to nested `if s == A { body_a } else if s == B { body_b } else { default }`.
-            // Discriminant resolution happens later in codegen via `user_enums`.
-            if let Some(chain) = lower_enum_match(expr_match)? {
-                return Ok(chain);
-            }
+            // `match self.<map>.get(&k) { Some(v) => ..., None => ... }`
+            // sugar runs first: the new Option-aware `lower_enum_match`
+            // also accepts `Some`/`None` patterns, but for map-get the
+            // user wants the contains+lookup rewrite, not generic
+            // Option lowering against an opaque LedgerAccess scrutinee.
             if let Some((var_name, map_field, key_expr, some_body, none_body)) =
                 match_match_on_get(expr_match)
             {
@@ -825,10 +823,16 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                     else_branch,
                 });
             }
+            // Otherwise, fall through to the generic enum-match
+            // lowering — handles user enums and stdlib `Option<T>`
+            // alike via discriminant comparisons.
+            if let Some(chain) = lower_enum_match(expr_match)? {
+                return Ok(chain);
+            }
             Ok(ExprIR::Unsupported {
                 span: Span::call_site(),
-                description: "match scrutinee must be `self.<map_field>.get(<key>)` with \
-                              exactly Some(v) and None|_ arms"
+                description: "unsupported match shape (only `match self.<map>.get(&k) { Some(v) => ..., None => ... }`, \
+                              unit-variant enums, and homogeneous-payload enums / Option<T> are supported)"
                     .to_string(),
             })
         }
@@ -1033,14 +1037,25 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
         if arm.guard.is_some() {
             return Ok(None);
         }
+        // `Some` / `None` are the stdlib Option variants — single-
+        // segment paths that the rest of the match lowering treats as
+        // qualified variant paths. The codegen recognizes the
+        // path-segment text "Some" / "None" downstream.
+        let is_option_variant_path = |path: &syn::Path| -> bool {
+            path.segments.len() == 1
+                && matches!(path.segments[0].ident.to_string().as_str(), "Some" | "None")
+        };
         match &arm.pat {
-            Pat::Path(p) if p.path.segments.len() >= 2 => {
+            Pat::Path(p) if p.path.segments.len() >= 2 || is_option_variant_path(&p.path) => {
                 shapes.push((
                     ArmShape::Variant { path: &p.path, payload: None },
                     arm.body.as_ref(),
                 ));
             }
-            Pat::TupleStruct(ts) if ts.path.segments.len() >= 2 && ts.elems.len() == 1 => {
+            Pat::TupleStruct(ts)
+                if (ts.path.segments.len() >= 2 || is_option_variant_path(&ts.path))
+                    && ts.elems.len() == 1 =>
+            {
                 // `Variant(ident)` or `Variant(_)`. Multi-field tuple
                 // and named-field variants need a separate encoding
                 // ADR and fall through to the generic `None` return.
@@ -1112,12 +1127,19 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
     for (path, payload, body) in variant_arms.iter().rev() {
         let mut then_branch = Vec::new();
         if let Some(binding) = payload {
-            // The enum name is the second-to-last path segment
-            // (`Action::Mint` → `Action`). The parser doesn't have
-            // `user_enums` in scope, so codegen will validate the
-            // ident actually refers to a known enum.
+            // The enum name is the second-to-last path segment for
+            // qualified user-enum variants (`Action::Mint` → `Action`).
+            // For single-segment stdlib paths (`Some(x)` / `None`) we
+            // emit `Option` as the synthetic enum name; the codegen
+            // routes Option through its own helpers and only inspects
+            // the scrutinee's type for variant info, so this name is
+            // a marker rather than a lookup key.
             let n = path.segments.len();
-            let enum_name = path.segments[n - 2].ident.clone();
+            let enum_name = if n >= 2 {
+                path.segments[n - 2].ident.clone()
+            } else {
+                syn::Ident::new("Option", Span::call_site())
+            };
             then_branch.push(ExprIR::Let {
                 span: Span::call_site(),
                 name: binding.clone(),

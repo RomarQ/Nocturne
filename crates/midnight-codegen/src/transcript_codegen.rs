@@ -318,9 +318,12 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         // payload enums. The payload is extracted with an
                         // inline match — same shape used in the deploy
                         // codegen and the set/AlignedValue paths.
-                        Some(t) if is_user_enum(t, ctx.user_enums) => {
-                            match user_enum_payload_type(t, ctx.user_enums) {
-                                None => quote! { (#accessor).discriminant() },
+                        Some(t) if is_enum_like(t, ctx.user_enums) => {
+                            match enum_like_payload_type(t, ctx.user_enums) {
+                                None => {
+                                    let disc = enum_like_discriminant_expr(&accessor, t);
+                                    quote! { #disc }
+                                }
                                 Some(p) => {
                                     let payload_match = enum_payload_match_expr(
                                         &quote! { __e.clone() },
@@ -330,11 +333,13 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                                         &p,
                                         &quote! { __payload },
                                     );
+                                    let disc =
+                                        enum_like_discriminant_expr(&quote! { __e }, t);
                                     quote! {
                                         {
                                             let __e = #accessor;
                                             let __payload = #payload_match;
-                                            (__e.discriminant(), #payload_repr)
+                                            (#disc, #payload_repr)
                                         }
                                     }
                                 }
@@ -570,15 +575,21 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                     })
                     .collect();
                 quote! { #(#pushes)* }
-            } else if witness_ty.map(|t| is_user_enum(t, ctx.user_enums)).unwrap_or(false) {
-                // User-defined enum witness: push the discriminant first.
-                // For payload-carrying enums, also push the payload's
-                // per-component Frs. The payload is extracted via an
-                // inline `match` over the witness value — the same way
-                // user code would extract it via pattern matching.
-                let payload = witness_ty.and_then(|t| user_enum_payload_type(t, ctx.user_enums));
-                match (witness_ty, payload) {
-                    (Some(ty), Some(p)) => {
+            } else if witness_ty.map(|t| is_enum_like(t, ctx.user_enums)).unwrap_or(false) {
+                // Enum-like witness (`Option<T>` or a user enum): push
+                // the discriminant first, then for homogeneous payloads
+                // also push the payload's per-component Frs. The
+                // payload is extracted via an inline `match` over the
+                // witness value — the same way user code would extract
+                // it via pattern matching.
+                let payload = witness_ty.and_then(|t| enum_like_payload_type(t, ctx.user_enums));
+                let ty = witness_ty.unwrap();
+                let disc = enum_like_discriminant_expr(
+                    &quote! { witnesses.#field_ident },
+                    ty,
+                );
+                match payload {
+                    Some(p) => {
                         let payload_match = enum_payload_match_expr(
                             &quote! { witnesses.#field_ident.clone() },
                             ty, ctx)
@@ -587,19 +598,15 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                             &p,
                             &quote! { __payload }, ctx);
                         quote! {
-                            private_transcript.push(
-                                Fr::from(witnesses.#field_ident.discriminant() as u64),
-                            );
+                            private_transcript.push(Fr::from((#disc) as u64));
                             {
                                 let __payload = #payload_match;
                                 #payload_pushes
                             }
                         }
                     }
-                    _ => quote! {
-                        private_transcript.push(
-                            Fr::from(witnesses.#field_ident.discriminant() as u64),
-                        );
+                    None => quote! {
+                        private_transcript.push(Fr::from((#disc) as u64));
                     },
                 }
             } else {
@@ -764,6 +771,17 @@ fn let_binding_runtime_value(
         // matching, and the generated code uses the same construct.
         ExprIR::EnumPayload { scrutinee, enum_name, .. } => {
             let scrutinee_expr = let_binding_runtime_value(scrutinee, ctx)?;
+            // `Option` is the synthetic marker the parser uses for
+            // single-segment `Some`/`None` patterns; codegen knows the
+            // arm names without a user_enums lookup.
+            if enum_name == "Option" {
+                return Some(quote! {
+                    match #scrutinee_expr {
+                        ::core::option::Option::Some(__p) => __p,
+                        ::core::option::Option::None => ::core::default::Default::default(),
+                    }
+                });
+            }
             let variants = user_enums.get(&enum_name.to_string())?;
             let arms: Vec<TokenStream> = variants
                 .iter()
@@ -845,13 +863,15 @@ fn collect_witness_private_inputs(
             let field_str = field.to_string();
             let witness_ty = witness_types.get(&field_str);
             if witness_ty
-                .map(|t| is_user_enum(t, ctx.user_enums))
+                .map(|t| is_enum_like(t, ctx.user_enums))
                 .unwrap_or(false)
             {
+                let disc = enum_like_discriminant_expr(
+                    &quote! { witnesses.#field_ident },
+                    witness_ty.unwrap(),
+                );
                 quote! {
-                    private_transcript.push(
-                        Fr::from(witnesses.#field_ident.discriminant() as u64),
-                    );
+                    private_transcript.push(Fr::from((#disc) as u64));
                 }
             } else {
                 quote! {
@@ -1082,7 +1102,21 @@ fn generate_cell_set(
 fn enum_payload_match_expr(
     scrutinee: &TokenStream,
     ty: &syn::Type,
-    ctx: &TranscriptCtx<'_>,) -> Option<TokenStream> {
+    ctx: &TranscriptCtx<'_>,
+) -> Option<TokenStream> {
+    // Option<T> first: it's a stdlib type, no user_enums entry. The
+    // None case has no payload to bind, so synthesize the default
+    // value of T (`<T as Default>::default()`). For types that aren't
+    // `Default` the user gets a clear compile error pointing here.
+    if let Some(payload_ty) = option_payload_type(ty) {
+        return Some(quote! {
+            match #scrutinee {
+                Some(__p) => __p,
+                None => <#payload_ty as ::core::default::Default>::default(),
+            }
+        });
+    }
+
     let user_enums = ctx.user_enums;
     let syn::Type::Path(tp) = ty else { return None };
     let seg = tp.path.segments.last()?;
@@ -1130,6 +1164,80 @@ fn is_user_enum(
         .last()
         .map(|s| user_enums.contains_key(&s.ident.to_string()))
         .unwrap_or(false)
+}
+
+/// True if `ty` is Rust's stdlib `Option<T>`. We treat it like a
+/// homogeneous-payload enum (`(Bytes<1>, T)` wire shape) without
+/// requiring the user to declare it — same encoding as Compact's
+/// `Maybe<T>`, same shape upstream's `impl<T: Aligned> Aligned for
+/// Option<T>` produces.
+fn is_option_type(ty: &syn::Type) -> bool {
+    option_payload_type(ty).is_some()
+}
+
+/// If `ty` is `Option<T>`, return `T`. The path may be `Option`,
+/// `std::option::Option`, or `core::option::Option`; only the final
+/// segment + its single type argument matter.
+fn option_payload_type(ty: &syn::Type) -> Option<syn::Type> {
+    let syn::Type::Path(tp) = ty else { return None };
+    if tp.qself.is_some() {
+        return None;
+    }
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    if args.args.len() != 1 {
+        return None;
+    }
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) => Some(t.clone()),
+        _ => None,
+    }
+}
+
+/// True if `ty` is either a user enum (any number of variants, with or
+/// without payload) or `Option<T>`. Sites that fan out by enum-ness
+/// route through this rather than `is_user_enum` directly.
+fn is_enum_like(ty: &syn::Type, user_enums: &HashMap<String, Vec<UserEnumVariant>>) -> bool {
+    is_option_type(ty) || is_user_enum(ty, user_enums)
+}
+
+/// True if `ty` is a homogeneous-payload enum-like — either a user
+/// enum with a payload, or `Option<T>`. Used by the codegen sites that
+/// need to short-circuit through the same `(Bytes<1>, T)` wire path
+/// regardless of source-level spelling.
+#[allow(dead_code)]
+fn is_enum_like_with_payload(
+    ty: &syn::Type,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> bool {
+    is_option_type(ty)
+        || (is_user_enum(ty, user_enums) && user_enum_payload_type(ty, user_enums).is_some())
+}
+
+/// Combined payload-type lookup. Returns `Some(T)` for `Option<T>` and
+/// for user enums with a payload; `None` otherwise.
+fn enum_like_payload_type(
+    ty: &syn::Type,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> Option<syn::Type> {
+    option_payload_type(ty).or_else(|| user_enum_payload_type(ty, user_enums))
+}
+
+/// Build the runtime expression that yields an enum-like value's u8
+/// discriminant. User enums delegate to the macro-generated
+/// `.discriminant()` method; `Option<T>` synthesizes a `match` since
+/// it has no such method.
+fn enum_like_discriminant_expr(accessor: &TokenStream, ty: &syn::Type) -> TokenStream {
+    if is_option_type(ty) {
+        quote! { match #accessor { ::core::option::Option::Some(_) => 1u8, ::core::option::Option::None => 0u8 } }
+    } else {
+        quote! { (#accessor).discriminant() }
+    }
 }
 
 /// If `ty` is a user-defined struct registered in `user_structs`,
@@ -1186,11 +1294,12 @@ fn component_private_push(
             private_transcript.push(Fr::from((#accessor).value() as u64));
         };
     }
-    if is_user_enum(ty, ctx.user_enums) {
-        let payload = user_enum_payload_type(ty, ctx.user_enums);
+    if is_enum_like(ty, ctx.user_enums) {
+        let payload = enum_like_payload_type(ty, ctx.user_enums);
+        let disc = enum_like_discriminant_expr(accessor, ty);
         return match payload {
             None => quote! {
-                private_transcript.push(Fr::from((#accessor).discriminant() as u64));
+                private_transcript.push(Fr::from((#disc) as u64));
             },
             Some(p) => {
                 // Discriminant first, then the payload's own per-Fr
@@ -1206,7 +1315,7 @@ fn component_private_push(
                     &p,
                     &quote! { __payload }, ctx);
                 quote! {
-                    private_transcript.push(Fr::from((#accessor).discriminant() as u64));
+                    private_transcript.push(Fr::from((#disc) as u64));
                     {
                         let __payload = #payload_match;
                         #payload_pushes
@@ -1312,11 +1421,14 @@ fn aligned_value_arg_expr(
         //     is extracted with an inline `match` over the enum value
         //     — no synthetic accessor; same shape as user-facing
         //     pattern matching.
-        if is_user_enum(t, ctx.user_enums) {
+        if is_enum_like(t, ctx.user_enums) {
             let raw = arg_to_runtime_raw_expr(expr);
-            let payload_ty = user_enum_payload_type(t, ctx.user_enums);
+            let payload_ty = enum_like_payload_type(t, ctx.user_enums);
             return match payload_ty {
-                None => quote! { (#raw).discriminant() },
+                None => {
+                    let disc = enum_like_discriminant_expr(&raw, t);
+                    quote! { (#disc) }
+                }
                 Some(p) => {
                     let payload_match = enum_payload_match_expr(
                         &quote! { __e.clone() },
@@ -1324,11 +1436,12 @@ fn aligned_value_arg_expr(
                     .unwrap_or_else(|| quote! { unreachable!() });
                     let payload_repr =
                         tuple_component_aligned_repr(&p, &quote! { __payload });
+                    let disc = enum_like_discriminant_expr(&quote! { __e }, t);
                     quote! {
                         {
                             let __e = #raw;
                             let __payload = #payload_match;
-                            (__e.discriminant(), #payload_repr)
+                            (#disc, #payload_repr)
                         }
                     }
                 }
@@ -2042,6 +2155,14 @@ fn is_enum_variant_path_expr(
     let ExprIR::Path { path, .. } = expr else {
         return false;
     };
+    // `Some` and `None` (single-segment) are recognized as Option's
+    // variants. The match-lowering in parse.rs produces these paths
+    // for `match opt { Some(x) => ..., None => ... }`.
+    if path.segments.len() == 1
+        && matches!(path.segments[0].ident.to_string().as_str(), "Some" | "None")
+    {
+        return true;
+    }
     let n = path.segments.len();
     if n < 2 {
         return false;
@@ -2064,6 +2185,17 @@ fn runtime_enum_disc_expr(
     let user_enums = ctx.user_enums;
     match expr {
         ExprIR::Path { path, .. } => {
+            // `Some` / `None` are single-segment Option variants —
+            // resolve to literal `1u64` / `0u64`. Some(_) is also a
+            // constructor function with no `.discriminant()` method,
+            // so the literal route is the only valid one.
+            if path.segments.len() == 1 {
+                match path.segments[0].ident.to_string().as_str() {
+                    "Some" => return quote! { 1u64 },
+                    "None" => return quote! { 0u64 },
+                    _ => {}
+                }
+            }
             // Payload-carrying variants like `Action::Mint` are
             // constructor functions, not values — calling
             // `.discriminant()` on them doesn't compile. Resolve to
@@ -2086,7 +2218,21 @@ fn runtime_enum_disc_expr(
         }
         ExprIR::WitnessAccess { field, .. } => {
             let f = format_ident!("{}", field.to_string());
-            quote! { (witnesses.#f.discriminant() as u64) }
+            // For Option-typed witnesses, route through the same
+            // `match { Some(_) => 1u8, None => 0u8 }` discriminant
+            // form. For user enums the `.discriminant()` method is
+            // present.
+            let witness_ty = ctx.witness_types.get(&field.to_string());
+            if witness_ty.map(is_option_type).unwrap_or(false) {
+                quote! {
+                    (match witnesses.#f {
+                        ::core::option::Option::Some(_) => 1u64,
+                        ::core::option::Option::None => 0u64,
+                    })
+                }
+            } else {
+                quote! { (witnesses.#f.discriminant() as u64) }
+            }
         }
         ExprIR::Var { name, .. } => {
             let n = format_ident!("{}", name.to_string());

@@ -164,6 +164,31 @@ fn cell_aligned_value_expr(
     if s == "bool" {
         return quote! { (#accessor) };
     }
+    // Stdlib `Option<T>` — same wire shape as a homogeneous-payload
+    // enum. The None case synthesizes `<T as Default>::default()` so
+    // the AlignedValue's payload slot is well-formed.
+    if let Some(payload_ty) = option_payload_type(t) {
+        let payload_repr = cell_aligned_value_expr(
+            Some(&payload_ty),
+            &quote! { __payload },
+            user_enums,
+        );
+        return quote! {
+            {
+                let __e = #accessor;
+                let __payload = match __e {
+                    ::core::option::Option::Some(__p) => __p,
+                    ::core::option::Option::None =>
+                        <#payload_ty as ::core::default::Default>::default(),
+                };
+                let __disc: u8 = match __e {
+                    ::core::option::Option::Some(_) => 1,
+                    ::core::option::Option::None => 0,
+                };
+                (__disc, #payload_repr)
+            }
+        };
+    }
     // User enum:
     //   - Unit-only variants → just the u8 discriminant.
     //   - Homogeneous payload `enum E { V(T) }` → the `(Bytes<1>, T)`
@@ -254,6 +279,28 @@ fn primitive_cast_for_type(ty: &syn::Type) -> Option<TokenStream> {
         "u32" => Some(quote! { as u32 }),
         "u64" => Some(quote! { as u64 }),
         "u128" => Some(quote! { as u128 }),
+        _ => None,
+    }
+}
+
+/// If `ty` is stdlib `Option<T>`, return `T`.
+fn option_payload_type(ty: &syn::Type) -> Option<syn::Type> {
+    let syn::Type::Path(tp) = ty else { return None };
+    if tp.qself.is_some() {
+        return None;
+    }
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    if args.args.len() != 1 {
+        return None;
+    }
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) => Some(t.clone()),
         _ => None,
     }
 }

@@ -1804,6 +1804,14 @@ impl ZkirEmitter {
             .iter()
             .map(|s| s.ident.to_string())
             .collect();
+        // `Some` / `None` are single-segment stdlib variants.
+        if segs.len() == 1 {
+            return match segs[0].as_str() {
+                "None" => Some(0),
+                "Some" => Some(1),
+                _ => None,
+            };
+        }
         if segs.len() < 2 {
             return None;
         }
@@ -1927,6 +1935,20 @@ fn aligned_value_encoding(
     user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
     user_enums: &HashMap<String, Vec<midnight_ir::UserEnumVariant>>,
 ) -> Option<AlignedValueEncoding> {
+    // Stdlib `Option<T>` — same wire shape as a homogeneous-payload
+    // user enum: `(Bytes<1>, T)`. Mirrors upstream
+    // `impl<T: Aligned> Aligned for Option<T>` which concats
+    // `bool::alignment()` (= `Bytes<1>`) with T's alignment.
+    if let Some(payload_ty) = option_payload_type_zkir(ty) {
+        let inner = aligned_value_encoding(&payload_ty, user_structs, user_enums)?;
+        let mut atoms: Vec<i32> = vec![1 + (inner.alignment_atoms.len() as i32 - 1)];
+        atoms.push(1);
+        atoms.extend(inner.alignment_atoms.iter().skip(1));
+        return Some(AlignedValueEncoding {
+            alignment_atoms: atoms,
+            value_field_count: 1 + inner.value_field_count,
+        });
+    }
     // User-defined enum:
     //   - All-unit variants → `Bytes<1>` discriminant only.
     //   - Homogeneous payload variants → `(Bytes<1>, T)` tuple composing
@@ -2134,6 +2156,14 @@ fn witness_fr_layout(
         return layout;
     }
 
+    // Stdlib `Option<T>`: same shape as a homogeneous-payload enum —
+    // 8-bit discriminant + T's own layout.
+    if let Some(payload_ty) = option_payload_type_zkir(ty) {
+        let mut layout = vec![FrLayout::Bits(8)];
+        layout.extend(witness_fr_layout(&payload_ty, user_structs, user_enums));
+        return layout;
+    }
+
     // User-defined enum: discriminant is an 8-bit constrained
     // PrivateInput, followed by the payload's own layout (empty for
     // unit-only enums).
@@ -2317,6 +2347,30 @@ fn is_counter_type(ty: &syn::Type) -> bool {
         return seg.ident == "Counter";
     }
     false
+}
+
+/// If `ty` is stdlib `Option<T>` (any path ending in `Option`), return
+/// `T`. The transcript codegen has the same helper; this one is local
+/// to avoid a cross-crate visibility shuffle for a single predicate.
+fn option_payload_type_zkir(ty: &syn::Type) -> Option<syn::Type> {
+    let syn::Type::Path(tp) = ty else { return None };
+    if tp.qself.is_some() {
+        return None;
+    }
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    if args.args.len() != 1 {
+        return None;
+    }
+    match args.args.first()? {
+        syn::GenericArgument::Type(t) => Some(t.clone()),
+        _ => None,
+    }
 }
 
 /// If `ty` is `Cell<T>`, return `T`. Otherwise `None`.
