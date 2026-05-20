@@ -8,7 +8,9 @@
 //! - Ledger types: Counter, Cell<T> (u64 / Uint<N> / Bytes<N> / user enum /
 //!   Field / Boolean), Map<K, V> (primitive / tuple / user-struct keys),
 //!   Set<T>, MerkleTree<H, Bytes<N>>.
-//! - User definitions: unit-variant enum, named struct key.
+//! - User definitions: unit-variant enum, named struct key,
+//!   homogeneous payload-carrying enum (matched via native Rust
+//!   pattern binding — see `apply_last_action`).
 //! - Witness types: Uint<N>, Bytes<N>, Field, user enum.
 //! - Constructor: parameterized; initial values flow into deploy::initial_state.
 //! - Statements: if / else with cond_select-zeroed PIs, match on user enum,
@@ -35,6 +37,16 @@ pub mod kitchen_sink {
         Setup,
         Active,
         Frozen,
+    }
+
+    /// Homogeneous payload-carrying enum. Wire-encoded as
+    /// `(Bytes<1>, Uint<64>)` — the discriminant followed by the
+    /// shared payload. Matched on with native Rust pattern syntax
+    /// (no synthetic accessor); see `apply_last_action` below.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub enum Action {
+        Mint(Uint<64>),
+        Burn(Uint<64>),
     }
 
     /// User-defined named struct usable as a Map key — encoded
@@ -81,6 +93,15 @@ pub mod kitchen_sink {
         /// MerkleTree of height 5 over `Bytes<32>` leaves — exercises
         /// `insert`, `check_root`, and `merkle_tree_path_root`.
         pub commits: MerkleTree<5, Bytes<32>>,
+        /// `Cell<Action>` — a homogeneous payload-carrying enum stored
+        /// in ledger state. Read back in `apply_last_action` and
+        /// pattern-matched with payload binding.
+        pub last_action: Cell<Action>,
+        /// Per-variant totals accumulated from the matched payload —
+        /// shows that the bound payload (`amount` below) flows through
+        /// to a `Cell::set` call from inside a match arm.
+        pub last_mint_amount: Cell<Uint<64>>,
+        pub last_burn_amount: Cell<Uint<64>>,
     }
 
     // -----------------------------------------------------------------
@@ -121,6 +142,9 @@ pub mod kitchen_sink {
                 records: Map::empty(),
                 members: Set::empty(),
                 commits: MerkleTree::empty(),
+                last_action: Cell::new(Action::Mint(Uint::<64>::from(0u64))),
+                last_mint_amount: Cell::new(Uint::<64>::from(0u64)),
+                last_burn_amount: Cell::new(Uint::<64>::from(0u64)),
             }
         }
 
@@ -142,6 +166,26 @@ pub mod kitchen_sink {
                 }
                 _ => {
                     self.total_ops.increment_by(5);
+                }
+            }
+        }
+
+        // -------------------------------------------------------------
+        // Circuit: read a `Cell<Action>` from ledger state and pattern-
+        // match it with payload binding. The matched `amount` (a
+        // `Uint<64>` payload) flows through to per-variant `Cell::set`
+        // calls — plain Rust syntax, no synthetic accessor.
+        // -------------------------------------------------------------
+
+        #[midnight(circuit)]
+        pub fn apply_last_action(&mut self) {
+            let action = self.last_action.get();
+            match action {
+                Action::Mint(amount) => {
+                    self.last_mint_amount.set(amount);
+                }
+                Action::Burn(amount) => {
+                    self.last_burn_amount.set(amount);
                 }
             }
         }
@@ -362,6 +406,7 @@ mod tests {
         let _t = transcript::build_verify_membership_transcript(&state, &witnesses);
         let _t = transcript::build_bump_loop_transcript();
         let _t = transcript::build_record_commit_transcript(&witnesses);
+        let _t = transcript::build_apply_last_action_transcript(&state);
 
         // Query is plain Rust — call it for the side of completeness.
         state.total_ops.increment();

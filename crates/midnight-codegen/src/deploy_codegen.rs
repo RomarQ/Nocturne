@@ -104,8 +104,15 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
     quote! {
         /// Generated deployment helpers.
         pub mod deploy {
+            // Pull in `midnight::types` (Bytes / Uint / Field / ...) and the
+            // user's contract module so generated patterns can name the user's
+            // own enums and structs (e.g. `Action::Mint` in a payload-enum
+            // initializer). Without `use super::*` deploy can't resolve the
+            // user-defined types.
             #[allow(unused_imports)]
             use midnight::types::*;
+            #[allow(unused_imports)]
+            use super::*;
             use midnight::runtime::onchain_state::state::StateValue;
 
             /// Construct the initial contract state by calling the user
@@ -157,13 +164,50 @@ fn cell_aligned_value_expr(
     if s == "bool" {
         return quote! { (#accessor) };
     }
-    // User enum: encode as its u8 discriminant.
+    // User enum:
+    //   - Unit-only variants → just the u8 discriminant.
+    //   - Homogeneous payload `enum E { V(T) }` → the `(Bytes<1>, T)`
+    //     tuple `AlignedValue::from(_)` accepts via the upstream
+    //     `Aligned for (A, B)` impl. The payload is extracted via an
+    //     inline `match` over the enum value — same shape the
+    //     transcript codegen uses elsewhere; no synthetic accessor.
     if let syn::Type::Path(tp) = t
         && tp.qself.is_none()
         && let Some(seg) = tp.path.segments.last()
-        && user_enums.contains_key(&seg.ident.to_string())
+        && let Some(variants) = user_enums.get(&seg.ident.to_string())
     {
-        return quote! { (#accessor).discriminant() };
+        let payload_ty = variants.first().and_then(|v| v.payload.clone());
+        return match payload_ty {
+            None => quote! { (#accessor).discriminant() },
+            Some(p) => {
+                let enum_ident = seg.ident.clone();
+                let arms: Vec<TokenStream> = variants
+                    .iter()
+                    .map(|v| {
+                        let v_ident = v.name.clone();
+                        quote! { #enum_ident::#v_ident(__p) => __p }
+                    })
+                    .collect();
+                // Recurse to get the payload's per-type representation
+                // (Uint<N> needs `.value() as u<N>`, Bytes<N> needs
+                // `*as_bytes()`, …) — same encoding the runtime side
+                // would produce for a `Cell<T>::set(payload)`.
+                let payload_repr = cell_aligned_value_expr(
+                    Some(&p),
+                    &quote! { __payload },
+                    user_enums,
+                );
+                quote! {
+                    {
+                        let __e = #accessor;
+                        let __payload = match __e.clone() {
+                            #(#arms),*
+                        };
+                        (__e.discriminant(), #payload_repr)
+                    }
+                }
+            }
+        };
     }
     // `Uint<N>` is a wrapper exposing `.value()`; raw `u*` primitives don't
     // have `.value()`. Branch on which we're looking at so the cast applies

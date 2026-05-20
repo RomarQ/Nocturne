@@ -298,6 +298,35 @@ fn generate_op_stmt(
                             // Field alignment via Fr's Aligned impl).
                             quote! { Fr::from((#accessor).value()) }
                         }
+                        // User enum: discriminant alone for unit-only enums,
+                        // or `(discriminant, payload)` tuple for homogeneous
+                        // payload enums. The payload is extracted with an
+                        // inline match — same shape used in the deploy
+                        // codegen and the set/AlignedValue paths.
+                        Some(t) if is_user_enum(t, user_enums) => {
+                            match user_enum_payload_type(t, user_enums) {
+                                None => quote! { (#accessor).discriminant() },
+                                Some(p) => {
+                                    let payload_match = enum_payload_match_expr(
+                                        &quote! { __e.clone() },
+                                        t,
+                                        user_enums,
+                                    )
+                                    .unwrap_or_else(|| quote! { unreachable!() });
+                                    let payload_repr = tuple_component_aligned_repr(
+                                        &p,
+                                        &quote! { __payload },
+                                    );
+                                    quote! {
+                                        {
+                                            let __e = #accessor;
+                                            let __payload = #payload_match;
+                                            (__e.discriminant(), #payload_repr)
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         Some(t) => match primitive_cast_for_type(t) {
                             Some(c) => quote! { (#accessor) #c },
                             None => quote! { #accessor },
