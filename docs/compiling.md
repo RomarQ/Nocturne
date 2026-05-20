@@ -133,6 +133,8 @@ In addition, the macro injects two submodules inside the user's contract module 
 - `contract::transcript` — `build_<circuit>_transcript(witnesses?, state?)` builders that produce the on-chain transcript `Op` sequence at call time.
 - `contract::deploy::initial_state(...)` — constructs the `StateValue` tree the ledger expects at deploy, forwarding any constructor parameters.
 
+See [artifacts.md](./artifacts.md) for the per-artifact reference (what each file contains, who produces it, who consumes it, when it changes).
+
 ## 4. Force-regenerate keys with `cargo midnight keygen`
 
 `cargo midnight build` runs keygen automatically for new or out-of-date circuits, so you usually don't need to call this directly. Use it when you want to re-keygen every circuit unconditionally — typically after the upstream universal setup parameters change, or to verify a clean build from a fresh `target/`:
