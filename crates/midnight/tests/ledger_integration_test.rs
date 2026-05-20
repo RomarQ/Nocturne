@@ -7736,3 +7736,61 @@ async fn inline_witness_arithmetic_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for inline witness arithmetic");
 }
+
+// ---------------------------------------------------------------------------
+// `assert!(cond)` in the transcript builder evaluates the condition at
+// runtime so a violating witness fails fast before reaching the prover.
+// Pins both the success path (transcript builder returns normally) and
+// the failure path (assertion panics with the message we emit).
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod assert_runtime {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct AssertLedger {
+        pub seen: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct AssertWitnesses {
+        pub flag: Boolean,
+    }
+
+    impl AssertLedger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                seen: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn require_flag(&mut self, witnesses: &AssertWitnesses) {
+            assert!(witnesses.flag.value(), "flag must be true");
+            self.seen.increment();
+        }
+    }
+}
+
+#[test]
+fn assert_in_circuit_body_evaluates_at_runtime() {
+    // Success path — flag is true, builder returns without panicking.
+    let ok = assert_runtime::AssertWitnesses {
+        flag: Boolean::from(true),
+    };
+    let _t = assert_runtime::transcript::build_require_flag_transcript(&ok);
+}
+
+#[test]
+#[should_panic(expected = "midnight-edsl: circuit assertion failed")]
+fn assert_in_circuit_body_panics_on_violation() {
+    // Failure path — flag is false, builder panics with the assertion
+    // message we emit. Catches witness/state violations before the
+    // prover wastes work on an impossible proof.
+    let bad = assert_runtime::AssertWitnesses {
+        flag: Boolean::from(false),
+    };
+    let _t = assert_runtime::transcript::build_require_flag_transcript(&bad);
+}

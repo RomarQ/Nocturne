@@ -612,6 +612,40 @@ fn generate_op_stmt(
             quote! { compile_error!(#msg); }
         }
 
+        // `assert!(cond)` / `assert_eq!(a, b)` — at transcript-build
+        // time we evaluate the same condition in plain Rust so the
+        // builder fails fast when a witness violates the invariant,
+        // before the prover wastes work on an impossible proof. The
+        // ZKIR side emits the in-circuit constraint separately.
+        ExprIR::Assert { kind, .. } => match kind {
+            midnight_ir::expr::AssertKind::Assert(cond) => {
+                let witness_pushes =
+                    collect_witness_private_inputs(cond, witness_types, user_enums);
+                let cond_expr = generate_runtime_cond(
+                    cond, field_names, field_types, user_structs, user_enums,
+                );
+                quote! {
+                    #witness_pushes
+                    assert!(#cond_expr, "midnight-edsl: circuit assertion failed");
+                }
+            }
+            midnight_ir::expr::AssertKind::AssertEq(a, b) => {
+                let wa = collect_witness_private_inputs(a, witness_types, user_enums);
+                let wb = collect_witness_private_inputs(b, witness_types, user_enums);
+                let la = generate_runtime_cond(
+                    a, field_names, field_types, user_structs, user_enums,
+                );
+                let lb = generate_runtime_cond(
+                    b, field_names, field_types, user_structs, user_enums,
+                );
+                quote! {
+                    #wa
+                    #wb
+                    assert_eq!(#la, #lb, "midnight-edsl: circuit assert_eq! failed");
+                }
+            }
+        },
+
         _ => quote! {},
     }
 }
@@ -739,6 +773,22 @@ fn collect_witness_private_inputs(
         }
         ExprIR::UnaryOp { expr: inner, .. } => {
             collect_witness_private_inputs(inner, witness_types, user_enums)
+        }
+        ExprIR::Reference { expr: inner, .. } => {
+            collect_witness_private_inputs(inner, witness_types, user_enums)
+        }
+        ExprIR::Disclose { value: inner, .. } => {
+            collect_witness_private_inputs(inner, witness_types, user_enums)
+        }
+        ExprIR::FnCall { args, .. } => {
+            // `merkle_tree_path_root(&witnesses.path)` and similar
+            // builtins recurse into their args so the witness reads
+            // they carry get pushed before the condition evaluates.
+            let pushes: Vec<TokenStream> = args
+                .iter()
+                .map(|a| collect_witness_private_inputs(a, witness_types, user_enums))
+                .collect();
+            quote! { #(#pushes)* }
         }
         _ => quote! {},
     }
