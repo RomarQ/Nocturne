@@ -130,10 +130,13 @@ fn cmd_keygen() {
         match load_and_keygen(zkir_path) {
             Ok((k, rows)) => {
                 println!("    k={k}, rows={rows}");
-                println!(
-                    "    Keys written to {}",
-                    zkir_path.parent().unwrap().display()
-                );
+                let keys_dir = zkir_path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|c| c.join("keys"));
+                if let Some(d) = keys_dir {
+                    println!("    Keys written to {}", d.display());
+                }
             }
             Err(e) => {
                 eprintln!("    Failed: {e}");
@@ -171,12 +174,18 @@ fn load_and_keygen(path: &Path) -> Result<(u8, usize), Box<dyn std::error::Error
 
         let (pk, vk) = ir.keygen(&pp).await?;
 
-        // Write key files next to the ZKIR file.
-        let dir = path.parent().unwrap();
-        let stem = path.file_stem().unwrap().to_string_lossy();
+        // Write key files to a sibling `keys/` directory, matching the
+        // compactc layout (`target/midnight/<contract>/{zkir,compiler,keys}/`).
+        // Downstream tooling expects prover/verifier files separated from
+        // the ZKIR sources, not interleaved with them.
+        let zkir_dir = path.parent().unwrap();
+        let contract_dir = zkir_dir.parent().unwrap();
+        let keys_dir = contract_dir.join("keys");
+        std::fs::create_dir_all(&keys_dir)?;
 
-        let pk_path = dir.join(format!("{stem}.prover"));
-        let vk_path = dir.join(format!("{stem}.verifier"));
+        let stem = path.file_stem().unwrap().to_string_lossy();
+        let pk_path = keys_dir.join(format!("{stem}.prover"));
+        let vk_path = keys_dir.join(format!("{stem}.verifier"));
 
         let mut pk_file = std::io::BufWriter::new(std::fs::File::create(&pk_path)?);
         let mut vk_file = std::io::BufWriter::new(std::fs::File::create(&vk_path)?);

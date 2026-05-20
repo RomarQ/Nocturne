@@ -93,9 +93,14 @@ If `cargo midnight build` reports "No contract artifacts found," the macro didn'
 target/midnight/<contract_name>/
 ├── zkir/
 │   └── <circuit_name>.zkir       # one per circuit function
-└── compiler/
-    └── contract-info.json        # circuit signatures + witness types
+├── compiler/
+│   └── contract-info.json        # circuit signatures + witness types
+└── keys/                         # populated by `cargo midnight keygen`
+    ├── <circuit_name>.prover
+    └── <circuit_name>.verifier
 ```
+
+`keys/` is empty until you run keygen — `cargo midnight build` only emits `zkir/` and `compiler/`. The layout mirrors compactc's so downstream tooling sees the same shape from either compiler.
 
 **`*.zkir`** is a JSON-serialised `IrSource` — the ZK circuit definition. One file per `#[midnight(circuit)]` method. Consumed by `IrSource::load()` downstream for keygen, proving, and verification.
 
@@ -130,8 +135,8 @@ cargo midnight keygen
 For every `.zkir` under `target/midnight/`, this writes:
 
 ```
-target/midnight/<contract_name>/zkir/<circuit_name>.prover     # binary prover key
-target/midnight/<contract_name>/zkir/<circuit_name>.verifier   # binary verifier key
+target/midnight/<contract_name>/keys/<circuit_name>.prover     # binary prover key
+target/midnight/<contract_name>/keys/<circuit_name>.verifier   # binary verifier key
 ```
 
 The verifier key is what gets registered on-chain when you deploy. Keys are tagged with `midnight-serialize` so downstream tools recognise them.
