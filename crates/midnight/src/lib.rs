@@ -5,6 +5,19 @@
 pub use midnight_macro::contract;
 pub use midnight_macro::test;
 
+/// Off-chain identity function for the `midnight::disclose(_)` syntax.
+///
+/// The IR parser already detects this call by path and lowers it to
+/// `ExprIR::Disclose` — the ZKIR emitter then emits the matching
+/// `DeclarePubInput` + `PiSkip`. At plain Rust evaluation (e.g. the
+/// user's transcript-builder call sites or `#[midnight::test]`
+/// helpers), the call has no on-chain semantics; it just yields the
+/// value verbatim so the surrounding code type-checks.
+#[inline]
+pub fn disclose<T>(value: T) -> T {
+    value
+}
+
 /// Re-exports of all types used in contract definitions.
 pub mod types {
     pub use midnight_storage::*;

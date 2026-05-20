@@ -1668,6 +1668,23 @@ fn extract_map_kv_types(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
 fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
     match expr {
         ExprIR::Reference { expr: inner, .. } => arg_to_runtime_raw_expr(inner),
+        // Tuple literal in argument position — e.g. an inline
+        // `(witnesses.k, witnesses.epoch)` passed as a Map key.
+        // Reconstruct the Rust tuple so the `__t.0` / `__t.1`
+        // projections downstream in `aligned_value_arg_expr` see a
+        // real tuple instead of falling through to `()`.
+        ExprIR::Tuple { elements, .. } => {
+            let parts: Vec<TokenStream> = elements
+                .iter()
+                .map(arg_to_runtime_raw_expr)
+                .collect();
+            let trailing = if elements.len() == 1 {
+                quote! { , }
+            } else {
+                quote! {}
+            };
+            quote! { (#(#parts),* #trailing) }
+        }
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
             // `Clone` is fine for the small types we currently support

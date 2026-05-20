@@ -1173,6 +1173,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kitchen-sink"
+version = "0.1.0"
+dependencies = [
+ "midnight",
+]
+
+[[package]]
 name = "konst"
 version = "0.3.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"

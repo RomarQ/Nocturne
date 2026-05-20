@@ -14,6 +14,7 @@ members = [
     "crates/midnight-primitives",
     "tools/cargo-midnight",
     "examples/counter-contract",
+    "examples/kitchen-sink",
 ]
 
 [workspace.package]
