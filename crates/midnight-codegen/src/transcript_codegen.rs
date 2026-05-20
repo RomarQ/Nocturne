@@ -523,12 +523,29 @@ fn generate_op_stmt(
                     .collect();
                 quote! { #(#pushes)* }
             } else if witness_ty.map(|t| is_user_enum(t, user_enums)).unwrap_or(false) {
-                // User-defined unit-variant enum witness: push the
-                // discriminant as a u8-aligned Fr.
-                quote! {
-                    private_transcript.push(
-                        Fr::from(witnesses.#field_ident.discriminant() as u64),
-                    );
+                // User-defined enum witness: push the discriminant first.
+                // For payload-carrying enums, also push the payload's
+                // per-component Frs via the regular tuple-component path.
+                let payload = witness_ty.and_then(|t| user_enum_payload_type(t, user_enums));
+                match payload {
+                    None => quote! {
+                        private_transcript.push(
+                            Fr::from(witnesses.#field_ident.discriminant() as u64),
+                        );
+                    },
+                    Some(p) => {
+                        let payload_pushes = component_private_push(
+                            &p,
+                            &quote! { witnesses.#field_ident.payload().clone() },
+                            user_enums,
+                        );
+                        quote! {
+                            private_transcript.push(
+                                Fr::from(witnesses.#field_ident.discriminant() as u64),
+                            );
+                            #payload_pushes
+                        }
+                    }
                 }
             } else {
                 quote! {
@@ -974,6 +991,22 @@ fn generate_cell_set(
     }
 }
 
+/// If `ty` is a user-defined homogeneous-payload enum, return the
+/// shared payload type T. Returns `None` for unit-only enums and for
+/// non-enum types.
+fn user_enum_payload_type(
+    ty: &syn::Type,
+    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+) -> Option<syn::Type> {
+    let syn::Type::Path(tp) = ty else { return None };
+    if tp.qself.is_some() {
+        return None;
+    }
+    let seg = tp.path.segments.last()?;
+    let variants = user_enums.get(&seg.ident.to_string())?;
+    variants.first().and_then(|v| v.payload.clone())
+}
+
 /// True if `ty` is the path of a user-defined unit-variant enum.
 fn is_user_enum(
     ty: &syn::Type,
@@ -1046,8 +1079,24 @@ fn component_private_push(
         };
     }
     if is_user_enum(ty, user_enums) {
-        return quote! {
-            private_transcript.push(Fr::from((#accessor).discriminant() as u64));
+        let payload = user_enum_payload_type(ty, user_enums);
+        return match payload {
+            None => quote! {
+                private_transcript.push(Fr::from((#accessor).discriminant() as u64));
+            },
+            Some(p) => {
+                // Discriminant first, then the payload's own per-Fr
+                // pushes via the regular tuple-component path.
+                let payload_pushes = component_private_push(
+                    &p,
+                    &quote! { (#accessor).payload().clone() },
+                    user_enums,
+                );
+                quote! {
+                    private_transcript.push(Fr::from((#accessor).discriminant() as u64));
+                    #payload_pushes
+                }
+            }
         };
     }
     // Uint<N> / primitive integer: cast to u64 for Fr::from.
@@ -1139,13 +1188,31 @@ fn aligned_value_arg_expr(
                 }
             };
         }
-        // User-defined unit-variant enum: lower to its u8 discriminant.
-        // The macro-generated `discriminant()` method (see
-        // enum_helpers.rs) gives us the encoding-compatible u8 the
-        // on-chain Bytes<1> alignment expects.
+        // User-defined enum:
+        //   - All-unit variants → just the u8 discriminant.
+        //   - Homogeneous payload `enum E { V(T), ... }` → the
+        //     `(Bytes<1>, T)` tuple `AlignedValue::from(_)` accepts
+        //     via the upstream `Aligned for (A, B)` impl. The
+        //     macro-generated `payload()` accessor extracts the inner
+        //     T from any variant.
         if is_user_enum(t, user_enums) {
             let raw = arg_to_runtime_raw_expr(expr);
-            return quote! { (#raw).discriminant() };
+            let payload_ty = user_enum_payload_type(t, user_enums);
+            return match payload_ty {
+                None => quote! { (#raw).discriminant() },
+                Some(p) => {
+                    let payload_repr = tuple_component_aligned_repr(
+                        &p,
+                        &quote! { __e.payload().clone() },
+                    );
+                    quote! {
+                        {
+                            let __e = #raw;
+                            (__e.discriminant(), #payload_repr)
+                        }
+                    }
+                }
+            };
         }
     }
     let value_expr = arg_to_runtime_expr(expr);

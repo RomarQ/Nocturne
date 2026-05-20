@@ -7783,6 +7783,123 @@ fn assert_in_circuit_body_evaluates_at_runtime() {
     let _t = assert_runtime::transcript::build_require_flag_transcript(&ok);
 }
 
+// ---------------------------------------------------------------------------
+// Homogeneous payload-carrying enum: `enum Action { Mint(Uint<64>), Burn(Uint<64>) }`.
+// Wire-encoded as `(Bytes<1>, Uint<64>)` — the upstream `Aligned for (A, B)`
+// impl handles the tuple shape. Pins that the discriminant + payload both
+// reach the on-chain transcript in the right order.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod payload_enum {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub enum Action {
+        Mint(Uint<64>),
+        Burn(Uint<64>),
+    }
+
+    #[midnight(ledger)]
+    pub struct PayloadEnumLedger {
+        pub last: Cell<Action>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct PayloadEnumWitnesses {
+        pub next: Action,
+    }
+
+    impl PayloadEnumLedger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                last: Cell::new(Action::Mint(Uint::<64>::from(0u64))),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn record(&mut self, witnesses: &PayloadEnumWitnesses) {
+            self.last.set(witnesses.next.clone());
+        }
+    }
+}
+
+fn build_payload_enum_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod payload_enum {
+            #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+            pub enum Action { Mint(Uint<64>), Burn(Uint<64>) }
+            #[midnight(ledger)]
+            pub struct PayloadEnumLedger { last: Cell<Action> }
+            #[midnight(witnesses)]
+            pub struct PayloadEnumWitnesses { pub next: Action }
+            impl PayloadEnumLedger {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { last: Cell::new(Action::Mint(Uint::<64>::from(0u64))) } }
+                #[midnight(circuit)]
+                pub fn record(&mut self, witnesses: &PayloadEnumWitnesses) {
+                    self.last.set(witnesses.next.clone());
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "record")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn payload_enum_cell_set_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_payload_enum_ir();
+    let witnesses = payload_enum::PayloadEnumWitnesses {
+        next: payload_enum::Action::Burn(Uint::<64>::from(99u64)), // discriminant 1, payload 99
+    };
+    let nocturne_transcript =
+        payload_enum::transcript::build_record_transcript(&witnesses);
+
+    // Private inputs: discriminant Fr, then payload Fr.
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(1u8),
+        AlignedValue::from(99u64),
+    ];
+    let preimage =
+        canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "payload enum Cell::set must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for payload enum Cell::set");
+}
+
 #[test]
 #[should_panic(expected = "midnight-edsl: circuit assertion failed")]
 fn assert_in_circuit_body_panics_on_violation() {

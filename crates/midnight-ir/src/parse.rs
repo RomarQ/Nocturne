@@ -87,30 +87,76 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                 // Only unit-variant enums are supported for now —
                 // anything carrying a payload would need ADT
                 // encoding work and bumps from Bytes<1> discriminant.
+                // Two shapes are accepted:
+                //   - All unit variants (encoded as `Bytes<1>` discriminant).
+                //   - Homogeneous single-payload variants (encoded as a
+                //     `(Bytes<1>, T)` tuple where every variant carries
+                //     the same `T`).
+                // Anything else surfaces as a parse error at the offending
+                // variant — heterogeneous payloads, named-field variants,
+                // and multi-field tuple variants all need a separate
+                // encoding ADR. See memories/scope-blockers.md.
                 let mut variants: Vec<UserEnumVariant> = Vec::new();
-                let mut payload_variant: Option<syn::Ident> = None;
+                let mut payload_ty: Option<syn::Type> = None;
+                let mut rejected: Option<(syn::Ident, String)> = None;
                 for v in &e.variants {
-                    if !matches!(v.fields, syn::Fields::Unit) {
-                        payload_variant = Some(v.ident.clone());
-                        break;
+                    let this_payload = match &v.fields {
+                        syn::Fields::Unit => None,
+                        syn::Fields::Unnamed(u) if u.unnamed.len() == 1 => {
+                            Some(u.unnamed.first().unwrap().ty.clone())
+                        }
+                        syn::Fields::Unnamed(_) => {
+                            rejected = Some((
+                                v.ident.clone(),
+                                "multi-field tuple variants".to_string(),
+                            ));
+                            break;
+                        }
+                        syn::Fields::Named(_) => {
+                            rejected = Some((
+                                v.ident.clone(),
+                                "named-field variants".to_string(),
+                            ));
+                            break;
+                        }
+                    };
+                    // Enforce homogeneity: every variant has to agree
+                    // with the first variant's payload shape.
+                    if variants.is_empty() {
+                        payload_ty = this_payload.clone();
+                    } else {
+                        let want = payload_ty.as_ref().map(|t| {
+                            quote::quote!(#t).to_string().replace(' ', "")
+                        });
+                        let got = this_payload.as_ref().map(|t| {
+                            quote::quote!(#t).to_string().replace(' ', "")
+                        });
+                        if want != got {
+                            rejected = Some((
+                                v.ident.clone(),
+                                format!(
+                                    "heterogeneous payloads (expected `{}`, found `{}`)",
+                                    want.unwrap_or_else(|| "unit".to_string()),
+                                    got.unwrap_or_else(|| "unit".to_string()),
+                                ),
+                            ));
+                            break;
+                        }
                     }
                     variants.push(UserEnumVariant {
                         name: v.ident.clone(),
+                        payload: this_payload,
                     });
                 }
-                if let Some(bad) = payload_variant {
-                    // Don't silently drop the enum from `user_enums` — the
-                    // user would then get a downstream "type not found"
-                    // diagnostic that doesn't point at the real cause.
+                if let Some((bad, reason)) = rejected {
                     diagnostics.push(MidnightError::new(
                         bad.span(),
                         ErrorCode::UnsupportedExpression,
                         format!(
-                            "enum `{}` variant `{}` carries a payload; \
-                             only unit-variant enums are supported today. \
-                             See memories/scope-blockers.md for the \
-                             encoding ADR this is waiting on.",
-                            e.ident, bad
+                            "enum `{}` variant `{}` rejected: {}. Only \
+                             homogeneous single-payload or all-unit enums \
+                             are supported. See memories/scope-blockers.md.",
+                            e.ident, bad, reason
                         ),
                     ));
                 } else if !variants.is_empty() {

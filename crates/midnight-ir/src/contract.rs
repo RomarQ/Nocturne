@@ -43,13 +43,17 @@ pub struct UserStructField {
     pub ty: Type,
 }
 
-/// One variant of a user-defined enum. Today the IR only records the
-/// variant name and assigns a discriminant by declaration order;
-/// payload-carrying variants aren't yet supported and are rejected at
-/// parse time.
+/// One variant of a user-defined enum. The discriminant is the
+/// variant's index in declaration order. `payload` is `Some(T)` when
+/// the variant carries a single unnamed field, `None` for unit
+/// variants. Enums must be homogeneous — either all unit or all
+/// payload-carrying with the same `T` — so the wire encoding is
+/// statically a `(Bytes<1>, T)` tuple (or just `Bytes<1>` for the
+/// unit case).
 #[derive(Debug, Clone)]
 pub struct UserEnumVariant {
     pub name: Ident,
+    pub payload: Option<Type>,
 }
 
 /// IR for the `#[midnight(ledger)]` struct.

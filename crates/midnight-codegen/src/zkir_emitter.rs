@@ -1925,19 +1925,37 @@ fn aligned_value_encoding(
     user_structs: &HashMap<String, Vec<midnight_ir::UserStructField>>,
     user_enums: &HashMap<String, Vec<midnight_ir::UserEnumVariant>>,
 ) -> Option<AlignedValueEncoding> {
-    // User-defined unit-variant enum: encoded as Bytes<1> carrying
-    // the variant discriminant (0, 1, ..., n-1). Caps at 256 variants
-    // by construction (u8 discriminant); larger enums would need a
-    // multi-byte Bytes<_> shape.
+    // User-defined enum:
+    //   - All-unit variants → `Bytes<1>` discriminant only.
+    //   - Homogeneous payload variants → `(Bytes<1>, T)` tuple composing
+    //     the discriminant atom with the shared payload type's atoms.
     if let syn::Type::Path(tp) = ty
         && tp.qself.is_none()
         && let Some(seg) = tp.path.segments.last()
-        && user_enums.contains_key(&seg.ident.to_string())
+        && let Some(variants) = user_enums.get(&seg.ident.to_string())
     {
-        return Some(AlignedValueEncoding {
-            alignment_atoms: vec![1, 1],
-            value_field_count: 1,
-        });
+        let payload = variants.first().and_then(|v| v.payload.clone());
+        match payload {
+            None => {
+                return Some(AlignedValueEncoding {
+                    alignment_atoms: vec![1, 1],
+                    value_field_count: 1,
+                });
+            }
+            Some(p) => {
+                // Compose `(Bytes<1>, T)` — the discriminant's lone atom
+                // followed by T's own atoms.
+                let inner =
+                    aligned_value_encoding(&p, user_structs, user_enums)?;
+                let mut atoms: Vec<i32> = vec![1 + (inner.alignment_atoms.len() as i32 - 1)];
+                atoms.push(1);
+                atoms.extend(inner.alignment_atoms.iter().skip(1));
+                return Some(AlignedValueEncoding {
+                    alignment_atoms: atoms,
+                    value_field_count: 1 + inner.value_field_count,
+                });
+            }
+        }
     }
     // Compose a flat encoding from an ordered list of component types,
     // mirroring upstream `Aligned for (T1, ..., Tn)`. Shared between
@@ -2114,14 +2132,19 @@ fn witness_fr_layout(
         return layout;
     }
 
-    // User-defined unit-variant enum: discriminant fits in a single
-    // u8, so it's an 8-bit constrained PrivateInput.
+    // User-defined enum: discriminant is an 8-bit constrained
+    // PrivateInput, followed by the payload's own layout (empty for
+    // unit-only enums).
     if let syn::Type::Path(tp) = ty
         && tp.qself.is_none()
         && let Some(seg) = tp.path.segments.last()
-        && user_enums.contains_key(&seg.ident.to_string())
+        && let Some(variants) = user_enums.get(&seg.ident.to_string())
     {
-        return vec![FrLayout::Bits(8)];
+        let mut layout = vec![FrLayout::Bits(8)];
+        if let Some(p) = variants.first().and_then(|v| v.payload.as_ref()) {
+            layout.extend(witness_fr_layout(p, user_structs, user_enums));
+        }
+        return layout;
     }
 
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
