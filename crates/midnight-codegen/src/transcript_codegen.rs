@@ -859,7 +859,18 @@ fn generate_cell_set(
     field_ty: Option<&syn::Type>,
     user_structs: &HashMap<String, Vec<UserStructField>>, user_enums: &HashMap<String, Vec<UserEnumVariant>>,
 ) -> TokenStream {
-    let t_ty = field_ty.and_then(extract_cell_inner_type);
+    // `Counter::set` shares the Cell<u64> wire shape (both deploy as
+    // `StateValue::Cell(AlignedValue<u64>)`), so route Counter through
+    // the same code with `u64` as the implicit inner type.
+    let t_ty = field_ty.and_then(extract_cell_inner_type).or_else(|| {
+        field_ty.and_then(|t| {
+            if is_counter_type(t) {
+                Some(syn::parse_quote!(u64))
+            } else {
+                None
+            }
+        })
+    });
     let value_aligned = args
         .first()
         .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), user_structs, user_enums))

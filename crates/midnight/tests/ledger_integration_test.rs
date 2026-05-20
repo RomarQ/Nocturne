@@ -7521,3 +7521,107 @@ async fn counter_value_let_binding_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Counter::value let-binding read");
 }
+
+// ---------------------------------------------------------------------------
+// Counter::set(witness): dynamic counter assignment from a witness value.
+// Counter shares Cell<u64>'s on-chain shape, so the Push + Push + Ins
+// pattern reuses the Cell::set codegen path.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod counter_set {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct CounterSetState {
+        pub count: Counter,
+    }
+
+    #[midnight(witnesses)]
+    pub struct CounterSetWitnesses {
+        pub target: Uint<64>,
+    }
+
+    impl CounterSetState {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                count: Counter::zero(),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn assign(&mut self, witnesses: &CounterSetWitnesses) {
+            self.count.set(witnesses.target.value() as u64);
+        }
+    }
+}
+
+fn build_counter_set_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod counter_set {
+            #[midnight(ledger)]
+            pub struct CounterSetState { count: Counter }
+            #[midnight(witnesses)]
+            pub struct CounterSetWitnesses { pub target: Uint<64> }
+            impl CounterSetState {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { count: Counter::zero() } }
+                #[midnight(circuit)]
+                pub fn assign(&mut self, witnesses: &CounterSetWitnesses) {
+                    self.count.set(witnesses.target.value() as u64);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "assign")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn counter_set_from_witness_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_counter_set_ir();
+    let witnesses = counter_set::CounterSetWitnesses {
+        target: Uint::<64>::from(99u64),
+    };
+    let nocturne_transcript =
+        counter_set::transcript::build_assign_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(99u64)];
+    let preimage =
+        canonical_preimage("assign", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Counter::set(witness) must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Counter::set(witness)");
+}

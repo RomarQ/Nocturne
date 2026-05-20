@@ -23,6 +23,14 @@ impl Counter {
         self.0 += n as u64;
     }
 
+    /// Overwrite the counter with `n`. On-chain this lowers to the same
+    /// Push + Ins shape `Cell<u64>::set` uses (Counter and Cell<u64>
+    /// share their StateValue::Cell encoding), so the value can be a
+    /// witness read — there's no const restriction like increment_by.
+    pub fn set(&mut self, n: u64) {
+        self.0 = n;
+    }
+
     pub fn value(&self) -> u64 {
         self.0
     }

@@ -838,6 +838,14 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
 
         Expr::ForLoop(for_expr) => parse_const_for_loop(for_expr),
 
+        // `x as u64` / `x as Field` etc. — Nocturne treats the cast as
+        // transparent for IR purposes (the wire-side encoding is
+        // determined by the surrounding consumer's expected type, not
+        // by the cast itself). Lower to the inner expression so
+        // downstream codegen handles the Rust-side `as` verbatim where
+        // it needs to.
+        Expr::Cast(c) => parse_expr(&c.expr),
+
         _ => Ok(ExprIR::Unsupported {
             span: Span::call_site(),
             description: format!("unsupported expression: {}", quote::quote!(#expr)),

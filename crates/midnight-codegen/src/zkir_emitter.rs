@@ -1691,10 +1691,20 @@ impl ZkirEmitter {
 
         // The VALUE: Push(storage: true, Cell(<value-typed AlignedValue>)).
         if !value_vars.is_empty() {
-            let inner_ty = self
-                .field_types
-                .get(field_idx as usize)
-                .and_then(extract_cell_inner_type);
+            let field_ty = self.field_types.get(field_idx as usize);
+            // Counter shares Cell<u64>'s wire shape (deploys as
+            // `StateValue::Cell(AlignedValue<u64>)`). Use `u64` as the
+            // implicit inner type so `Counter::set(_)` emits the same
+            // 8-byte alignment the runtime side produces.
+            let inner_ty = field_ty.and_then(extract_cell_inner_type).or_else(|| {
+                field_ty.and_then(|t| {
+                    if is_counter_type(t) {
+                        Some(syn::parse_quote!(u64))
+                    } else {
+                        None
+                    }
+                })
+            });
             let value_encoding = inner_ty
                 .as_ref()
                 .and_then(|t| aligned_value_encoding(t, &self.user_structs, &self.user_enums));
@@ -2272,6 +2282,16 @@ fn extract_ledger_read_result_type(ty: &syn::Type) -> Option<syn::Type> {
         }
     }
     None
+}
+
+/// True if `ty` is the `Counter` storage type.
+fn is_counter_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return seg.ident == "Counter";
+    }
+    false
 }
 
 /// If `ty` is `Cell<T>`, return `T`. Otherwise `None`.
