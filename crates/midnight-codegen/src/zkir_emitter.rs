@@ -169,6 +169,21 @@ impl ZkirEmitter {
         }
     }
 
+    /// Resolve the element type `T` for an `ExprIR::Index`'s `array`
+    /// sub-expression. Today we only handle the witness case
+    /// (`witnesses.<f>[i]`) — let-bound arrays and ledger-stored
+    /// arrays would need separate machinery (the variables map doesn't
+    /// carry types, and ledger fields are wrapped in `Cell<...>` etc.).
+    fn array_element_type(&self, array: &ExprIR) -> Option<syn::Type> {
+        match array {
+            ExprIR::WitnessAccess { field, .. } => {
+                let ty = self.witness_types.get(&field.to_string())?;
+                array_inner_type_and_len(ty).map(|(t, _)| t)
+            }
+            _ => None,
+        }
+    }
+
     /// Emit (or reuse a cached) `LoadImm 0`.
     fn emit_load_zero(&mut self) -> Index {
         if let Some(z) = self.zero_var {
@@ -616,6 +631,21 @@ impl ZkirEmitter {
             }
 
             ExprIR::Reference { expr: inner, .. } => self.emit_expr(inner),
+
+            // `arr[i]` — emit the array's first wire and shift by
+            // `i * layout_len(T)`. The array's element type comes from
+            // the source: `witnesses.<f>[i]` resolves `T` via
+            // `self.witness_types`; `self.<f>[i]` resolves via
+            // `self.field_types`. Other shapes (let-bound arrays, etc.)
+            // aren't supported in this pass — they need wire-type
+            // tracking on local bindings.
+            ExprIR::Index { array, index, .. } => {
+                let first = self.emit_expr(array)?;
+                let elem_ty = self.array_element_type(array)?;
+                let stride = witness_fr_layout(&elem_ty, &self.user_structs, &self.user_enums).len() as Index;
+                Some(first + (*index) * stride)
+            }
+
             ExprIR::StructInit { .. } | ExprIR::Unsupported { .. } => None,
         }
     }
@@ -2006,6 +2036,17 @@ fn aligned_value_encoding(
         return compose(&comps);
     }
 
+    // Fixed-size array `[T; N]`: equivalent to an N-tuple of T —
+    // upstream's tuple `Aligned` impl is what we rely on for the
+    // wire shape. The N-tuple cap (11 in `tuple_aligned!`) is what
+    // limits N here.
+    if let syn::Type::Array(arr) = ty
+        && let Some(n) = array_len_from_type(arr)
+    {
+        let comps: Vec<syn::Type> = std::iter::repeat_n((*arr.elem).clone(), n as usize).collect();
+        return compose(&comps);
+    }
+
     // User-defined named struct: look up its fields and treat as a
     // named tuple. Match by the outer ident on the type path; the rest
     // of the path is ignored (this is intentional for now —
@@ -2139,6 +2180,20 @@ fn witness_fr_layout(
         let mut layout = Vec::new();
         for elem in &tt.elems {
             layout.extend(witness_fr_layout(elem, user_structs, user_enums));
+        }
+        return layout;
+    }
+
+    // Fixed-size array `[T; N]`: same shape as `(T, T, …, T)` with N
+    // copies. The wire representation is contiguous; `ExprIR::Index`
+    // uses `array_first + i * len(T_layout)` to point at element i.
+    if let syn::Type::Array(arr) = ty
+        && let Some(n) = array_len_from_type(arr)
+    {
+        let elem_layout = witness_fr_layout(&arr.elem, user_structs, user_enums);
+        let mut layout = Vec::with_capacity(elem_layout.len() * n as usize);
+        for _ in 0..n {
+            layout.extend(elem_layout.iter().cloned());
         }
         return layout;
     }
@@ -2371,6 +2426,25 @@ fn option_payload_type_zkir(ty: &syn::Type) -> Option<syn::Type> {
         syn::GenericArgument::Type(t) => Some(t.clone()),
         _ => None,
     }
+}
+
+/// Resolve the length `N` of a `[T; N]` type from its AST node.
+/// Only integer-literal lengths are accepted; const-generic
+/// expressions (`[T; N]` where `N` is a const param) need a wider
+/// rewrite and aren't handled here.
+fn array_len_from_type(arr: &syn::TypeArray) -> Option<u32> {
+    let syn::Expr::Lit(lit) = &arr.len else { return None };
+    let syn::Lit::Int(int) = &lit.lit else { return None };
+    int.base10_parse::<u32>().ok()
+}
+
+/// If `ty` is `[T; N]`, return `(T, N)`.
+fn array_inner_type_and_len(ty: &syn::Type) -> Option<(syn::Type, u32)> {
+    if let syn::Type::Array(arr) = ty {
+        let n = array_len_from_type(arr)?;
+        return Some(((*arr.elem).clone(), n));
+    }
+    None
 }
 
 /// If `ty` is `Cell<T>`, return `T`. Otherwise `None`.

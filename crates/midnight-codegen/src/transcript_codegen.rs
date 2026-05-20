@@ -561,6 +561,13 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         }
                     }
                 }
+            } else if let Some((_elem_ty, _n)) = witness_ty.and_then(extract_array_type) {
+                // Fixed-size array witness `[T; N]`: push N elements in
+                // index order. `component_private_push`'s Array arm
+                // handles the per-element walk; we just hand it the
+                // base accessor.
+                let ty = witness_ty.unwrap();
+                component_private_push(ty, &quote! { witnesses.#field_ident }, ctx)
             } else if let Some(fields) = witness_ty.and_then(|t| user_struct_fields(t, user_structs)) {
                 // User-defined struct witness: project each field by
                 // name and push its per-component Fr in declaration
@@ -845,6 +852,13 @@ fn let_binding_runtime_value(
             let ident = format_ident!("{}", name.to_string());
             Some(quote! { #ident.clone() })
         }
+        // `let x = arr[i];` — emit a Rust index expression over the
+        // array sub-expression's runtime value.
+        ExprIR::Index { array, index, .. } => {
+            let arr = let_binding_runtime_value(array, ctx)?;
+            let idx = syn::Index::from(*index as usize);
+            Some(quote! { (#arr)[#idx].clone() })
+        }
         _ => None,
     }
 }
@@ -873,6 +887,12 @@ fn collect_witness_private_inputs(
                 quote! {
                     private_transcript.push(Fr::from((#disc) as u64));
                 }
+            } else if witness_ty.and_then(extract_array_type).is_some() {
+                // Fixed-size array witness: ZKIR pre-allocated N slots
+                // on first witness touch, so the condition collector
+                // has to push the same N values.
+                let ty = witness_ty.unwrap();
+                component_private_push(ty, &quote! { witnesses.#field_ident }, ctx)
             } else {
                 quote! {
                     private_transcript.push(Fr::from(witnesses.#field_ident.value() as u64));
@@ -881,6 +901,14 @@ fn collect_witness_private_inputs(
         }
         ExprIR::MethodCall { receiver, .. } => {
             collect_witness_private_inputs(receiver, ctx)
+        }
+        ExprIR::Index { array, .. } => {
+            // `witnesses.arr[i]` in a condition: the WitnessAccess
+            // allocates ALL N*len(T) wires on first touch, so we must
+            // push the entire array's contents — not just the indexed
+            // element. Delegate to the inner WitnessAccess and push it
+            // as an array.
+            collect_witness_private_inputs(array, ctx)
         }
         ExprIR::BinaryOp { lhs, rhs, .. } => {
             let l = collect_witness_private_inputs(lhs, ctx);
@@ -957,6 +985,14 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             }
         }
         ExprIR::Reference { expr: inner, .. } => arg_to_runtime_expr(inner),
+        // `arr[i]` in argument position — emit a Rust index expression,
+        // then `.value()` so the indexed wrapper type unwraps to its
+        // primitive for the surrounding cast/AlignedValue::from path.
+        ExprIR::Index { array, index, .. } => {
+            let arr_expr = arg_to_runtime_raw_expr(array);
+            let idx = syn::Index::from(*index as usize);
+            quote! { (#arr_expr)[#idx].value() }
+        }
         // Arithmetic in argument position — e.g. `cell.set(w.a + w.b)`.
         // Compose each operand's value expression so the bare argument
         // form works without the user having to introduce a let
@@ -1294,6 +1330,21 @@ fn component_private_push(
             private_transcript.push(Fr::from((#accessor).value() as u64));
         };
     }
+    if let Some((elem_ty, n)) = extract_array_type(ty) {
+        // Walk the array element-by-element, recursing through
+        // component_private_push so nested arrays / tuples / enums
+        // all push in declaration order. The accessor must be a
+        // place expression that supports `[i]` indexing — the
+        // callers (witnesses access, ledger Cell::get) already
+        // bind it to a Rust value of type `[T; N]`.
+        let pushes: Vec<TokenStream> = (0..n as usize)
+            .map(|i| {
+                let idx = syn::Index::from(i);
+                component_private_push(&elem_ty, &quote! { (#accessor)[#idx] }, ctx)
+            })
+            .collect();
+        return quote! { #(#pushes)* };
+    }
     if is_enum_like(ty, ctx.user_enums) {
         let payload = enum_like_payload_type(ty, ctx.user_enums);
         let disc = enum_like_discriminant_expr(accessor, ty);
@@ -1365,6 +1416,26 @@ fn aligned_value_arg_expr(
             return quote! {
                 {
                     let __t = #raw;
+                    (#(#comps),* #trailing)
+                }
+            };
+        }
+        // Fixed-size array `[T; N]`: build an N-tuple of T from the
+        // array's elements. Upstream's tuple `Aligned` impl gives us
+        // the wire shape that matches Compact's `Vector<N, T>`. N ≤ 11
+        // (the upstream tuple cap); larger N is rejected at parse.
+        if let Some((elem_ty, n)) = extract_array_type(t) {
+            let raw = arg_to_runtime_raw_expr(expr);
+            let comps: Vec<TokenStream> = (0..n as usize)
+                .map(|i| {
+                    let idx = syn::Index::from(i);
+                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] })
+                })
+                .collect();
+            let trailing = if n == 1 { quote! { , } } else { quote! {} };
+            return quote! {
+                {
+                    let __a = #raw;
                     (#(#comps),* #trailing)
                 }
             };
@@ -1783,6 +1854,20 @@ fn is_counter_type(ty: &syn::Type) -> bool {
     false
 }
 
+/// If `ty` is `[T; N]`, return `(T, N)`. Used by array-aware emitters
+/// to walk fixed-size array payloads as N-tuples of T (which is the
+/// wire shape upstream's `Aligned for (T1, …, Tn)` produces).
+fn extract_array_type(ty: &syn::Type) -> Option<(syn::Type, u32)> {
+    if let syn::Type::Array(arr) = ty
+        && let syn::Expr::Lit(lit) = &arr.len
+        && let syn::Lit::Int(int) = &lit.lit
+        && let Ok(n) = int.base10_parse::<u32>()
+    {
+        return Some(((*arr.elem).clone(), n));
+    }
+    None
+}
+
 /// If `ty` is `Cell<T>`, return `T`. Mirrors `zkir_emitter::extract_cell_inner_type`.
 fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
     if let syn::Type::Path(tp) = ty
@@ -2082,6 +2167,14 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
             // `Clone` is fine for the small types we currently support
             // (Boolean, Uint<N>, Bytes<N>) — they're all `Clone`.
             quote! { witnesses.#field_ident.clone() }
+        }
+        // `arr[i]` in argument position: lift to a Rust index expr
+        // over the cloned array. Element types in scope today are all
+        // `Copy`/`Clone` so the projection is straightforward.
+        ExprIR::Index { array, index, .. } => {
+            let arr_expr = arg_to_runtime_raw_expr(array);
+            let idx = syn::Index::from(*index as usize);
+            quote! { (#arr_expr)[#idx].clone() }
         }
         ExprIR::Disclose { value, .. } => arg_to_runtime_raw_expr(value),
         ExprIR::Var { name, .. } => {

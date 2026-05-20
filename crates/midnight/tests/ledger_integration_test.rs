@@ -8358,3 +8358,119 @@ async fn option_none_branch_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Option<Uint<64>> = None");
 }
+
+// ---------------------------------------------------------------------------
+// `[T; N]` end-to-end. Witness a `[Uint<64>; 3]` and store one of its
+// elements via a literal index. Same wire shape as Compact's
+// `Vector<3, Uint<64>>` (an N-tuple) via the upstream tuple `Aligned` impl.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod array_witness_index {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct ArrLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct ArrWitnesses {
+        pub buckets: [Uint<64>; 3],
+    }
+
+    impl ArrLedger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn apply(&mut self, witnesses: &ArrWitnesses) {
+            self.stored.set(witnesses.buckets[1]);
+        }
+    }
+}
+
+fn build_array_witness_index_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod array_witness_index {
+            #[midnight(ledger)]
+            pub struct ArrLedger { stored: Cell<Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct ArrWitnesses { pub buckets: [Uint<64>; 3] }
+            impl ArrLedger {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[midnight(circuit)]
+                pub fn apply(&mut self, witnesses: &ArrWitnesses) {
+                    self.stored.set(witnesses.buckets[1]);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "apply")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn array_witness_index_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_array_witness_index_ir();
+    let witnesses = array_witness_index::ArrWitnesses {
+        buckets: [
+            Uint::<64>::from(11u64),
+            Uint::<64>::from(22u64),
+            Uint::<64>::from(33u64),
+        ],
+    };
+    let nocturne_transcript = array_witness_index::transcript::build_apply_transcript(&witnesses);
+
+    // ZKIR allocates one PrivateInput per element of the array
+    // (witness_fr_layout for `[Uint<64>; 3]` returns three Bits(64)
+    // entries), so the prover must commit to all three elements via
+    // the `private_transcript_outputs` even though only buckets[1] is
+    // wired into the Cell::set value.
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(11u64),
+        AlignedValue::from(22u64),
+        AlignedValue::from(33u64),
+    ];
+    let preimage =
+        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "[Uint<64>; 3] index read must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for [Uint<64>; 3] index");
+}

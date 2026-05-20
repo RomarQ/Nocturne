@@ -99,6 +99,17 @@ pub enum ExprIR {
         enum_name: Ident,
     },
 
+    /// `arr[index]` where `arr` is a fixed-size `[T; N]` value and
+    /// `index` is a compile-time constant (always literal after
+    /// `parse_const_for_loop` substitution). At the ZKIR layer this
+    /// lowers to `array.first + index * layout_len(T)`; at the
+    /// transcript layer it stays as Rust `arr[index]`.
+    Index {
+        span: Span,
+        array: Box<ExprIR>,
+        index: u32,
+    },
+
     /// A block of statements.
     Block { span: Span, stmts: Vec<ExprIR> },
 

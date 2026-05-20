@@ -919,6 +919,36 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
         // it needs to.
         Expr::Cast(c) => parse_expr(&c.expr),
 
+        // `arr[idx]` — only const integer literal indices (`arr[0]`,
+        // `arr[1]`, ...). After `parse_const_for_loop` unrolls a const
+        // for-loop, the loop variable substitutes to a literal int, so
+        // `arr[i]` inside `for i in 0..N { ... }` parses to this arm.
+        // Non-literal indices return Unsupported and surface as a
+        // compile_error pointing at the call site.
+        Expr::Index(idx) => {
+            let array = parse_expr(&idx.expr)?;
+            let index_expr: &Expr = &idx.index;
+            if let Expr::Lit(lit) = index_expr
+                && let syn::Lit::Int(int) = &lit.lit
+                && let Ok(n) = int.base10_parse::<u32>()
+            {
+                Ok(ExprIR::Index {
+                    span: Span::call_site(),
+                    array: Box::new(array),
+                    index: n,
+                })
+            } else {
+                Ok(ExprIR::Unsupported {
+                    span: Span::call_site(),
+                    description: format!(
+                        "array index must be a compile-time integer literal (got `{}`); \
+                         use a `for i in 0..N` loop so the index unrolls to a literal",
+                        quote::quote!(#index_expr)
+                    ),
+                })
+            }
+        }
+
         _ => Ok(ExprIR::Unsupported {
             span: Span::call_site(),
             description: format!("unsupported expression: {}", quote::quote!(#expr)),
