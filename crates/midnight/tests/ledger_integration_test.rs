@@ -8474,3 +8474,177 @@ async fn array_witness_index_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for [Uint<64>; 3] index");
 }
+
+// ---------------------------------------------------------------------------
+// `if`-as-expression end-to-end. `let x = if cond { a } else { b };` must
+// multiplex the branch result wires via `cond_select` at the ZKIR layer and
+// emit a Rust `if`-expression on the transcript side that yields the same
+// runtime value. Only the active branch's witness `PrivateInput` consumes
+// from `private_transcript_outputs`; the inactive side reads 0 via the
+// guard machinery.
+// ---------------------------------------------------------------------------
+
+#[midnight::contract]
+mod if_as_expression {
+    use super::*;
+
+    #[midnight(ledger)]
+    pub struct IfLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[midnight(witnesses)]
+    pub struct IfWitnesses {
+        pub flag: Boolean,
+        pub a: Uint<64>,
+        pub b: Uint<64>,
+    }
+
+    impl IfLedger {
+        #[midnight(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[midnight(circuit)]
+        pub fn apply(&mut self, witnesses: &IfWitnesses) {
+            let chosen = if witnesses.flag.value() {
+                witnesses.a
+            } else {
+                witnesses.b
+            };
+            self.stored.set(chosen);
+        }
+    }
+}
+
+fn build_if_as_expression_ir() -> midnight_zkir::IrSource {
+    use midnight_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod if_as_expression {
+            #[midnight(ledger)]
+            pub struct IfLedger { stored: Cell<Uint<64>> }
+            #[midnight(witnesses)]
+            pub struct IfWitnesses {
+                pub flag: Boolean,
+                pub a: Uint<64>,
+                pub b: Uint<64>,
+            }
+            impl IfLedger {
+                #[midnight(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[midnight(circuit)]
+                pub fn apply(&mut self, witnesses: &IfWitnesses) {
+                    let chosen = if witnesses.flag.value() {
+                        witnesses.a
+                    } else {
+                        witnesses.b
+                    };
+                    self.stored.set(chosen);
+                }
+            }
+        }
+    };
+    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "apply")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn if_as_expression_then_branch_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_if_as_expression_ir();
+    let witnesses = if_as_expression::IfWitnesses {
+        flag: Boolean::from(true),
+        a: Uint::<64>::from(77u64),
+        b: Uint::<64>::from(99u64),
+    };
+    let nocturne_transcript = if_as_expression::transcript::build_apply_transcript(&witnesses);
+
+    // flag=true → ZKIR consumes flag's Fr + the then-branch's a Fr. The
+    // else-branch's b PrivateInput is gated to 0 by the guard.
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(true),
+        AlignedValue::from(77u64),
+    ];
+    let preimage =
+        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "if-as-expression (then branch) must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for if-as-expression then branch");
+}
+
+#[tokio::test]
+async fn if_as_expression_else_branch_proves_and_verifies() {
+    use midnight::runtime::base_crypto::fab::AlignedValue;
+    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+
+    let ir = build_if_as_expression_ir();
+    let witnesses = if_as_expression::IfWitnesses {
+        flag: Boolean::from(false),
+        a: Uint::<64>::from(77u64),
+        b: Uint::<64>::from(99u64),
+    };
+    let nocturne_transcript = if_as_expression::transcript::build_apply_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(false),
+        AlignedValue::from(99u64),
+    ];
+    let preimage =
+        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "if-as-expression (else branch) must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for if-as-expression else branch");
+}

@@ -523,10 +523,19 @@ impl ZkirEmitter {
                 self.guard = then_guard;
                 self.in_conditional = true;
 
+                // Track the last sub-expression's wire so an
+                // `if`-as-expression can multiplex the branch results
+                // via `cond_select` further down. Statement-only
+                // branches (every entry returns `None`) leave
+                // `then_result` as `None` and we fall back to the
+                // legacy `Some(cond_idx)` return so existing
+                // if-as-statement behaviour is unchanged.
+                let mut then_result: Option<Index> = None;
                 for expr in then_branch {
-                    self.emit_expr(expr);
+                    then_result = self.emit_expr(expr).or(then_result);
                 }
 
+                let mut else_result: Option<Index> = None;
                 if let Some(else_stmts) = else_branch {
                     // Else branch: `outer AND NOT cond`, computed as
                     // `cond_select(cond, 0, outer_guard)`. At top level, just `!cond`.
@@ -543,12 +552,29 @@ impl ZkirEmitter {
                     self.guard = else_guard;
 
                     for expr in else_stmts {
-                        self.emit_expr(expr);
+                        else_result = self.emit_expr(expr).or(else_result);
                     }
                 }
 
                 self.guard = outer_guard;
                 self.in_conditional = outer_in_conditional;
+
+                // When both branches yielded a value, this `if` is
+                // being used as an expression — multiplex the
+                // branch wires via `cond_select(cond, then, else)`.
+                // The mux happens at the outer guard so its own
+                // result wire is unconstrained by the branch
+                // guards (the values it pulls from are already
+                // zeroed by the guard machinery on the inactive
+                // side).
+                if let (Some(t), Some(e)) = (then_result, else_result) {
+                    return Some(self.emit_instruction(Instruction::CondSelect {
+                        bit: cond_idx,
+                        a: t,
+                        b: e,
+                    }));
+                }
+
                 Some(cond_idx)
             }
 

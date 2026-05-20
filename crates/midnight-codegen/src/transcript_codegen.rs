@@ -859,6 +859,24 @@ fn let_binding_runtime_value(
             let idx = syn::Index::from(*index as usize);
             Some(quote! { (#arr)[#idx].clone() })
         }
+        // `let x = if c { a } else { b };` — mirror the ZKIR's
+        // cond_select multiplex with a Rust `if`-expression that
+        // evaluates the last statement of each branch and selects
+        // based on the condition. Falls back to `None` if either
+        // branch's terminal expression has no usable value shape
+        // (caller drops into the block-wrap path which still
+        // captures side effects but yields `()`).
+        ExprIR::If { cond, then_branch, else_branch, .. } => {
+            let else_stmts = else_branch.as_ref()?;
+            let then_last = then_branch.last()?;
+            let else_last = else_stmts.last()?;
+            let then_value = let_binding_runtime_value(then_last, ctx)?;
+            let else_value = let_binding_runtime_value(else_last, ctx)?;
+            let cond_expr = generate_runtime_cond(cond, ctx);
+            Some(quote! {
+                if #cond_expr { #then_value } else { #else_value }
+            })
+        }
         _ => None,
     }
 }
