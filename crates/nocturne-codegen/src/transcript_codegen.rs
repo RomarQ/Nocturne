@@ -1047,6 +1047,16 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
                 _ => quote! { () },
             }
         }
+        // Free-function calls in value-unwrap position. Same path
+        // reconstruction as `arg_to_runtime_raw_expr`, then `.value()`
+        // so the surrounding primitive cast (`as u64`, etc.) has a
+        // bare integer to work with. The args themselves go through
+        // the raw form because they need to be the constructor's
+        // declared types, not value-unwrapped versions.
+        ExprIR::FnCall { path, args, .. } => {
+            let arg_exprs: Vec<TokenStream> = args.iter().map(arg_to_runtime_raw_expr).collect();
+            quote! { #path(#(#arg_exprs),*).value() }
+        }
         // Anything else falls back to `()` and will fail to compile with a
         // clear "the trait `From<()>` is not implemented" message, which
         // points the user at an unsupported argument shape.
@@ -2237,10 +2247,15 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
                 }
             }
         }
-        // Free-function calls — map known builtins to their Rust form.
-        // `merkle_tree_path_root` returns a `MerkleTreeDigest` that
-        // ledger methods like `check_root` can accept as `&MerkleTreeDigest`.
-        ExprIR::FnCall { name, args, .. } => {
+        // Free-function calls — map known builtins to their Rust form,
+        // otherwise reconstruct the call verbatim from the parsed path.
+        // The parser stores the full path (e.g. `Uint::<64>::from`)
+        // on `ExprIR::FnCall::path`, so calls like `Uint::<64>::from(0u64)`
+        // in `Cell::set` argument position now flow through instead of
+        // silently collapsing to `()`.
+        ExprIR::FnCall {
+            name, path, args, ..
+        } => {
             let name_str = name.to_string();
             match name_str.as_str() {
                 "merkle_tree_path_root" => {
@@ -2248,11 +2263,15 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
                         .first()
                         .map(arg_to_runtime_raw_expr)
                         .unwrap_or_else(|| quote! { () });
-                    // The off-chain helper lives in midnight-storage; the
+                    // The off-chain helper lives in nocturne-storage; the
                     // umbrella crate re-exports it via `nocturne::types`.
                     quote! { nocturne::types::merkle_tree_path_root(&#arg) }
                 }
-                _ => quote! { () },
+                _ => {
+                    let arg_exprs: Vec<TokenStream> =
+                        args.iter().map(arg_to_runtime_raw_expr).collect();
+                    quote! { #path(#(#arg_exprs),*) }
+                }
             }
         }
         // For anything else, fall back to the value-unwrapped form.

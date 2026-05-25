@@ -34,10 +34,17 @@ pub enum ExprIR {
         expr: Box<ExprIR>,
     },
 
-    /// Function call: `persistent_hash(&x)`, `transient_hash(&x)`, etc.
+    /// Function call: `persistent_hash(&x)`, `Uint::<64>::from(0u64)`, etc.
+    ///
+    /// `name` is the last segment of the callee path (used by codegen
+    /// dispatch to recognise builtins by short name like `persistent_hash`).
+    /// `path` is the full callee path including generic arguments, used
+    /// to reconstruct the call verbatim in transcript-side codegen when
+    /// the callee isn't a recognised builtin (e.g. `Uint::<64>::from`).
     FnCall {
         span: Span,
         name: Ident,
+        path: syn::Path,
         args: Vec<ExprIR>,
     },
 

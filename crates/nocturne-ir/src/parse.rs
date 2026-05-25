@@ -688,6 +688,7 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                 return Ok(ExprIR::FnCall {
                     span: func_name.span(),
                     name: func_name,
+                    path: path.clone(),
                     args: parsed_args,
                 });
             }

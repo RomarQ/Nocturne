@@ -8561,3 +8561,100 @@ async fn if_as_expression_else_branch_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for if-as-expression else branch");
 }
+
+// ---------------------------------------------------------------------------
+// `FnCall` in `Cell::set` argument position. Previously
+// `arg_to_runtime_expr`'s FnCall arm fell through to `()` (the parser
+// dropped the call's path), forcing workarounds like empty
+// `None => {}` arms. With the path preserved on `ExprIR::FnCall::path`,
+// `Cell::set(Uint::<64>::from(42u64))` reconstructs the call verbatim.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod fncall_arg_position {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct FnCallLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    impl FnCallLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn reset(&mut self) {
+            // FnCall in Cell::set arg position. Before the path-preserving
+            // fix this generated `Cell::set(())` and failed to compile
+            // with "From<()> not implemented".
+            self.stored.set(Uint::<64>::from(42u64));
+        }
+    }
+}
+
+fn build_fncall_arg_position_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod fncall_arg_position {
+            #[nocturne(ledger)]
+            pub struct FnCallLedger { stored: Cell<Uint<64>> }
+            impl FnCallLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn reset(&mut self) {
+                    self.stored.set(Uint::<64>::from(42u64));
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "reset")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn fncall_arg_position_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_fncall_arg_position_ir();
+    let nocturne_transcript = fncall_arg_position::transcript::build_reset_transcript();
+
+    // No witnesses, no Popeq — Cell::set inlines the constant as an Op::Push
+    // literal AlignedValue. The prover doesn't commit to any private output.
+    let preimage = canonical_preimage("reset", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Cell::set(Uint::<64>::from(_)) must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell::set(Uint::<64>::from(_))");
+}
