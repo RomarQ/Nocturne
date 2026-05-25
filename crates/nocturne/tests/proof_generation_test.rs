@@ -4,12 +4,12 @@
 //! generate keys → build transcript → create ProofPreimage → generate
 //! actual Plonk ZK proof → verify it passes.
 
+use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 use nocturne::runtime::transient_crypto::curve::Fr;
 use nocturne::runtime::transient_crypto::hash::transient_commit;
 use nocturne::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
 use nocturne::runtime::transient_crypto::repr::FieldRepr;
 use nocturne::types::*;
-use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
 #[nocturne::contract]
 mod counter {

@@ -4,10 +4,10 @@
 #[cfg(test)]
 mod tests {
     use crate::zkir_emitter;
-    use nocturne_ir::parse_contract;
     use midnight_transient_crypto::curve::Fr;
     use midnight_transient_crypto::hash::transient_commit;
     use midnight_transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
+    use nocturne_ir::parse_contract;
 
     /// Compute a valid (commitment, opening) pair over `inputs ++ outputs`.
     /// Mirrors the check in `ir_vm.rs::preprocess` so check() accepts it.

@@ -4,56 +4,91 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
-  ci:
-    name: build, test, validate example
+  # ---------- Lint ----------
+
+  fmt:
+    name: Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Install rustfmt + clippy
-        run: rustup component add rustfmt clippy
+  # ---------- Check + Test ----------
 
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  test:
+    name: Unit + integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  # ---------- End-to-end: cargo nocturne build + keygen ----------
+
+  example:
+    name: Counter example (build + keygen + golden)
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
+      # Build the workspace so the cargo-nocturne binary and the
+      # examples' proc-macro outputs exist on disk before the keygen
+      # step runs.
       - name: Build workspace
         run: cargo build --workspace --locked
 
-      - name: Run tests
-        run: cargo test --workspace --locked
-
-      - name: cargo-midnight build (counter example)
-        run: ./target/debug/cargo-midnight build
+      - name: cargo nocturne build (counter example)
+        run: ./target/debug/cargo-nocturne build
 
       - name: Verify build artifacts
         run: |
-          test -f target/midnight/counter/zkir/increment.zkir
-          test -f target/midnight/counter/compiler/contract-info.json
+          test -f target/nocturne/counter/zkir/increment.zkir
+          test -f target/nocturne/counter/compiler/contract-info.json
 
-      - name: cargo-midnight keygen
-        run: ./target/debug/cargo-midnight keygen
+      - name: cargo nocturne keygen
+        run: ./target/debug/cargo-nocturne keygen
 
       - name: Verify keygen outputs
         run: |
-          test -f target/midnight/counter/keys/increment.prover
-          test -f target/midnight/counter/keys/increment.verifier
+          test -f target/nocturne/counter/keys/increment.prover
+          test -f target/nocturne/counter/keys/increment.verifier
 
       - name: Verifier key matches compactc golden
         run: |
-          cmp target/midnight/counter/keys/increment.verifier \
+          cmp target/nocturne/counter/keys/increment.verifier \
               tests/golden/counter-increment.verifier
           echo "Verifier key is byte-identical to compactc output."

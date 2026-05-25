@@ -2,9 +2,7 @@ use crate::LedgerType;
 use midnight_transient_crypto::merkle_tree::{
     self as upstream, MerkleTreeDigest as UpstreamDigest,
 };
-use nocturne_types::{
-    Boolean, Bytes, MerkleTreeDigest, MerkleTreePath, MerkleTreePathEntry,
-};
+use nocturne_types::{Boolean, Bytes, MerkleTreeDigest, MerkleTreePath, MerkleTreePathEntry};
 use std::marker::PhantomData;
 
 /// Marker trait for types that can be hashed as Merkle tree leaves.

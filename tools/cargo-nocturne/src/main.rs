@@ -130,7 +130,10 @@ fn keys_need_update(zkir_path: &Path) -> bool {
     let Some(contract_dir) = zkir_dir.parent() else {
         return true;
     };
-    let stem = match zkir_path.file_stem().map(|s| s.to_string_lossy().to_string()) {
+    let stem = match zkir_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+    {
         Some(s) => s,
         None => return true,
     };
@@ -194,8 +197,7 @@ fn keygen_paths(zkir_files: &[PathBuf]) {
         let circuit_name = zkir_path.file_stem().unwrap().to_string_lossy().to_string();
         println!("  Compiling circuit '{circuit_name}'...");
 
-        let result =
-            std::panic::catch_unwind(AssertUnwindSafe(|| load_and_keygen(zkir_path)));
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| load_and_keygen(zkir_path)));
         match result {
             Ok(Ok((k, rows))) => {
                 println!("    k={k}, rows={rows}");
@@ -314,4 +316,3 @@ fn find_zkir_files(dir: &Path, files: &mut Vec<PathBuf>) {
         }
     }
 }
-

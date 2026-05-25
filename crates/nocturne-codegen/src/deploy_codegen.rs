@@ -27,16 +27,18 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
     // rate, ...) can plumb them through without the caller having to
     // hand-roll the encoding.
     let ctor_params: Vec<(syn::Ident, syn::Type)> = constructor
-        .map(|c| c.params.iter().map(|p| (p.name.clone(), p.ty.clone())).collect())
+        .map(|c| {
+            c.params
+                .iter()
+                .map(|p| (p.name.clone(), p.ty.clone()))
+                .collect()
+        })
         .unwrap_or_default();
     let param_decls: Vec<TokenStream> = ctor_params
         .iter()
         .map(|(n, ty)| quote! { #n: #ty })
         .collect();
-    let param_idents: Vec<TokenStream> = ctor_params
-        .iter()
-        .map(|(n, _)| quote! { #n })
-        .collect();
+    let param_idents: Vec<TokenStream> = ctor_params.iter().map(|(n, _)| quote! { #n }).collect();
 
     let user_enums = &contract.user_enums;
 
@@ -168,11 +170,8 @@ fn cell_aligned_value_expr(
     // enum. The None case synthesizes `<T as Default>::default()` so
     // the AlignedValue's payload slot is well-formed.
     if let Some(payload_ty) = option_payload_type(t) {
-        let payload_repr = cell_aligned_value_expr(
-            Some(&payload_ty),
-            &quote! { __payload },
-            user_enums,
-        );
+        let payload_repr =
+            cell_aligned_value_expr(Some(&payload_ty), &quote! { __payload }, user_enums);
         return quote! {
             {
                 let __e = #accessor;
@@ -217,11 +216,8 @@ fn cell_aligned_value_expr(
                 // (Uint<N> needs `.value() as u<N>`, Bytes<N> needs
                 // `*as_bytes()`, …) — same encoding the runtime side
                 // would produce for a `Cell<T>::set(payload)`.
-                let payload_repr = cell_aligned_value_expr(
-                    Some(&p),
-                    &quote! { __payload },
-                    user_enums,
-                );
+                let payload_repr =
+                    cell_aligned_value_expr(Some(&p), &quote! { __payload }, user_enums);
                 quote! {
                     {
                         let __e = #accessor;
@@ -351,7 +347,9 @@ fn parse_merkle_tree_height(ty: &syn::Type) -> Option<u8> {
         }
         _ => return None,
     };
-    let syn::Expr::Lit(lit) = expr else { return None };
+    let syn::Expr::Lit(lit) = expr else {
+        return None;
+    };
     let syn::Lit::Int(int) = &lit.lit else {
         return None;
     };

@@ -54,10 +54,8 @@ mod tests {
     #[test]
     fn empty_path_root_equals_leaf_hash_low_fr() {
         // Path with zero entries: root is just the (degraded) leaf hash.
-        let path: MerkleTreePath<0, Bytes<32>> = MerkleTreePath::new(
-            Bytes::<32>::from([0x55u8; 32]),
-            [],
-        );
+        let path: MerkleTreePath<0, Bytes<32>> =
+            MerkleTreePath::new(Bytes::<32>::from([0x55u8; 32]), []);
         let r1 = merkle_tree_path_root(&path);
         let r2 = merkle_tree_path_root(&path);
         assert_eq!(r1, r2, "path root must be deterministic");

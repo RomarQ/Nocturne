@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use crate::zkir_emitter;
-    use nocturne_ir::parse_contract;
     use midnight_zkir::{Instruction, IrSource};
+    use nocturne_ir::parse_contract;
 
     fn compile_circuits(input: proc_macro2::TokenStream) -> Vec<(String, IrSource)> {
         let module: syn::ItemMod = syn::parse2(input).expect("parse module");

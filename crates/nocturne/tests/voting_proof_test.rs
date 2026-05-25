@@ -5,6 +5,7 @@
 //! demonstrates that the correct counter was incremented without
 //! revealing which one.
 
+use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 use nocturne::runtime::transient_crypto::curve::Fr;
 use nocturne::runtime::transient_crypto::hash::transient_commit;
 use nocturne::runtime::transient_crypto::proofs::{
@@ -12,7 +13,6 @@ use nocturne::runtime::transient_crypto::proofs::{
 };
 use nocturne::runtime::transient_crypto::repr::FieldRepr;
 use nocturne::types::*;
-use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
 #[nocturne::contract]
 mod ballot {

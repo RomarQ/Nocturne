@@ -147,7 +147,11 @@ fn test_merkle_tree_field_initial_state() {
     use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
     let mut frs: Vec<Fr> = Vec::new();
     av.deref().value_only_field_repr(&mut frs);
-    assert_eq!(frs, vec![Fr::from(0u64)], "next_index counter must start at 0");
+    assert_eq!(
+        frs,
+        vec![Fr::from(0u64)],
+        "next_index counter must start at 0"
+    );
 }
 
 use std::ops::Deref;

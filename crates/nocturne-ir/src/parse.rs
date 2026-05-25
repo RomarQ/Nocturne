@@ -106,17 +106,12 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                             Some(u.unnamed.first().unwrap().ty.clone())
                         }
                         syn::Fields::Unnamed(_) => {
-                            rejected = Some((
-                                v.ident.clone(),
-                                "multi-field tuple variants".to_string(),
-                            ));
+                            rejected =
+                                Some((v.ident.clone(), "multi-field tuple variants".to_string()));
                             break;
                         }
                         syn::Fields::Named(_) => {
-                            rejected = Some((
-                                v.ident.clone(),
-                                "named-field variants".to_string(),
-                            ));
+                            rejected = Some((v.ident.clone(), "named-field variants".to_string()));
                             break;
                         }
                     };
@@ -125,12 +120,12 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                     if variants.is_empty() {
                         payload_ty = this_payload.clone();
                     } else {
-                        let want = payload_ty.as_ref().map(|t| {
-                            quote::quote!(#t).to_string().replace(' ', "")
-                        });
-                        let got = this_payload.as_ref().map(|t| {
-                            quote::quote!(#t).to_string().replace(' ', "")
-                        });
+                        let want = payload_ty
+                            .as_ref()
+                            .map(|t| quote::quote!(#t).to_string().replace(' ', ""));
+                        let got = this_payload
+                            .as_ref()
+                            .map(|t| quote::quote!(#t).to_string().replace(' ', ""));
                         if want != got {
                             rejected = Some((
                                 v.ident.clone(),
@@ -443,10 +438,10 @@ fn parse_circuit_params(
                     let name = &pat_ident.ident;
                     let name_str = name.to_string();
                     // `quote!(#pat_type.ty)` renders the whole `PatType` followed by
-            // a literal `. ty` token sequence — not the type. Reach into the
-            // parsed field instead.
-            let ty = &*pat_type.ty;
-            let ty_str = quote::quote!(#ty).to_string();
+                    // a literal `. ty` token sequence — not the type. Reach into the
+                    // parsed field instead.
+                    let ty = &*pat_type.ty;
+                    let ty_str = quote::quote!(#ty).to_string();
 
                     // Detect witness parameter by:
                     // 1. Parameter name is "witnesses" or ends with "_witnesses"
@@ -713,9 +708,7 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
             // shape is the canonical Map::get expansion, and both
             // `conditional-branch-cond-select-zeroing` and
             // `conditional-io-guards` keep its inactive-branch reads zeroed.
-            if let Some((var_name, map_field, key_expr)) =
-                match_if_let_some_get(&expr_if.cond)
-            {
+            if let Some((var_name, map_field, key_expr)) = match_if_let_some_get(&expr_if.cond) {
                 // Parse the key twice so both the contains and the lookup
                 // get their own owned ExprIR (no Clone on ExprIR today).
                 // The two parses produce equivalent trees because the
@@ -1078,7 +1071,10 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
         match &arm.pat {
             Pat::Path(p) if p.path.segments.len() >= 2 || is_option_variant_path(&p.path) => {
                 shapes.push((
-                    ArmShape::Variant { path: &p.path, payload: None },
+                    ArmShape::Variant {
+                        path: &p.path,
+                        payload: None,
+                    },
                     arm.body.as_ref(),
                 ));
             }
@@ -1098,7 +1094,10 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
                     _ => return Ok(None),
                 };
                 shapes.push((
-                    ArmShape::Variant { path: &ts.path, payload },
+                    ArmShape::Variant {
+                        path: &ts.path,
+                        payload,
+                    },
                     arm.body.as_ref(),
                 ));
             }
@@ -1135,9 +1134,7 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
             let variants: Vec<VariantArm<'_>> = shapes
                 .iter()
                 .filter_map(|(s, body)| match s {
-                    ArmShape::Variant { path, payload } => {
-                        Some((*path, payload.clone(), *body))
-                    }
+                    ArmShape::Variant { path, payload } => Some((*path, payload.clone(), *body)),
                     ArmShape::Wild => None,
                 })
                 .collect();
@@ -1202,7 +1199,6 @@ fn lower_enum_match(expr_match: &syn::ExprMatch) -> MidnightResult<Option<ExprIR
     Ok(else_branch.and_then(|mut v| v.pop()))
 }
 
-
 /// Parse a match arm's body, which is either a block or a bare expression.
 fn parse_arm_body(body: &Expr) -> MidnightResult<Vec<ExprIR>> {
     match body {
@@ -1261,11 +1257,7 @@ fn match_match_on_get(
     let classify = |pat: &Pat| -> Kind {
         match pat {
             Pat::TupleStruct(pt)
-                if pt
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|s| s.ident == "Some")
+                if pt.path.segments.last().is_some_and(|s| s.ident == "Some")
                     && pt.elems.len() == 1 =>
             {
                 if let Pat::Ident(pi) = pt.elems.first().unwrap() {
@@ -1273,9 +1265,7 @@ fn match_match_on_get(
                 }
                 Kind::Other
             }
-            Pat::Path(pp)
-                if pp.path.segments.last().is_some_and(|s| s.ident == "None") =>
-            {
+            Pat::Path(pp) if pp.path.segments.last().is_some_and(|s| s.ident == "None") => {
                 Kind::NoneOrWild
             }
             // `None` as an Ident path falls through to here in some syn versions.
@@ -1377,7 +1367,11 @@ fn parse_const_for_loop(for_expr: &syn::ExprForLoop) -> MidnightResult<ExprIR> {
     })?;
     let inclusive = matches!(range.limits, syn::RangeLimits::Closed(_));
 
-    let last = if inclusive { end } else { end.saturating_sub(1) };
+    let last = if inclusive {
+        end
+    } else {
+        end.saturating_sub(1)
+    };
     if (inclusive && end < start) || (!inclusive && end <= start) {
         return Ok(ExprIR::Block {
             span: Span::call_site(),

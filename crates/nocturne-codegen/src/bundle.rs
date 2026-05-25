@@ -13,8 +13,8 @@
 //! Instead, it provides the data in a format that deployment tools
 //! can consume.
 
-use nocturne_ir::ContractIR;
 use midnight_zkir::IrSource;
+use nocturne_ir::ContractIR;
 use std::collections::HashMap;
 
 /// A compiled contract bundle ready for deployment.

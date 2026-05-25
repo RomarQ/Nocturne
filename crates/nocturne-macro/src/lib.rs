@@ -8,7 +8,7 @@ use proc_macro::TokenStream;
 ///
 /// The macro parses the module into an IR, validates it, generates ZKIR
 /// circuits and transcript VM bytecode, and writes artifacts to the
-/// `target/midnight/` directory.
+/// `target/nocturne/` directory.
 ///
 /// The original module is returned with midnight attributes stripped
 /// so that `cargo test` works in test mode without proof generation.
@@ -24,7 +24,7 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             // Generate all artifacts (ZKIR, VM, metadata).
             let artifacts = nocturne_codegen::codegen::generate_artifacts(&contract_ir);
 
-            // Write artifacts to the target/midnight/ directory.
+            // Write artifacts to the target/nocturne/ directory.
             let contract_name = contract_ir.name.to_string();
             let artifact_dir = find_artifact_dir(&contract_name);
             if let Err(e) = write_artifacts(&artifact_dir, &artifacts) {
@@ -50,10 +50,9 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 // Enum helpers go in first as raw items
                 // (impl blocks) so the rest of the generated code
                 // can call `.discriminant()` on user enum values.
-                let helper_items: Vec<syn::Item> =
-                    syn::parse2::<syn::File>(enum_helpers_tokens)
-                        .map(|f| f.items)
-                        .unwrap_or_default();
+                let helper_items: Vec<syn::Item> = syn::parse2::<syn::File>(enum_helpers_tokens)
+                    .map(|f| f.items)
+                    .unwrap_or_default();
                 for item in helper_items {
                     items.push(item);
                 }
@@ -176,7 +175,10 @@ fn write_artifacts(
             );
         }
         let json = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
-        write_if_changed(&zkir_dir.join(format!("{}.zkir", circuit.circuit_name)), json.as_bytes())?;
+        write_if_changed(
+            &zkir_dir.join(format!("{}.zkir", circuit.circuit_name)),
+            json.as_bytes(),
+        )?;
     }
 
     // Write contract metadata.

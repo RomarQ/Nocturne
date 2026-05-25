@@ -252,7 +252,10 @@ pub mod kitchen_sink {
 
         #[nocturne(circuit)]
         pub fn flip_flag(&mut self, witnesses: &Witnesses) {
-            assert!(witnesses.flag.value() || !witnesses.flag.value(), "tautology");
+            assert!(
+                witnesses.flag.value() || !witnesses.flag.value(),
+                "tautology"
+            );
             self.flagged.set(nocturne::disclose(witnesses.flag));
         }
 
@@ -263,7 +266,8 @@ pub mod kitchen_sink {
 
         #[nocturne(circuit)]
         pub fn deposit(&mut self, witnesses: &Witnesses) {
-            self.balances.insert(witnesses.caller.clone(), witnesses.amount);
+            self.balances
+                .insert(witnesses.caller.clone(), witnesses.amount);
             self.members.insert(witnesses.caller.clone());
             self.total_ops.increment();
         }
@@ -303,8 +307,10 @@ pub mod kitchen_sink {
 
         #[nocturne(circuit)]
         pub fn index_record(&mut self, witnesses: &Witnesses) {
-            self.pair_index
-                .insert((witnesses.caller.clone(), witnesses.epoch), witnesses.amount);
+            self.pair_index.insert(
+                (witnesses.caller.clone(), witnesses.epoch),
+                witnesses.amount,
+            );
             let _present = self.records.contains(&witnesses.record);
         }
 

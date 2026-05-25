@@ -31,10 +31,10 @@
 //! pi_skip guard:G count:4   // group marker
 //! ```
 
-use nocturne_ir::expr::{AssertKind, LiteralIR};
-use nocturne_ir::{CircuitIR, ContractIR, ExprIR};
 use midnight_transient_crypto::curve::Fr;
 use midnight_zkir::{Instruction, IrSource};
+use nocturne_ir::expr::{AssertKind, LiteralIR};
+use nocturne_ir::{CircuitIR, ContractIR, ExprIR};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -287,7 +287,11 @@ impl ZkirEmitter {
                     return self.emit_set_method(field_idx, &method_name, args, &t_ty);
                 }
 
-                if field_ty.as_ref().and_then(extract_merkle_tree_type).is_some() {
+                if field_ty
+                    .as_ref()
+                    .and_then(extract_merkle_tree_type)
+                    .is_some()
+                {
                     return self.emit_merkle_tree_method(field_idx, &method_name, args);
                 }
 
@@ -668,7 +672,8 @@ impl ZkirEmitter {
             ExprIR::Index { array, index, .. } => {
                 let first = self.emit_expr(array)?;
                 let elem_ty = self.array_element_type(array)?;
-                let stride = witness_fr_layout(&elem_ty, &self.user_structs, &self.user_enums).len() as Index;
+                let stride = witness_fr_layout(&elem_ty, &self.user_structs, &self.user_enums).len()
+                    as Index;
                 Some(first + (*index) * stride)
             }
 
@@ -789,7 +794,8 @@ impl ZkirEmitter {
         // the same order `AlignedValueExt::value_only_field_repr` writes
         // them on the construct_proof side, which mirrors the IR's
         // sequential PublicInput consumption.
-        let result_enc = result_ty.and_then(|t| aligned_value_encoding(t, &self.user_structs, &self.user_enums));
+        let result_enc =
+            result_ty.and_then(|t| aligned_value_encoding(t, &self.user_structs, &self.user_enums));
         let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
         self.push_declare_pub_input(popeq_op);
 
@@ -828,8 +834,8 @@ impl ZkirEmitter {
                 // for unknown result types. Emits one PublicInput so the
                 // existing internal-consistency tests keep working.
                 let pi = self.emit_instruction(Instruction::PublicInput {
-                        guard: self.current_io_guard(),
-                    });
+                    guard: self.current_io_guard(),
+                });
                 self.instructions.push(Instruction::PiSkip {
                     guard: Some(g),
                     count: 1,
@@ -1015,8 +1021,8 @@ impl ZkirEmitter {
         // declared as the fourth field of the Popeq encoding.
         let popeq_op = self.emit_load_imm(Fr::from(0x0du64));
         let result_var = self.emit_instruction(Instruction::PublicInput {
-                        guard: self.current_io_guard(),
-                    });
+            guard: self.current_io_guard(),
+        });
         self.push_declare_pub_input(popeq_op);
         let align_one = self.emit_load_imm(Fr::from(1u64));
         self.push_declare_pub_input(align_one);
@@ -1120,8 +1126,8 @@ impl ZkirEmitter {
         let mut first_value: Option<Index> = None;
         for bits in value_layout.iter().take(val_encoding.value_field_count) {
             let pi = self.emit_instruction(Instruction::PublicInput {
-                        guard: self.current_io_guard(),
-                    });
+                guard: self.current_io_guard(),
+            });
             if first_value.is_none() {
                 first_value = Some(pi);
             }
@@ -1309,19 +1315,13 @@ impl ZkirEmitter {
     /// `emit_merkle_tree_insert`. The argument must be a witness of
     /// type `MerkleTreePath<H, Bytes<N>>` whose layout the IR can
     /// parse from `self.witness_types`.
-    fn emit_merkle_tree_path_root(
-        &mut self,
-        args: &[nocturne_ir::ExprIR],
-    ) -> Option<Index> {
+    fn emit_merkle_tree_path_root(&mut self, args: &[nocturne_ir::ExprIR]) -> Option<Index> {
         use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment};
 
         // Drill through `Reference` to find the WitnessAccess.
         let arg = args.first()?;
         let path_witness_field = find_witness_field(arg)?;
-        let path_ty = self
-            .witness_types
-            .get(&path_witness_field)
-            .cloned()?;
+        let path_ty = self.witness_types.get(&path_witness_field).cloned()?;
         let path_ty_str = quote::quote!(#path_ty).to_string().replace(' ', "");
         let (height, leaf_ty_str) = parse_merkle_tree_path_type(&path_ty_str)?;
         // Any `Bytes<N>` leaf is supported. The leaf is hashed with
@@ -1621,11 +1621,7 @@ impl ZkirEmitter {
     /// which checkRoot doesn't touch). `Root` pops the BMT and pushes
     /// its root as `AlignedValue<Field>`. `Eq` compares two
     /// `StateValue::Cell` operands and pushes a bool.
-    fn emit_merkle_tree_check_root(
-        &mut self,
-        field_idx: u8,
-        digest_var: Index,
-    ) -> Option<Index> {
+    fn emit_merkle_tree_check_root(&mut self, field_idx: u8, digest_var: Index) -> Option<Index> {
         let g = self.guard;
 
         // Dup { n: 0 }.
@@ -1855,11 +1851,7 @@ impl ZkirEmitter {
     /// order). Matches on the last two segments so paths qualified with
     /// `self::`, `crate::`, etc. still resolve.
     fn resolve_enum_variant_discriminant(&self, path: &syn::Path) -> Option<u8> {
-        let segs: Vec<String> = path
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect();
+        let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         // `Some` / `None` are single-segment stdlib variants.
         if segs.len() == 1 {
             return match segs[0].as_str() {
@@ -2025,8 +2017,7 @@ fn aligned_value_encoding(
             Some(p) => {
                 // Compose `(Bytes<1>, T)` — the discriminant's lone atom
                 // followed by T's own atoms.
-                let inner =
-                    aligned_value_encoding(&p, user_structs, user_enums)?;
+                let inner = aligned_value_encoding(&p, user_structs, user_enums)?;
                 let mut atoms: Vec<i32> = vec![1 + (inner.alignment_atoms.len() as i32 - 1)];
                 atoms.push(1);
                 atoms.extend(inner.alignment_atoms.iter().skip(1));
@@ -2459,8 +2450,12 @@ fn option_payload_type_zkir(ty: &syn::Type) -> Option<syn::Type> {
 /// expressions (`[T; N]` where `N` is a const param) need a wider
 /// rewrite and aren't handled here.
 fn array_len_from_type(arr: &syn::TypeArray) -> Option<u32> {
-    let syn::Expr::Lit(lit) = &arr.len else { return None };
-    let syn::Lit::Int(int) = &lit.lit else { return None };
+    let syn::Expr::Lit(lit) = &arr.len else {
+        return None;
+    };
+    let syn::Lit::Int(int) = &lit.lit else {
+        return None;
+    };
     int.base10_parse::<u32>().ok()
 }
 

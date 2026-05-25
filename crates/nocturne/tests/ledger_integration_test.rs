@@ -20,13 +20,13 @@ use midnight_base_crypto::cost_model::RunningCost;
 use midnight_coin_structure::contract::ContractAddress;
 use midnight_ledger::construct::{ContractCallExt, ContractCallPrototype};
 use midnight_ledger::structure::ProofPreimageVersioned;
-use midnight_storage::arena::Sp;
-use midnight_storage::db::InMemoryDB;
 use midnight_onchain_runtime::context::Effects;
 use midnight_onchain_runtime::ops::Op;
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ContractOperation, EntryPointBuf};
 use midnight_onchain_runtime::transcript::{Transcript, TranscriptVersion};
+use midnight_storage::arena::Sp;
+use midnight_storage::db::InMemoryDB;
 
 #[nocturne::contract]
 mod counter {
@@ -723,8 +723,8 @@ async fn counter_ledger_constructed_preimage_satisfies_circuit() {
 
 #[tokio::test]
 async fn counter_ledger_constructed_preimage_proves_and_verifies() {
-    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
 
     let ir = build_counter_ir();
     let nocturne_transcript = counter::transcript::build_increment_transcript();
@@ -755,11 +755,11 @@ async fn counter_ledger_constructed_preimage_proves_and_verifies() {
 /// `memories/conditional-branch-cond-select-zeroing.md`.
 #[tokio::test]
 async fn voting_verifies_with_ledger_shape_pis() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_cast_vote_ir();
     let witnesses = ballot::BallotWitnesses {
@@ -830,9 +830,9 @@ async fn voting_verifies_with_ledger_shape_pis() {
 /// (see `memories/storage-cell-encoding-gap.md`).
 #[tokio::test]
 async fn flag_raise_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_flag_raise_ir();
     let nocturne_transcript = flag::transcript::build_raise_transcript();
@@ -875,9 +875,9 @@ async fn flag_raise_proves_and_verifies() {
 /// so the off-chain Popeq and the on-chain VM agree.
 #[tokio::test]
 async fn map_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_check_member_ir();
     let state = membership::MembersState::new();
@@ -932,9 +932,9 @@ async fn map_contains_proves_and_verifies() {
 /// ledger-shape PIs. Inserts return no value, so there's no Popeq.
 #[tokio::test]
 async fn map_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_record_ir();
     let mut state = records::RecordsState::new();
@@ -986,9 +986,9 @@ async fn map_insert_proves_and_verifies() {
 /// at the circuit level (Option<V> plumbing waits for Stage 2 / Map::get).
 #[tokio::test]
 async fn map_remove_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_erase_ir();
     let witnesses = records::RecordsWitnesses {
@@ -1037,9 +1037,9 @@ async fn map_remove_proves_and_verifies() {
 /// made the on-chain verify hash diverge.
 #[tokio::test]
 async fn cell_get_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_stored_ir();
     let state = reader::ReaderState::new();
@@ -1076,9 +1076,9 @@ async fn cell_get_proves_and_verifies() {
 /// identical.
 #[tokio::test]
 async fn counter_value_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_count_ir();
     let state = counter_reader::CounterReaderState::new();
@@ -1121,9 +1121,9 @@ async fn counter_value_proves_and_verifies() {
 /// claimed value.
 #[tokio::test]
 async fn map_lookup_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_fetch_ir();
     let mut state = records::RecordsState::new();
@@ -1177,9 +1177,9 @@ async fn map_lookup_proves_and_verifies() {
 /// is the next milestone).
 #[tokio::test]
 async fn bytes32_witness_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_take_digest_ir();
     let witnesses = bytes_witness::BytesWitnessWitnesses {
@@ -1232,9 +1232,9 @@ async fn bytes32_witness_proves_and_verifies() {
 /// `value_vars` and emits one DeclarePubInput per Fr the value occupies.
 #[tokio::test]
 async fn cell_bytes32_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_rotate_digest_ir();
     let witnesses = bytes_cell::BytesCellWitnesses {
@@ -1282,9 +1282,9 @@ async fn cell_bytes32_set_proves_and_verifies() {
 /// back through `state.digest.get()` for the Popeq result.
 #[tokio::test]
 async fn cell_bytes32_get_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_peek_digest_ir();
     let mut state = bytes_cell::BytesCellState::new();
@@ -1327,9 +1327,9 @@ async fn cell_bytes32_get_proves_and_verifies() {
 /// Uint<64>> example. This is the multi-Fr K end-to-end test.
 #[tokio::test]
 async fn map_bytes_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("record");
     let witnesses = byte_records::ByteRecordsWitnesses {
@@ -1373,9 +1373,9 @@ async fn map_bytes_insert_proves_and_verifies() {
 /// the Bytes<32> key. Map is empty, so the Member result is false.
 #[tokio::test]
 async fn map_bytes_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("check_member");
     let state = byte_records::ByteRecordsState::new();
@@ -1426,9 +1426,9 @@ async fn map_bytes_contains_proves_and_verifies() {
 /// State is pre-populated, so lookup returns the stored value.
 #[tokio::test]
 async fn map_bytes_lookup_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("fetch");
     let mut state = byte_records::ByteRecordsState::new();
@@ -1475,9 +1475,9 @@ async fn map_bytes_lookup_proves_and_verifies() {
 /// compatible transcript with a multi-Fr key in the Push path.
 #[tokio::test]
 async fn map_bytes_remove_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("erase");
     let witnesses = byte_records::ByteRecordsWitnesses {
@@ -1522,11 +1522,11 @@ async fn map_bytes_remove_proves_and_verifies() {
 /// (then) branch.
 #[tokio::test]
 async fn voting_verifies_else_active() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_cast_vote_ir();
     let witnesses = ballot::BallotWitnesses {
@@ -1654,11 +1654,11 @@ fn build_maybe_raise_ir() -> midnight_zkir::IrSource {
 /// the ledger inserts for inactive segments.
 #[tokio::test]
 async fn conditional_cell_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_raise_ir();
     let witnesses = cond_writer::CondWriterWitnesses {
@@ -1797,11 +1797,11 @@ fn build_tick_ir() -> midnight_zkir::IrSource {
 /// Noop-interleaved transcript field_repr.
 #[tokio::test]
 async fn nested_conditional_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_tick_ir();
     let witnesses = nested_cond::NestedCondWitnesses {
@@ -1921,11 +1921,11 @@ fn build_maybe_tick_ir() -> midnight_zkir::IrSource {
 /// Op::Noop padding the ledger inserts matches.
 #[tokio::test]
 async fn no_else_conditional_false_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_tick_ir();
     let witnesses = no_else::NoElseWitnesses {
@@ -2048,11 +2048,11 @@ fn build_maybe_check_ir() -> midnight_zkir::IrSource {
 /// (do_check=true) to confirm the basic structure proves and verifies.
 #[tokio::test]
 async fn conditional_map_contains_active_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_check_ir();
     let state = cond_read::CondReadState::new();
@@ -2118,11 +2118,11 @@ async fn conditional_map_contains_active_proves_and_verifies() {
 /// or fails.
 #[tokio::test]
 async fn conditional_map_contains_inactive_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_check_ir();
     let state = cond_read::CondReadState::new();
@@ -2253,11 +2253,11 @@ fn build_safe_get_ir() -> midnight_zkir::IrSource {
 /// lookup's Popeq value is the stored V, and the proof verifies on-chain.
 #[tokio::test]
 async fn safe_get_present_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_safe_get_ir();
     let mut state = safe_lookup::SafeLookupState::new();
@@ -2275,11 +2275,7 @@ async fn safe_get_present_proves_and_verifies() {
     // its first emission (the contains call) — so there's only one
     // PrivateInput for user_id total. Active branch consumes it.
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
-    let preimage = canonical_preimage(
-        "safe_get",
-        nocturne_transcript.ops.clone(),
-        private_outputs,
-    );
+    let preimage = canonical_preimage("safe_get", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -2325,11 +2321,11 @@ async fn safe_get_present_proves_and_verifies() {
 /// constructs and verifies through the canonical ledger path.
 #[tokio::test]
 async fn safe_get_absent_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_safe_get_ir();
     let state = safe_lookup::SafeLookupState::new(); // empty
@@ -2340,11 +2336,7 @@ async fn safe_get_absent_proves_and_verifies() {
         safe_lookup::transcript::build_safe_get_transcript(&state, &witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
-    let preimage = canonical_preimage(
-        "safe_get",
-        nocturne_transcript.ops.clone(),
-        private_outputs,
-    );
+    let preimage = canonical_preimage("safe_get", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -2456,11 +2448,11 @@ fn build_read_if_present_ir() -> midnight_zkir::IrSource {
 /// Key present → both contains and lookup fire on the active path.
 #[tokio::test]
 async fn map_get_sugar_present_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_if_present_ir();
     let mut state = map_get_sugar::MapGetSugarState::new();
@@ -2522,11 +2514,11 @@ async fn map_get_sugar_present_proves_and_verifies() {
 /// lookup branch is inactive, no PrivateInput/PublicInput consumption.
 #[tokio::test]
 async fn map_get_sugar_absent_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_if_present_ir();
     let state = map_get_sugar::MapGetSugarState::new(); // empty
@@ -2659,11 +2651,11 @@ fn build_read_or_count_miss_ir() -> midnight_zkir::IrSource {
 /// runs; the lookup branch is inactive (no Popeq consumption).
 #[tokio::test]
 async fn if_let_else_absent_runs_else_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_or_count_miss_ir();
     let state = if_let_else::IfLetElseState::new(); // empty
@@ -2798,11 +2790,11 @@ fn build_pick_ir() -> midnight_zkir::IrSource {
 /// present → Some arm fires; lookup runs.
 #[tokio::test]
 async fn match_get_present_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_pick_ir();
     let mut state = match_get::MatchGetState::new();
@@ -2815,11 +2807,7 @@ async fn match_get_present_proves_and_verifies() {
     let nocturne_transcript = match_get::transcript::build_pick_transcript(&state, &witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
-    let preimage = canonical_preimage(
-        "pick",
-        nocturne_transcript.ops.clone(),
-        private_outputs,
-    );
+    let preimage = canonical_preimage("pick", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -2862,11 +2850,11 @@ async fn match_get_present_proves_and_verifies() {
 /// `match self.map.get(&k)` — None arm fires, fallback counter increments.
 #[tokio::test]
 async fn match_get_absent_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_pick_ir();
     let state = match_get::MatchGetState::new(); // empty
@@ -2876,11 +2864,7 @@ async fn match_get_absent_proves_and_verifies() {
     let nocturne_transcript = match_get::transcript::build_pick_transcript(&state, &witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
-    let preimage = canonical_preimage(
-        "pick",
-        nocturne_transcript.ops.clone(),
-        private_outputs,
-    );
+    let preimage = canonical_preimage("pick", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -2998,11 +2982,11 @@ fn build_pick_reversed_ir() -> midnight_zkir::IrSource {
 /// normalizes ordering so both shapes lower to the same IR.
 #[tokio::test]
 async fn match_get_reversed_arms_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_pick_reversed_ir();
     let mut state = match_get_reversed::MatchGetReversedState::new();
@@ -3139,16 +3123,18 @@ fn build_read_digest_ir() -> midnight_zkir::IrSource {
 /// in lookup walks 2 Fr key chunks.
 #[tokio::test]
 async fn bytes_get_sugar_present_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_digest_ir();
     let mut state = bytes_get_sugar::BytesGetSugarState::new();
     let digest = Bytes::<32>::from([0xA1u8; 32]);
-    state.records.insert(digest.clone(), Uint::<64>::from(99u64));
+    state
+        .records
+        .insert(digest.clone(), Uint::<64>::from(99u64));
     let witnesses = bytes_get_sugar::BytesGetSugarWitnesses { digest };
     let nocturne_transcript =
         bytes_get_sugar::transcript::build_read_digest_transcript(&state, &witnesses);
@@ -3204,11 +3190,11 @@ async fn bytes_get_sugar_present_proves_and_verifies() {
 /// must all guard out without consuming.
 #[tokio::test]
 async fn bytes_get_sugar_absent_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_digest_ir();
     let state = bytes_get_sugar::BytesGetSugarState::new(); // empty
@@ -3341,11 +3327,11 @@ fn build_read_blob_ir() -> midnight_zkir::IrSource {
 /// present → the lookup's multi-Fr Popeq fires on the active branch.
 #[tokio::test]
 async fn bytes_v_get_sugar_present_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_blob_ir();
     let mut state = bytes_v_get_sugar::BytesVGetSugarState::new();
@@ -3407,11 +3393,11 @@ async fn bytes_v_get_sugar_present_proves_and_verifies() {
 /// guard-out (2 PublicInputs, both inactive).
 #[tokio::test]
 async fn bytes_v_get_sugar_absent_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_blob_ir();
     let state = bytes_v_get_sugar::BytesVGetSugarState::new(); // empty
@@ -3547,10 +3533,10 @@ fn build_set_contract_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource 
 /// pattern is Idx + Push(Cell(key)) + Push(Null) + Ins + Ins.
 #[tokio::test]
 async fn set_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_contract_circuit_ir("add");
     let witnesses = set_contract::SetContractWitnesses {
@@ -3559,11 +3545,7 @@ async fn set_insert_proves_and_verifies() {
     let nocturne_transcript = set_contract::transcript::build_add_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0xA5u8; 32])];
-    let preimage = canonical_preimage(
-        "add",
-        nocturne_transcript.ops.clone(),
-        private_outputs,
-    );
+    let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -3592,10 +3574,10 @@ async fn set_insert_proves_and_verifies() {
 /// (Member opcode is shared, Set just stores Null values).
 #[tokio::test]
 async fn set_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_contract_circuit_ir("check");
     let state = set_contract::SetContractState::new();
@@ -3605,11 +3587,7 @@ async fn set_contains_proves_and_verifies() {
     let nocturne_transcript = set_contract::transcript::build_check_transcript(&state, &witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0x55u8; 32])];
-    let preimage = canonical_preimage(
-        "check",
-        nocturne_transcript.ops.clone(),
-        private_outputs,
-    );
+    let preimage = canonical_preimage("check", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -3637,10 +3615,10 @@ async fn set_contains_proves_and_verifies() {
 /// `Set<Bytes<32>>::remove(&k)`. Identical to `Map::remove` — Rem + Ins.
 #[tokio::test]
 async fn set_remove_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_contract_circuit_ir("erase");
     let witnesses = set_contract::SetContractWitnesses {
@@ -3649,11 +3627,7 @@ async fn set_remove_proves_and_verifies() {
     let nocturne_transcript = set_contract::transcript::build_erase_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from([0xEEu8; 32])];
-    let preimage = canonical_preimage(
-        "erase",
-        nocturne_transcript.ops.clone(),
-        private_outputs,
-    );
+    let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -3751,11 +3725,11 @@ fn build_field_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// MerkleTree::checkRoot (Phase A of the staged plan).
 #[tokio::test]
 async fn cell_field_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::curve::Fr;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_field_cell_circuit_ir("write_field");
     let witnesses = field_cell::FieldCellWitnesses {
@@ -3802,10 +3776,10 @@ async fn cell_field_set_proves_and_verifies() {
 /// alignment declares, mirroring the Push side.
 #[tokio::test]
 async fn cell_field_get_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::curve::Fr;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_field_cell_circuit_ir("read_field");
     let mut state = field_cell::FieldCellState::new();
@@ -3902,19 +3876,18 @@ fn build_mt_verify_ir() -> midnight_zkir::IrSource {
 /// Phase A `AlignmentAtom::Field` work the user-digest Push depends on.
 #[tokio::test]
 async fn mt_check_root_matches_empty_tree_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::curve::Fr;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_verify_ir();
     let state = mt_check::MtCheckState::new();
     // Use the actual empty-tree root so check_root returns true.
     let expected_root = state.entries.root();
     let witnesses = mt_check::MtCheckWitnesses { expected_root };
-    let nocturne_transcript =
-        mt_check::transcript::build_verify_transcript(&state, &witnesses);
+    let nocturne_transcript = mt_check::transcript::build_verify_transcript(&state, &witnesses);
 
     let private_outputs: Vec<AlignedValue> =
         vec![AlignedValue::from(Fr::from(expected_root.field().value()))];
@@ -3948,11 +3921,11 @@ async fn mt_check_root_matches_empty_tree_proves_and_verifies() {
 /// — `check_root` is a query, not an assertion.
 #[tokio::test]
 async fn mt_check_root_mismatch_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::curve::Fr;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_verify_ir();
     let state = mt_check::MtCheckState::new();
@@ -3961,8 +3934,7 @@ async fn mt_check_root_mismatch_proves_and_verifies() {
     let witnesses = mt_check::MtCheckWitnesses {
         expected_root: wrong,
     };
-    let nocturne_transcript =
-        mt_check::transcript::build_verify_transcript(&state, &witnesses);
+    let nocturne_transcript = mt_check::transcript::build_verify_transcript(&state, &witnesses);
 
     let private_outputs: Vec<AlignedValue> =
         vec![AlignedValue::from(Fr::from(wrong.field().value()))];
@@ -4063,10 +4035,10 @@ fn build_mt_add_ir() -> midnight_zkir::IrSource {
 /// Insertion has no return value, so there's no Popeq.
 #[tokio::test]
 async fn mt_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_add_ir();
     let witnesses = mt_insert::MtInsertWitnesses {
@@ -4182,10 +4154,10 @@ fn build_mt_verify_path_ir() -> midnight_zkir::IrSource {
 /// result is `true`.
 #[tokio::test]
 async fn mt_verify_path_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_verify_path_ir();
 
@@ -4204,9 +4176,7 @@ async fn mt_verify_path_proves_and_verifies() {
         "off-chain merkle_tree_path_root must match tree.root() for the inserted leaf",
     );
 
-    let witnesses = mt_verify_path::MtVerifyPathWitnesses {
-        path: path.clone(),
-    };
+    let witnesses = mt_verify_path::MtVerifyPathWitnesses { path: path.clone() };
     let nocturne_transcript =
         mt_verify_path::transcript::build_verify_path_transcript(&state, &witnesses);
 
@@ -4330,10 +4300,10 @@ fn build_map_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// a Field-aligned key Push.
 #[tokio::test]
 async fn map_field_key_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_field_ir("record");
     let key = Field::from(0xC0FFEEu64);
@@ -4341,15 +4311,13 @@ async fn map_field_key_insert_proves_and_verifies() {
         key,
         amount: Uint::<64>::from(7u64),
     };
-    let nocturne_transcript =
-        map_field_key::transcript::build_record_transcript(&witnesses);
+    let nocturne_transcript = map_field_key::transcript::build_record_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![
         AlignedValue::from(Fr::from(key.value())),
         AlignedValue::from(7u64),
     ];
-    let preimage =
-        canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -4378,10 +4346,10 @@ async fn map_field_key_insert_proves_and_verifies() {
 /// matches the on-chain Member opcode against a Field-aligned key Push.
 #[tokio::test]
 async fn map_field_key_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_field_ir("check_member");
     let state = map_field_key::MapFieldState::new();
@@ -4393,8 +4361,7 @@ async fn map_field_key_contains_proves_and_verifies() {
     let nocturne_transcript =
         map_field_key::transcript::build_check_member_transcript(&state, &witnesses);
 
-    let private_outputs: Vec<AlignedValue> =
-        vec![AlignedValue::from(Fr::from(key.value()))];
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(Fr::from(key.value()))];
     let preimage = canonical_preimage(
         "check_member",
         nocturne_transcript.ops.clone(),
@@ -4500,10 +4467,10 @@ fn build_map_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// truncation.
 #[tokio::test]
 async fn map_digest_key_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_digest_ir("record");
     let key = MerkleTreeDigest::new(Field::from(0xCAFEu64));
@@ -4511,14 +4478,12 @@ async fn map_digest_key_insert_proves_and_verifies() {
         key,
         amount: Uint::<64>::from(42u64),
     };
-    let nocturne_transcript =
-        map_digest_key::transcript::build_record_transcript(&witnesses);
+    let nocturne_transcript = map_digest_key::transcript::build_record_transcript(&witnesses);
 
     // Witness layout: 1 Fr (digest as full Fr) + 1 Fr (Uint<64> as u64).
     let private_outputs: Vec<AlignedValue> = vec![
         AlignedValue::from(
-            Fr::from_le_bytes(&key.as_le_bytes())
-                .expect("digest round-trips through Fr"),
+            Fr::from_le_bytes(&key.as_le_bytes()).expect("digest round-trips through Fr"),
         ),
         AlignedValue::from(42u64),
     ];
@@ -4551,10 +4516,10 @@ async fn map_digest_key_insert_proves_and_verifies() {
 /// is `false` for an empty map.
 #[tokio::test]
 async fn map_digest_key_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_digest_ir("check_member");
     let state = map_digest_key::MapDigestState::new();
@@ -4569,8 +4534,7 @@ async fn map_digest_key_contains_proves_and_verifies() {
     // The circuit only reads `witnesses.key`, so the IR emits exactly
     // one PrivateInput. Empty map → contains returns false.
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
-        Fr::from_le_bytes(&key.as_le_bytes())
-            .expect("digest round-trips through Fr"),
+        Fr::from_le_bytes(&key.as_le_bytes()).expect("digest round-trips through Fr"),
     )];
     let preimage = canonical_preimage(
         "check_member",
@@ -4685,19 +4649,17 @@ fn build_set_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn set_field_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_field_ir("add");
     let elem = Field::from(0x1234u64);
     let witnesses = set_field_elem::SetFieldWitnesses { elem };
-    let nocturne_transcript =
-        set_field_elem::transcript::build_add_transcript(&witnesses);
+    let nocturne_transcript = set_field_elem::transcript::build_add_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> =
-        vec![AlignedValue::from(Fr::from(elem.value()))];
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(Fr::from(elem.value()))];
     let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
@@ -4725,10 +4687,10 @@ async fn set_field_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_field_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_field_ir("check");
     let state = set_field_elem::SetFieldState::new();
@@ -4737,8 +4699,7 @@ async fn set_field_contains_proves_and_verifies() {
     let nocturne_transcript =
         set_field_elem::transcript::build_check_transcript(&state, &witnesses);
 
-    let private_outputs: Vec<AlignedValue> =
-        vec![AlignedValue::from(Fr::from(elem.value()))];
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(Fr::from(elem.value()))];
     let preimage = canonical_preimage("check", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
@@ -4766,19 +4727,17 @@ async fn set_field_contains_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_field_remove_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_field_ir("erase");
     let elem = Field::from(0x9abcu64);
     let witnesses = set_field_elem::SetFieldWitnesses { elem };
-    let nocturne_transcript =
-        set_field_elem::transcript::build_erase_transcript(&witnesses);
+    let nocturne_transcript = set_field_elem::transcript::build_erase_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> =
-        vec![AlignedValue::from(Fr::from(elem.value()))];
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(Fr::from(elem.value()))];
     let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
@@ -4881,20 +4840,18 @@ fn build_set_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn set_digest_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_digest_ir("add");
     let elem = MerkleTreeDigest::new(Field::from(0xFEEDu64));
     let witnesses = set_digest_elem::SetDigestWitnesses { elem };
-    let nocturne_transcript =
-        set_digest_elem::transcript::build_add_transcript(&witnesses);
+    let nocturne_transcript = set_digest_elem::transcript::build_add_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
-        Fr::from_le_bytes(&elem.as_le_bytes())
-            .expect("digest round-trips through Fr"),
+        Fr::from_le_bytes(&elem.as_le_bytes()).expect("digest round-trips through Fr"),
     )];
     let preimage = canonical_preimage("add", nocturne_transcript.ops.clone(), private_outputs);
 
@@ -4923,10 +4880,10 @@ async fn set_digest_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_digest_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_digest_ir("check");
     let state = set_digest_elem::SetDigestState::new();
@@ -4936,8 +4893,7 @@ async fn set_digest_contains_proves_and_verifies() {
         set_digest_elem::transcript::build_check_transcript(&state, &witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
-        Fr::from_le_bytes(&elem.as_le_bytes())
-            .expect("digest round-trips through Fr"),
+        Fr::from_le_bytes(&elem.as_le_bytes()).expect("digest round-trips through Fr"),
     )];
     let preimage = canonical_preimage("check", nocturne_transcript.ops.clone(), private_outputs);
 
@@ -4966,20 +4922,18 @@ async fn set_digest_contains_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_digest_remove_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_digest_ir("erase");
     let elem = MerkleTreeDigest::new(Field::from(0xBEAFu64));
     let witnesses = set_digest_elem::SetDigestWitnesses { elem };
-    let nocturne_transcript =
-        set_digest_elem::transcript::build_erase_transcript(&witnesses);
+    let nocturne_transcript = set_digest_elem::transcript::build_erase_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(
-        Fr::from_le_bytes(&elem.as_le_bytes())
-            .expect("digest round-trips through Fr"),
+        Fr::from_le_bytes(&elem.as_le_bytes()).expect("digest round-trips through Fr"),
     )];
     let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
 
@@ -5085,10 +5039,10 @@ fn build_map_b16_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// shorter alignment without regressing the Bytes<32> path.
 #[tokio::test]
 async fn map_b16_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b16_ir("record");
     let key_bytes = [0x77u8; 16];
@@ -5098,10 +5052,8 @@ async fn map_b16_insert_proves_and_verifies() {
     };
     let nocturne_transcript = map_b16_key::transcript::build_record_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(key_bytes),
-        AlignedValue::from(33u64),
-    ];
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(key_bytes), AlignedValue::from(33u64)];
     let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
@@ -5130,10 +5082,10 @@ async fn map_b16_insert_proves_and_verifies() {
 /// `Map<Bytes<16>, Uint<64>>::contains(&k)` — single-Fr key Member lookup.
 #[tokio::test]
 async fn map_b16_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b16_ir("check_member");
     let state = map_b16_key::MapB16State::new();
@@ -5248,10 +5200,10 @@ fn build_map_b48_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// beyond the Bytes<32>-only coverage.
 #[tokio::test]
 async fn map_b48_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b48_ir("record");
     let key_bytes = [0xCDu8; 48];
@@ -5261,10 +5213,8 @@ async fn map_b48_insert_proves_and_verifies() {
     };
     let nocturne_transcript = map_b48_key::transcript::build_record_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(key_bytes),
-        AlignedValue::from(2024u64),
-    ];
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(key_bytes), AlignedValue::from(2024u64)];
     let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
@@ -5293,10 +5243,10 @@ async fn map_b48_insert_proves_and_verifies() {
 /// `Map<Bytes<48>, Uint<64>>::contains(&k)` — multi-Fr key Member lookup.
 #[tokio::test]
 async fn map_b48_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b48_ir("check_member");
     let state = map_b48_key::MapB48State::new();
@@ -5409,10 +5359,10 @@ fn build_mt_b16_add_ir() -> midnight_zkir::IrSource {
 /// 2 Fr inputs (domain_sep + 1 leaf chunk).
 #[tokio::test]
 async fn mt_b16_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_b16_add_ir();
     let leaf_bytes = [0xA5u8; 16];
@@ -5510,10 +5460,10 @@ fn build_mt_b64_add_ir() -> midnight_zkir::IrSource {
 /// 4 Fr inputs (domain_sep + 3 leaf chunks).
 #[tokio::test]
 async fn mt_b64_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_b64_add_ir();
     let leaf_bytes = [0xBBu8; 64];
@@ -5615,10 +5565,10 @@ fn build_mt_b16_verify_path_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn mt_b16_verify_path_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_b16_verify_path_ir();
     let mut state = mt_b16_verify_path::MtB16VerifyPathState::new();
@@ -5632,9 +5582,7 @@ async fn mt_b16_verify_path_proves_and_verifies() {
         "off-chain merkle_tree_path_root must match tree.root() for Bytes<16> leaf",
     );
 
-    let witnesses = mt_b16_verify_path::MtB16VerifyPathWitnesses {
-        path: path.clone(),
-    };
+    let witnesses = mt_b16_verify_path::MtB16VerifyPathWitnesses { path: path.clone() };
     let nocturne_transcript =
         mt_b16_verify_path::transcript::build_verify_path_transcript(&state, &witnesses);
 
@@ -5753,10 +5701,10 @@ fn build_map_tuple_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn map_tuple_key_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_tuple_ir("record");
     let key_field = Field::from(0xABCDu64);
@@ -5765,8 +5713,7 @@ async fn map_tuple_key_insert_proves_and_verifies() {
         key: (key_field, key_uint),
         amount: Uint::<64>::from(99u64),
     };
-    let nocturne_transcript =
-        map_tuple_key::transcript::build_record_transcript(&witnesses);
+    let nocturne_transcript = map_tuple_key::transcript::build_record_transcript(&witnesses);
 
     // Witness layout: tuple expands as (Field, Uint<64>) → 2 Frs in
     // declaration order, then `amount` → 1 Fr.
@@ -5802,10 +5749,10 @@ async fn map_tuple_key_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn map_tuple_key_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_tuple_ir("check_member");
     let state = map_tuple_key::MapTupleState::new();
@@ -5914,9 +5861,9 @@ fn build_for_counter_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn for_loop_unroll_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_for_counter_ir();
     let nocturne_transcript = for_counter::transcript::build_inc_three_transcript();
@@ -6020,9 +5967,9 @@ fn build_for_var_use_ir() -> midnight_zkir::IrSource {
 /// compilation breaks because `i` isn't in scope at the call site.
 #[tokio::test]
 async fn for_loop_var_substituted_into_literals() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_for_var_use_ir();
     let nocturne_transcript = for_var_use::transcript::build_fill_transcript();
@@ -6069,11 +6016,11 @@ async fn for_loop_var_substituted_into_literals() {
 /// line up with the Noop-padded transcript the ledger sees.
 #[tokio::test]
 async fn conditional_cell_set_else_active_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_raise_ir();
     let witnesses = cond_writer::CondWriterWitnesses {
@@ -6132,11 +6079,11 @@ async fn conditional_cell_set_else_active_proves_and_verifies() {
 /// outer else's `self.c.increment()` must both cond_select to zero.
 #[tokio::test]
 async fn nested_conditional_inner_else_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_tick_ir();
     let witnesses = nested_cond::NestedCondWitnesses {
@@ -6192,11 +6139,11 @@ async fn nested_conditional_inner_else_proves_and_verifies() {
 /// cond_select to zero. Only `self.c.increment()` is active.
 #[tokio::test]
 async fn nested_conditional_outer_else_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_tick_ir();
     // `inner` is unread when `outer` is false (the inner if/else is
@@ -6335,10 +6282,10 @@ fn build_map_struct_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn map_struct_key_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_struct_ir("record");
     let key_a = Field::from(0xABCDu64);
@@ -6347,8 +6294,7 @@ async fn map_struct_key_insert_proves_and_verifies() {
         key: map_struct_key::MyKey { a: key_a, b: key_b },
         amount: Uint::<64>::from(99u64),
     };
-    let nocturne_transcript =
-        map_struct_key::transcript::build_record_transcript(&witnesses);
+    let nocturne_transcript = map_struct_key::transcript::build_record_transcript(&witnesses);
 
     // Witness expansion: key.a → 1 Fr (Field), key.b → 1 Fr (Uint<64>),
     // amount → 1 Fr. Same shape as the equivalent (Field, Uint<64>)
@@ -6385,10 +6331,10 @@ async fn map_struct_key_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn map_struct_key_contains_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_struct_ir("check_member");
     let state = map_struct_key::MapStructState::new();
@@ -6510,22 +6456,24 @@ fn build_enum_state_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// as the Bytes<1> discriminant.
 #[tokio::test]
 async fn enum_cell_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_enum_state_ir("transition");
     let witnesses = enum_state::EnumStateWitnesses {
         new_status: enum_state::Status::Closed,
     };
-    let nocturne_transcript =
-        enum_state::transcript::build_transition_transcript(&witnesses);
+    let nocturne_transcript = enum_state::transcript::build_transition_transcript(&witnesses);
 
     // Witness PrivateInput: 1 Fr (discriminant of Closed = 1).
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(1u8)];
-    let preimage =
-        canonical_preimage("transition", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage(
+        "transition",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -6643,11 +6591,11 @@ fn build_enum_vote_ir() -> midnight_zkir::IrSource {
 /// is driven by a user enum + match, not a Boolean witness + if.
 #[tokio::test]
 async fn enum_match_vote_verifies_with_ledger_shape_pis() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_enum_vote_ir();
     let witnesses = enum_vote::EnumBallotWitnesses {
@@ -6782,24 +6730,21 @@ fn build_enum_records_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn map_with_enum_value_insert_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_enum_records_ir();
     let witnesses = enum_records::EnumRecordsWitnesses {
         user_id: Uint::<64>::from(11u64),
         new_status: enum_records::Status::Active, // discriminant = 1
     };
-    let nocturne_transcript =
-        enum_records::transcript::build_set_status_transcript(&witnesses);
+    let nocturne_transcript = enum_records::transcript::build_set_status_transcript(&witnesses);
 
     // Private transcript: user_id (Uint<64>) then Status (Bytes<1>).
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(11u64),
-        AlignedValue::from(1u8),
-    ];
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(11u64), AlignedValue::from(1u8)];
     let preimage = canonical_preimage(
         "set_status",
         nocturne_transcript.ops.clone(),
@@ -6887,9 +6832,9 @@ fn build_counter_by_n_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn counter_increment_by_n_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_counter_by_n_ir();
     let nocturne_transcript = counter_by_n::transcript::build_bump_transcript();
@@ -7149,22 +7094,20 @@ fn build_role_counter_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn role_gated_counter_admin_branch_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_role_counter_ir();
     let witnesses = role_gated_counter::RoleCallerWitnesses {
         caller: role_gated_counter::Caller::Admin, // discriminant 0
     };
-    let nocturne_transcript =
-        role_gated_counter::transcript::build_record_transcript(&witnesses);
+    let nocturne_transcript = role_gated_counter::transcript::build_record_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(0u8)];
-    let preimage =
-        canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -7273,23 +7216,20 @@ fn build_let_witness_roundtrip_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn let_witness_bound_value_reaches_cell_set() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_let_witness_roundtrip_ir();
     let digest = Bytes::<32>::from_slice(b"deadbeefcafebabe0123456789abcdef");
     let witnesses = let_witness_roundtrip::LetWitnessWitnesses {
         incoming: digest.clone(),
     };
-    let nocturne_transcript =
-        let_witness_roundtrip::transcript::build_store_transcript(&witnesses);
+    let nocturne_transcript = let_witness_roundtrip::transcript::build_store_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> =
-        vec![AlignedValue::from(*digest.as_bytes())];
-    let preimage =
-        canonical_preimage("store", nocturne_transcript.ops.clone(), private_outputs);
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(*digest.as_bytes())];
+    let preimage = canonical_preimage("store", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -7383,25 +7323,22 @@ fn build_witness_sum_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn witness_arithmetic_let_binding_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_witness_sum_ir();
     let witnesses = witness_sum::SumWitnesses {
         a: Uint::<64>::from(11u64),
         b: Uint::<64>::from(31u64),
     };
-    let nocturne_transcript =
-        witness_sum::transcript::build_store_sum_transcript(&witnesses);
+    let nocturne_transcript = witness_sum::transcript::build_store_sum_transcript(&witnesses);
 
     // Private inputs in declaration order: a, then b. The Cell::set's
     // pushed value is the sum (42), so the on-chain AlignedValue is u64(42).
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(11u64),
-        AlignedValue::from(31u64),
-    ];
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(11u64), AlignedValue::from(31u64)];
     let preimage = canonical_preimage(
         "store_sum",
         nocturne_transcript.ops.clone(),
@@ -7489,9 +7426,9 @@ fn build_counter_read_binding_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn counter_value_let_binding_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_counter_read_binding_ir();
     let mut state = counter_read_binding::CounterRead::new();
@@ -7587,21 +7524,19 @@ fn build_counter_set_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn counter_set_from_witness_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_counter_set_ir();
     let witnesses = counter_set::CounterSetWitnesses {
         target: Uint::<64>::from(99u64),
     };
-    let nocturne_transcript =
-        counter_set::transcript::build_assign_transcript(&witnesses);
+    let nocturne_transcript = counter_set::transcript::build_assign_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(99u64)];
-    let preimage =
-        canonical_preimage("assign", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage("assign", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -7658,8 +7593,7 @@ mod inline_sum {
 
         #[nocturne(circuit)]
         pub fn put(&mut self, witnesses: &InlineSumWitnesses) {
-            self.total
-                .set(witnesses.a + witnesses.b);
+            self.total.set(witnesses.a + witnesses.b);
         }
     }
 }
@@ -7694,25 +7628,21 @@ fn build_inline_sum_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn inline_witness_arithmetic_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_inline_sum_ir();
     let witnesses = inline_sum::InlineSumWitnesses {
         a: Uint::<64>::from(11u64),
         b: Uint::<64>::from(31u64),
     };
-    let nocturne_transcript =
-        inline_sum::transcript::build_put_transcript(&witnesses);
+    let nocturne_transcript = inline_sum::transcript::build_put_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(11u64),
-        AlignedValue::from(31u64),
-    ];
-    let preimage =
-        canonical_preimage("put", nocturne_transcript.ops.clone(), private_outputs);
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(11u64), AlignedValue::from(31u64)];
+    let preimage = canonical_preimage("put", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -7857,25 +7787,21 @@ fn build_payload_enum_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn payload_enum_cell_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_payload_enum_ir();
     let witnesses = payload_enum::PayloadEnumWitnesses {
         next: payload_enum::Action::Burn(Uint::<64>::from(99u64)), // discriminant 1, payload 99
     };
-    let nocturne_transcript =
-        payload_enum::transcript::build_record_transcript(&witnesses);
+    let nocturne_transcript = payload_enum::transcript::build_record_transcript(&witnesses);
 
     // Private inputs: discriminant Fr, then payload Fr.
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(1u8),
-        AlignedValue::from(99u64),
-    ];
-    let preimage =
-        canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(1u8), AlignedValue::from(99u64)];
+    let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -7992,11 +7918,11 @@ fn build_match_payload_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn match_on_payload_binding_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_match_payload_ir();
     let witnesses = match_payload::MintBurnWitnesses {
@@ -8004,12 +7930,9 @@ async fn match_on_payload_binding_proves_and_verifies() {
     };
     let nocturne_transcript = match_payload::transcript::build_apply_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(1u8),
-        AlignedValue::from(99u64),
-    ];
-    let preimage =
-        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(1u8), AlignedValue::from(99u64)];
+    let preimage = canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -8127,10 +8050,10 @@ fn build_uint128_pipeline_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn uint128_pipeline_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_uint128_pipeline_ir();
     // A value that wouldn't fit in u64: 2^96 + 7.
@@ -8141,8 +8064,7 @@ async fn uint128_pipeline_proves_and_verifies() {
     let nocturne_transcript = uint128_pipeline::transcript::build_set_big_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(payload)];
-    let preimage =
-        canonical_preimage("set_big", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage("set_big", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -8245,11 +8167,11 @@ fn build_option_round_trip_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn option_some_payload_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_option_round_trip_ir();
     let witnesses = option_round_trip::OptWitnesses {
@@ -8258,11 +8180,10 @@ async fn option_some_payload_proves_and_verifies() {
     let nocturne_transcript = option_round_trip::transcript::build_apply_transcript(&witnesses);
 
     let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(1u8),  // Some discriminant
+        AlignedValue::from(1u8),   // Some discriminant
         AlignedValue::from(42u64), // payload
     ];
-    let preimage =
-        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -8304,11 +8225,11 @@ async fn option_some_payload_proves_and_verifies() {
 
 #[tokio::test]
 async fn option_none_branch_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::onchain_vm::ops::Op as VmOp;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_option_round_trip_ir();
     let witnesses = option_round_trip::OptWitnesses { maybe: None };
@@ -8318,8 +8239,7 @@ async fn option_none_branch_proves_and_verifies() {
         AlignedValue::from(0u8),  // None discriminant
         AlignedValue::from(0u64), // payload = T::default()
     ];
-    let preimage =
-        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -8424,10 +8344,10 @@ fn build_array_witness_index_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn array_witness_index_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_array_witness_index_ir();
     let witnesses = array_witness_index::ArrWitnesses {
@@ -8449,8 +8369,7 @@ async fn array_witness_index_proves_and_verifies() {
         AlignedValue::from(22u64),
         AlignedValue::from(33u64),
     ];
-    let preimage =
-        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+    let preimage = canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -8559,10 +8478,10 @@ fn build_if_as_expression_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn if_as_expression_then_branch_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_if_as_expression_ir();
     let witnesses = if_as_expression::IfWitnesses {
@@ -8574,12 +8493,9 @@ async fn if_as_expression_then_branch_proves_and_verifies() {
 
     // flag=true → ZKIR consumes flag's Fr + the then-branch's a Fr. The
     // else-branch's b PrivateInput is gated to 0 by the guard.
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(true),
-        AlignedValue::from(77u64),
-    ];
-    let preimage =
-        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(true), AlignedValue::from(77u64)];
+    let preimage = canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");
@@ -8606,10 +8522,10 @@ async fn if_as_expression_then_branch_proves_and_verifies() {
 
 #[tokio::test]
 async fn if_as_expression_else_branch_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
     use nocturne::runtime::base_crypto::fab::AlignedValue;
     use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use nocturne::runtime::transient_crypto::repr::FieldRepr;
-    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_if_as_expression_ir();
     let witnesses = if_as_expression::IfWitnesses {
@@ -8619,12 +8535,9 @@ async fn if_as_expression_else_branch_proves_and_verifies() {
     };
     let nocturne_transcript = if_as_expression::transcript::build_apply_transcript(&witnesses);
 
-    let private_outputs: Vec<AlignedValue> = vec![
-        AlignedValue::from(false),
-        AlignedValue::from(99u64),
-    ];
-    let preimage =
-        canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(false), AlignedValue::from(99u64)];
+    let preimage = canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
 
     let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
         .expect("data provider");

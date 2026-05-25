@@ -182,7 +182,12 @@ fn expr_needs_state(expr: &ExprIR) -> bool {
             let m = method.to_string();
             matches!(
                 m.as_str(),
-                "contains" | "member" | "lookup" | "get" | "value" | "__direct_access"
+                "contains"
+                    | "member"
+                    | "lookup"
+                    | "get"
+                    | "value"
+                    | "__direct_access"
                     | "check_root"
             ) || args.iter().any(expr_needs_state)
         }
@@ -241,8 +246,10 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                     // generated module so the user sees a real diagnostic.
                     let n: u32 = match args.first() {
                         None => 1,
-                        Some(ExprIR::Literal { value: nocturne_ir::expr::LiteralIR::Int(v), .. })
-                            if *v <= u32::MAX as u128 => *v as u32,
+                        Some(ExprIR::Literal {
+                            value: nocturne_ir::expr::LiteralIR::Int(v),
+                            ..
+                        }) if *v <= u32::MAX as u128 => *v as u32,
                         Some(_) => {
                             return quote! {
                                 compile_error!(
@@ -261,7 +268,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         ops.push(Op::Addi { immediate: #n });
                         ops.push(Op::Ins { cached: true, n: 1 });
                     }
-                },
+                }
                 "get" | "value" | "__direct_access" => {
                     // On-chain read pattern: Dup + Idx + Popeq{cached:true, result}.
                     // The `result` must be the actual value the on-chain VM will
@@ -325,16 +332,12 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                                     quote! { #disc }
                                 }
                                 Some(p) => {
-                                    let payload_match = enum_payload_match_expr(
-                                        &quote! { __e.clone() },
-                                        t, ctx)
-                                    .unwrap_or_else(|| quote! { unreachable!() });
-                                    let payload_repr = tuple_component_aligned_repr(
-                                        &p,
-                                        &quote! { __payload },
-                                    );
-                                    let disc =
-                                        enum_like_discriminant_expr(&quote! { __e }, t);
+                                    let payload_match =
+                                        enum_payload_match_expr(&quote! { __e.clone() }, t, ctx)
+                                            .unwrap_or_else(|| quote! { unreachable!() });
+                                    let payload_repr =
+                                        tuple_component_aligned_repr(&p, &quote! { __payload });
+                                    let disc = enum_like_discriminant_expr(&quote! { __e }, t);
                                     quote! {
                                         {
                                             let __e = #accessor;
@@ -373,7 +376,8 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                     // (via `generate_runtime_cond`), the bool drives branching.
                     // Works for both Map and Set fields (same Member opcode,
                     // K type resolved via extract_field_key_type).
-                    let block = generate_map_contains_block(field_idx, &field_name, args, field_ty, ctx);
+                    let block =
+                        generate_map_contains_block(field_idx, &field_name, args, field_ty, ctx);
                     quote! { let _ = #block; }
                 }
                 "insert" => {
@@ -474,8 +478,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
             // cell.set(v);` binds to the real witness value instead of
             // unit.
             let var_name = format_ident!("{}", name.to_string());
-            let val_stmt = generate_op_stmt(
-                value, ctx);
+            let val_stmt = generate_op_stmt(value, ctx);
             // Pull the witness binding out separately so the block
             // evaluates to a real value rather than `()`. Handles bare
             // `witnesses.f` and `witnesses.f.<method>()` (most commonly
@@ -568,7 +571,9 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                 // base accessor.
                 let ty = witness_ty.unwrap();
                 component_private_push(ty, &quote! { witnesses.#field_ident }, ctx)
-            } else if let Some(fields) = witness_ty.and_then(|t| user_struct_fields(t, user_structs)) {
+            } else if let Some(fields) =
+                witness_ty.and_then(|t| user_struct_fields(t, user_structs))
+            {
                 // User-defined struct witness: project each field by
                 // name and push its per-component Fr in declaration
                 // order. Mirrors the tuple expansion in
@@ -582,7 +587,10 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                     })
                     .collect();
                 quote! { #(#pushes)* }
-            } else if witness_ty.map(|t| is_enum_like(t, ctx.user_enums)).unwrap_or(false) {
+            } else if witness_ty
+                .map(|t| is_enum_like(t, ctx.user_enums))
+                .unwrap_or(false)
+            {
                 // Enum-like witness (`Option<T>` or a user enum): push
                 // the discriminant first, then for homogeneous payloads
                 // also push the payload's per-component Frs. The
@@ -591,19 +599,16 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                 // it via pattern matching.
                 let payload = witness_ty.and_then(|t| enum_like_payload_type(t, ctx.user_enums));
                 let ty = witness_ty.unwrap();
-                let disc = enum_like_discriminant_expr(
-                    &quote! { witnesses.#field_ident },
-                    ty,
-                );
+                let disc = enum_like_discriminant_expr(&quote! { witnesses.#field_ident }, ty);
                 match payload {
                     Some(p) => {
                         let payload_match = enum_payload_match_expr(
                             &quote! { witnesses.#field_ident.clone() },
-                            ty, ctx)
+                            ty,
+                            ctx,
+                        )
                         .unwrap_or_else(|| quote! { unreachable!() });
-                        let payload_pushes = component_private_push(
-                            &p,
-                            &quote! { __payload }, ctx);
+                        let payload_pushes = component_private_push(&p, &quote! { __payload }, ctx);
                         quote! {
                             private_transcript.push(Fr::from((#disc) as u64));
                             {
@@ -624,10 +629,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
         }
 
         ExprIR::Block { stmts, .. } => {
-            let inner: Vec<TokenStream> = stmts
-                .iter()
-                .map(|s| generate_op_stmt(s, ctx))
-                .collect();
+            let inner: Vec<TokenStream> = stmts.iter().map(|s| generate_op_stmt(s, ctx)).collect();
             quote! { #(#inner)* }
         }
 
@@ -649,10 +651,8 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
         //       method calls (e.g. `check_root(&computed)`).
         ExprIR::FnCall { name, args, .. } => {
             // Emit witness pushes from any path-typed args first.
-            let witness_emits: Vec<TokenStream> = args
-                .iter()
-                .map(|a| generate_op_stmt(a, ctx))
-                .collect();
+            let witness_emits: Vec<TokenStream> =
+                args.iter().map(|a| generate_op_stmt(a, ctx)).collect();
             let name_str = name.to_string();
             let value_expr = match name_str.as_str() {
                 "merkle_tree_path_root" => {
@@ -672,9 +672,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
 
         // Reference (`&expr`) forwards to its inner so side effects
         // bubble up through `&witnesses.path` etc.
-        ExprIR::Reference { expr: inner, .. } => {
-            generate_op_stmt(inner, ctx)
-        }
+        ExprIR::Reference { expr: inner, .. } => generate_op_stmt(inner, ctx),
 
         // BinaryOp at statement level only carries side effects via
         // witness reads on either side; the arithmetic itself doesn't
@@ -685,9 +683,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
             let r = generate_op_stmt(rhs, ctx);
             quote! { #l #r }
         }
-        ExprIR::UnaryOp { expr: inner, .. } => {
-            generate_op_stmt(inner, ctx)
-        }
+        ExprIR::UnaryOp { expr: inner, .. } => generate_op_stmt(inner, ctx),
 
         // An expression the IR couldn't lower (e.g. a Rust pattern Nocturne
         // doesn't model yet). Emit a `compile_error!` carrying the IR's
@@ -705,10 +701,8 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
         // ZKIR side emits the in-circuit constraint separately.
         ExprIR::Assert { kind, .. } => match kind {
             nocturne_ir::expr::AssertKind::Assert(cond) => {
-                let witness_pushes =
-                    collect_witness_private_inputs(cond, ctx);
-                let cond_expr = generate_runtime_cond(
-                    cond, ctx);
+                let witness_pushes = collect_witness_private_inputs(cond, ctx);
+                let cond_expr = generate_runtime_cond(cond, ctx);
                 quote! {
                     #witness_pushes
                     assert!(#cond_expr, "nocturne: circuit assertion failed");
@@ -717,10 +711,8 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
             nocturne_ir::expr::AssertKind::AssertEq(a, b) => {
                 let wa = collect_witness_private_inputs(a, ctx);
                 let wb = collect_witness_private_inputs(b, ctx);
-                let la = generate_runtime_cond(
-                    a, ctx);
-                let lb = generate_runtime_cond(
-                    b, ctx);
+                let la = generate_runtime_cond(a, ctx);
+                let lb = generate_runtime_cond(b, ctx);
                 quote! {
                     #wa
                     #wb
@@ -738,7 +730,8 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
 /// Returns `None` for other shapes.
 fn let_binding_value_for_ledger_read(
     value: &ExprIR,
-    ctx: &TranscriptCtx<'_>,) -> Option<TokenStream> {
+    ctx: &TranscriptCtx<'_>,
+) -> Option<TokenStream> {
     let field_names = ctx.field_names;
     let ExprIR::LedgerAccess { field, method, .. } = value else {
         return None;
@@ -761,10 +754,7 @@ fn let_binding_value_for_ledger_read(
 /// shape we don't model, so the caller falls back to the historical
 /// block-wrapping path that captures `generate_op_stmt`'s trailing
 /// expression instead.
-fn let_binding_runtime_value(
-    value: &ExprIR,
-    ctx: &TranscriptCtx<'_>,
-) -> Option<TokenStream> {
+fn let_binding_runtime_value(value: &ExprIR, ctx: &TranscriptCtx<'_>) -> Option<TokenStream> {
     let user_enums = ctx.user_enums;
     match value {
         ExprIR::WitnessAccess { field, .. } => {
@@ -776,7 +766,11 @@ fn let_binding_runtime_value(
         // homogeneous payload from whichever variant carries it. No synthetic
         // accessor on the enum — the user-facing surface is plain pattern
         // matching, and the generated code uses the same construct.
-        ExprIR::EnumPayload { scrutinee, enum_name, .. } => {
+        ExprIR::EnumPayload {
+            scrutinee,
+            enum_name,
+            ..
+        } => {
             let scrutinee_expr = let_binding_runtime_value(scrutinee, ctx)?;
             // `Option` is the synthetic marker the parser uses for
             // single-segment `Some`/`None` patterns; codegen knows the
@@ -803,7 +797,12 @@ fn let_binding_runtime_value(
                 }
             })
         }
-        ExprIR::MethodCall { receiver, method, args, .. } => {
+        ExprIR::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } => {
             let recv = let_binding_runtime_value(receiver, ctx)?;
             let m = format_ident!("{}", method.to_string());
             // Each method-call argument needs its own runtime value; we
@@ -866,7 +865,12 @@ fn let_binding_runtime_value(
         // branch's terminal expression has no usable value shape
         // (caller drops into the block-wrap path which still
         // captures side effects but yields `()`).
-        ExprIR::If { cond, then_branch, else_branch, .. } => {
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
             let else_stmts = else_branch.as_ref()?;
             let then_last = then_branch.last()?;
             let else_last = else_stmts.last()?;
@@ -885,9 +889,7 @@ fn let_binding_runtime_value(
 /// generate code to add their values to private_transcript. Type-aware
 /// so enum and Bytes/digest witnesses use the same push shape as the
 /// `WitnessAccess` arm of `generate_op_stmt`.
-fn collect_witness_private_inputs(
-    expr: &ExprIR,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+fn collect_witness_private_inputs(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
     let witness_types = ctx.witness_types;
     match expr {
         ExprIR::WitnessAccess { field, .. } => {
@@ -917,9 +919,7 @@ fn collect_witness_private_inputs(
                 }
             }
         }
-        ExprIR::MethodCall { receiver, .. } => {
-            collect_witness_private_inputs(receiver, ctx)
-        }
+        ExprIR::MethodCall { receiver, .. } => collect_witness_private_inputs(receiver, ctx),
         ExprIR::Index { array, .. } => {
             // `witnesses.arr[i]` in a condition: the WitnessAccess
             // allocates ALL N*len(T) wires on first touch, so we must
@@ -933,15 +933,9 @@ fn collect_witness_private_inputs(
             let r = collect_witness_private_inputs(rhs, ctx);
             quote! { #l #r }
         }
-        ExprIR::UnaryOp { expr: inner, .. } => {
-            collect_witness_private_inputs(inner, ctx)
-        }
-        ExprIR::Reference { expr: inner, .. } => {
-            collect_witness_private_inputs(inner, ctx)
-        }
-        ExprIR::Disclose { value: inner, .. } => {
-            collect_witness_private_inputs(inner, ctx)
-        }
+        ExprIR::UnaryOp { expr: inner, .. } => collect_witness_private_inputs(inner, ctx),
+        ExprIR::Reference { expr: inner, .. } => collect_witness_private_inputs(inner, ctx),
+        ExprIR::Disclose { value: inner, .. } => collect_witness_private_inputs(inner, ctx),
         ExprIR::FnCall { args, .. } => {
             // `merkle_tree_path_root(&witnesses.path)` and similar
             // builtins recurse into their args so the witness reads
@@ -1035,11 +1029,17 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
         // composes its values instead of silently collapsing to `()`.
         ExprIR::Tuple { elements, .. } => {
             let parts: Vec<TokenStream> = elements.iter().map(arg_to_runtime_expr).collect();
-            let trailing = if elements.len() == 1 { quote! { , } } else { quote! {} };
+            let trailing = if elements.len() == 1 {
+                quote! { , }
+            } else {
+                quote! {}
+            };
             quote! { (#(#parts),* #trailing) }
         }
         // Unary minus / not — compose the inner expression.
-        ExprIR::UnaryOp { op, expr: inner, .. } => {
+        ExprIR::UnaryOp {
+            op, expr: inner, ..
+        } => {
             let i = arg_to_runtime_expr(inner);
             match op {
                 syn::UnOp::Neg(_) => quote! { (-#i) },
@@ -1068,7 +1068,8 @@ fn generate_map_contains_block(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
         .first()
@@ -1112,7 +1113,8 @@ fn generate_cell_set(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     // `Counter::set` shares the Cell<u64> wire shape (both deploy as
     // `StateValue::Cell(AlignedValue<u64>)`), so route Counter through
     // the same code with `u64` as the implicit inner type.
@@ -1205,11 +1207,10 @@ fn user_enum_payload_type(
 }
 
 /// True if `ty` is the path of a user-defined unit-variant enum.
-fn is_user_enum(
-    ty: &syn::Type,
-    user_enums: &HashMap<String, Vec<UserEnumVariant>>,
-) -> bool {
-    let syn::Type::Path(tp) = ty else { return false };
+fn is_user_enum(ty: &syn::Type, user_enums: &HashMap<String, Vec<UserEnumVariant>>) -> bool {
+    let syn::Type::Path(tp) = ty else {
+        return false;
+    };
     if tp.qself.is_some() {
         return false;
     }
@@ -1319,7 +1320,8 @@ fn user_struct_fields<'a>(
 fn component_private_push(
     ty: &syn::Type,
     accessor: &TokenStream,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     if ty_str.starts_with("Bytes<") {
         return quote! {
@@ -1376,13 +1378,10 @@ fn component_private_push(
                 // the payload out with an inline match — same shape
                 // as user-facing pattern matching, no synthetic
                 // accessor.
-                let payload_match = enum_payload_match_expr(
-                    &quote! { (#accessor).clone() },
-                    ty, ctx)
-                .unwrap_or_else(|| quote! { unreachable!() });
-                let payload_pushes = component_private_push(
-                    &p,
-                    &quote! { __payload }, ctx);
+                let payload_match =
+                    enum_payload_match_expr(&quote! { (#accessor).clone() }, ty, ctx)
+                        .unwrap_or_else(|| quote! { unreachable!() });
+                let payload_pushes = component_private_push(&p, &quote! { __payload }, ctx);
                 quote! {
                     private_transcript.push(Fr::from((#disc) as u64));
                     {
@@ -1407,7 +1406,8 @@ fn component_private_push(
 fn aligned_value_arg_expr(
     expr: &ExprIR,
     ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let user_structs = ctx.user_structs;
     if let Some(t) = ty {
         // Tuple keys / values: build the upstream tuple shape that
@@ -1430,7 +1430,11 @@ fn aligned_value_arg_expr(
                 .collect();
             // A 1-tuple needs the trailing comma so Rust parses it as
             // a tuple type and the upstream `Aligned for (T,)` kicks in.
-            let trailing = if n == 1 { quote! { , } } else { quote! {} };
+            let trailing = if n == 1 {
+                quote! { , }
+            } else {
+                quote! {}
+            };
             return quote! {
                 {
                     let __t = #raw;
@@ -1450,7 +1454,11 @@ fn aligned_value_arg_expr(
                     tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] })
                 })
                 .collect();
-            let trailing = if n == 1 { quote! { , } } else { quote! {} };
+            let trailing = if n == 1 {
+                quote! { , }
+            } else {
+                quote! {}
+            };
             return quote! {
                 {
                     let __a = #raw;
@@ -1494,7 +1502,11 @@ fn aligned_value_arg_expr(
                     tuple_component_aligned_repr(&f.ty, &quote! { __t.#fname })
                 })
                 .collect();
-            let trailing = if fields.len() == 1 { quote! { , } } else { quote! {} };
+            let trailing = if fields.len() == 1 {
+                quote! { , }
+            } else {
+                quote! {}
+            };
             return quote! {
                 {
                     let __t = #raw;
@@ -1519,12 +1531,9 @@ fn aligned_value_arg_expr(
                     quote! { (#disc) }
                 }
                 Some(p) => {
-                    let payload_match = enum_payload_match_expr(
-                        &quote! { __e.clone() },
-                        t, ctx)
-                    .unwrap_or_else(|| quote! { unreachable!() });
-                    let payload_repr =
-                        tuple_component_aligned_repr(&p, &quote! { __payload });
+                    let payload_match = enum_payload_match_expr(&quote! { __e.clone() }, t, ctx)
+                        .unwrap_or_else(|| quote! { unreachable!() });
+                    let payload_repr = tuple_component_aligned_repr(&p, &quote! { __payload });
                     let disc = enum_like_discriminant_expr(&quote! { __e }, t);
                     quote! {
                         {
@@ -1612,7 +1621,8 @@ fn generate_map_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let kv = field_ty.and_then(extract_map_kv_types);
     let k_ty = kv.as_ref().map(|(k, _)| k.clone());
     let v_ty = kv.as_ref().map(|(_, v)| v.clone());
@@ -1661,7 +1671,8 @@ fn generate_map_lookup(
     field_name: &str,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let field_ident = format_ident!("{}", field_name);
     let raw_key = args
         .first()
@@ -1722,7 +1733,8 @@ fn generate_map_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let k_ty = field_ty.and_then(extract_map_key_type);
     let key_aligned = args
         .first()
@@ -1907,7 +1919,8 @@ fn generate_set_insert(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
@@ -1939,7 +1952,8 @@ fn generate_set_remove(
     field_idx: u8,
     args: &[ExprIR],
     field_ty: Option<&syn::Type>,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let t_ty = field_ty.and_then(extract_set_inner_type);
     let key_aligned = args
         .first()
@@ -2169,10 +2183,7 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
         // projections downstream in `aligned_value_arg_expr` see a
         // real tuple instead of falling through to `()`.
         ExprIR::Tuple { elements, .. } => {
-            let parts: Vec<TokenStream> = elements
-                .iter()
-                .map(arg_to_runtime_raw_expr)
-                .collect();
+            let parts: Vec<TokenStream> = elements.iter().map(arg_to_runtime_raw_expr).collect();
             let trailing = if elements.len() == 1 {
                 quote! { , }
             } else {
@@ -2290,9 +2301,7 @@ fn is_enum_variant_path_expr(
 /// discriminant expression. The macro-generated `discriminant()` method
 /// is in scope for every user enum, so this works uniformly on witness
 /// reads (`witnesses.f`), local bindings, and variant literals.
-fn runtime_enum_disc_expr(
-    expr: &ExprIR,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+fn runtime_enum_disc_expr(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
     let user_enums = ctx.user_enums;
     match expr {
         ExprIR::Path { path, .. } => {
@@ -2362,9 +2371,7 @@ fn runtime_enum_disc_expr(
     }
 }
 
-fn generate_runtime_cond(
-    expr: &ExprIR,
-    ctx: &TranscriptCtx<'_>,) -> TokenStream {
+fn generate_runtime_cond(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
     let field_names = ctx.field_names;
     let field_types = ctx.field_types;
     match expr {
@@ -2463,7 +2470,9 @@ fn generate_runtime_cond(
                 }
             }
         }
-        ExprIR::UnaryOp { op, expr: inner, .. } => {
+        ExprIR::UnaryOp {
+            op, expr: inner, ..
+        } => {
             let i = generate_runtime_cond(inner, ctx);
             match op {
                 syn::UnOp::Not(_) => quote! { (!#i) },
