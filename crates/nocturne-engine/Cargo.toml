@@ -1,0 +1,10 @@
+[package]
+name = "nocturne-engine"
+description = "Off-chain testing engine for nocturne contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+nocturne-types = { workspace = true }
+nocturne-storage = { workspace = true }

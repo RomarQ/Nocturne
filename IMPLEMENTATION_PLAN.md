@@ -1,4 +1,4 @@
-# Implementation Plan -- midnight-edsl
+# Implementation Plan -- nocturne
 
 See [SPEC.md](./SPEC.md) for the full design specification.
 
@@ -121,19 +121,19 @@ Tools that deploy/call Nocturne-compiled contracts:
 ## Architecture
 
 ```
-midnight-edsl/
+nocturne/
   crates/
     midnight/           Umbrella (re-exports runtime types)
-    midnight-macro/     #[midnight::contract], #[midnight::test]
-    midnight-ir/        Internal IR (parse + validate)
-    midnight-codegen/   ZKIR emitter + transcript codegen + deploy codegen
-    midnight-types/     Field, Boolean, Bytes<N>, Uint<N>
+    nocturne-macro/     #[midnight::contract], #[midnight::test]
+    nocturne-ir/        Internal IR (parse + validate)
+    nocturne-codegen/   ZKIR emitter + transcript codegen + deploy codegen
+    nocturne-types/     Field, Boolean, Bytes<N>, Uint<N>
     midnight-storage/   Cell, Counter, Map, MerkleTree
-    midnight-metadata/  contract-info.json
-    midnight-env/       (stub) Environment context
-    midnight-engine/    (stub) Test engine
-    midnight-e2e/       (stub) E2E framework
-    midnight-primitives/(stub) Field arithmetic
+    nocturne-metadata/  contract-info.json
+    nocturne-env/       (stub) Environment context
+    nocturne-engine/    (stub) Test engine
+    nocturne-e2e/       (stub) E2E framework
+    nocturne-primitives/(stub) Field arithmetic
   tools/
     cargo-midnight/     Build/keygen/test CLI
   examples/

@@ -1,7 +1,7 @@
 # Conditional-branch DeclarePubInput zeroing
 
 **Discovered**: 2026-05-18 (after empirical sweep of compactc behavior)
-**Status**: Implemented 2026-05-18 in `crates/midnight-codegen/src/zkir_emitter.rs`. Regression test: `voting_verifies_with_ledger_shape_pis` in `crates/midnight/tests/ledger_integration_test.rs`.
+**Status**: Implemented 2026-05-18 in `crates/nocturne-codegen/src/zkir_emitter.rs`. Regression test: `voting_verifies_with_ledger_shape_pis` in `crates/midnight/tests/ledger_integration_test.rs`.
 
 Inside a conditional branch, every value passed to `DeclarePubInput` must be zero when the branch is inactive. The fix is to route the value through `cond_select(branch_guard, active_value, ZERO)` before declaring it.
 
@@ -27,7 +27,7 @@ Compactc optimizes by reusing values that happen to be zero in the inactive case
 
 ## How Nocturne does it
 
-In `crates/midnight-codegen/src/zkir_emitter.rs`:
+In `crates/nocturne-codegen/src/zkir_emitter.rs`:
 
 - `ZkirEmitter` tracks `in_conditional: bool` and a cached `zero_var: Option<Index>`.
 - `push_declare_pub_input(value)` is the single chokepoint. When `in_conditional == true`, it wraps the value in `CondSelect { bit: self.guard, a: value, b: zero }` before pushing the `DeclarePubInput`. Outside conditionals (top-level circuit body), it emits the `DeclarePubInput` directly.

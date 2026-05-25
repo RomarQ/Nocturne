@@ -6,10 +6,10 @@ license.workspace = true
 version.workspace = true
 
 [dependencies]
-midnight-macro = { workspace = true }
-midnight-types = { workspace = true }
-midnight-storage = { workspace = true }
-# Future: midnight-env, midnight-primitives, midnight-engine
+nocturne-macro = { workspace = true }
+nocturne-types = { workspace = true }
+nocturne-storage = { workspace = true }
+# Future: nocturne-env, nocturne-primitives, nocturne-engine
 
 # Re-exported midnight-ledger crates for runtime transcript construction
 midnight-onchain-vm = { workspace = true }
@@ -17,17 +17,17 @@ midnight-onchain-state = { workspace = true }
 midnight-transient-crypto = { workspace = true }
 midnight-base-crypto = { workspace = true }
 midnight-zkir = { workspace = true }
-midnight-ledger-storage = { workspace = true }
+midnight-storage = { workspace = true }
 
 [dev-dependencies]
-midnight-codegen = { workspace = true }
-midnight-ir = { workspace = true }
-midnight-metadata = { workspace = true }
+nocturne-codegen = { workspace = true }
+nocturne-ir = { workspace = true }
+nocturne-metadata = { workspace = true }
 midnight-base-crypto = { workspace = true }
 midnight-ledger = { workspace = true }
 midnight-onchain-runtime = { workspace = true }
 midnight-coin-structure = { workspace = true }
-midnight-ledger-storage = { workspace = true }
+midnight-storage = { workspace = true }
 syn = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

@@ -1,0 +1,12 @@
+[package]
+name = "nocturne-ir"
+description = "Intermediate representation for nocturne contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+thiserror = { workspace = true }

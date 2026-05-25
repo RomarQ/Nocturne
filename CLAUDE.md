@@ -52,12 +52,11 @@ Write a new memory (or update an existing one) when you discover any of:
 
 Do not stop at "needs investigation," "TODO," "unclear," or "worth a deeper look" when the relevant source is available. Read it and find the answer. A finding is not a result — investigate to a definitive answer (root cause + fix path) before reporting, unless it requires a destructive action or external decision that needs approval.
 
-## Pending crate rename
+## Pending rename: umbrella crate
 
-Internal crates are still named `midnight-*` (`midnight-codegen`, `midnight-ir`, etc.). A rename to `nocturne-*` is pending. When editing manifests, leave the name as-is — don't preemptively rename.
+Internal crates are now `nocturne-*`. The umbrella crate is still `midnight` (so contracts say `use midnight::types::*` and `#[midnight::contract]`), as is the CLI subcommand (`cargo midnight build`) and the artifact directory (`target/midnight/`). Renaming those is Commit B of the rename plan, sequenced separately. When touching the umbrella crate's manifest or any user-facing surface, leave the `midnight` name as-is until that commit lands.
 
 ## Common gotchas
 
-- `midnight-storage` (our internal path crate) clashes with `midnight-storage` (the upstream ledger crate). When pulling in upstream storage types, rename: `midnight-ledger-storage = { package = "midnight-storage", version = "..." }`.
 - The proc macro writes `target/midnight/<contract>/{zkir,compiler}/` from the workspace target dir (walks up 4 levels from `OUT_DIR`). To regenerate artifacts after a code change, you may need `cargo clean -p <contract_crate>` first — incremental builds don't re-run the macro.
 - `cargo-midnight build` looks for `./target/midnight/` relative to CWD. Run it from the workspace root, not from an example crate's directory.

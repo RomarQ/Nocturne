@@ -9,7 +9,7 @@ The on-chain VM has no `Option<V>` primitive. `Popeq.as_cell(StateValue)` panics
 
 ## Parser rewrite
 
-In `crates/midnight-ir/src/parse.rs`, the `Expr::If` arm calls `match_if_let_some_get(cond)` before falling through to the regular `if` path. The matcher returns `Some((v_ident, map_field_ident, key_expr))` when it sees:
+In `crates/nocturne-ir/src/parse.rs`, the `Expr::If` arm calls `match_if_let_some_get(cond)` before falling through to the regular `if` path. The matcher returns `Some((v_ident, map_field_ident, key_expr))` when it sees:
 
 ```rust
 if let Some(<v>) = self.<map_field>.get(<key>) { body }

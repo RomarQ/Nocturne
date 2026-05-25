@@ -128,8 +128,8 @@ lookup,remove}_proves_and_verifies` for `Map<Bytes<32>, Uint<64>>`.
 
 ## Files
 
-- IR emission: `crates/midnight-codegen/src/zkir_emitter.rs::emit_ledger_write` + `emit_push_cell` + `aligned_value_encoding` table
-- Transcript emission: `crates/midnight-codegen/src/transcript_codegen.rs`, `"set"` arm + `arg_to_runtime_expr`
+- IR emission: `crates/nocturne-codegen/src/zkir_emitter.rs::emit_ledger_write` + `emit_push_cell` + `aligned_value_encoding` table
+- Transcript emission: `crates/nocturne-codegen/src/transcript_codegen.rs`, `"set"` arm + `arg_to_runtime_expr`
 - E2E test: `crates/midnight/tests/ledger_integration_test.rs::flag_raise_proves_and_verifies`
 - Empirical compactc reference: `/tmp/compact-voting/zkir/end_ballot.zkir` (build with `compactc /tmp/voting.compact /tmp/compact-voting`)
 - Related: `memories/map-ledger-field-encoding.md`

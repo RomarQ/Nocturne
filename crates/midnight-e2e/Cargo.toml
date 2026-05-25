@@ -1,8 +1,0 @@
-[package]
-name = "midnight-e2e"
-description = "End-to-end testing framework for midnight-edsl contracts."
-edition.workspace = true
-license.workspace = true
-version.workspace = true
-
-[dependencies]

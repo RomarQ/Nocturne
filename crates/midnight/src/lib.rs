@@ -1,9 +1,9 @@
-//! midnight-edsl: A Rust eDSL for writing Midnight smart contracts.
+//! nocturne: A Rust eDSL for writing Midnight smart contracts.
 //!
 //! This is the umbrella crate that re-exports all public API items.
 
-pub use midnight_macro::contract;
-pub use midnight_macro::test;
+pub use nocturne_macro::contract;
+pub use nocturne_macro::test;
 
 /// Off-chain identity function for the `midnight::disclose(_)` syntax.
 ///
@@ -20,14 +20,14 @@ pub fn disclose<T>(value: T) -> T {
 
 /// Re-exports of all types used in contract definitions.
 pub mod types {
-    pub use midnight_storage::*;
-    pub use midnight_types::*;
+    pub use nocturne_storage::*;
+    pub use nocturne_types::*;
 }
 
 /// Re-exports of midnight-ledger runtime types for transcript construction.
 pub mod runtime {
     pub use midnight_base_crypto as base_crypto;
-    pub use midnight_ledger_storage as storage;
+    pub use midnight_storage as storage;
     pub use midnight_onchain_state as onchain_state;
     pub use midnight_onchain_vm as onchain_vm;
     pub use midnight_transient_crypto as transient_crypto;

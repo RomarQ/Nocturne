@@ -84,8 +84,8 @@ fn test_contract_info_matches_compact_schema() {
         }
     };
 
-    let contract = midnight_ir::parse_contract(module).expect("parse");
-    let info = midnight_metadata::generate_contract_info(&contract);
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let info = nocturne_metadata::generate_contract_info(&contract);
     let json = serde_json::to_string_pretty(&info).unwrap();
     println!("contract-info.json:\n{json}");
 

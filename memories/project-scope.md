@@ -7,7 +7,7 @@ Nocturne is an embedded DSL in Rust for **writing** Midnight smart contracts. It
 ## In scope
 
 - The `#[midnight::contract]` proc-macro frontend
-- ZKIR generation (`crates/midnight-codegen`)
+- ZKIR generation (`crates/nocturne-codegen`)
 - Compile-time transcript-builder generation
 - `keygen` (via `cargo midnight keygen` → midnight-zkir)
 - `contract-info.json` matching Compact's schema

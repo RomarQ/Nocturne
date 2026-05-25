@@ -1,0 +1,18 @@
+[package]
+name = "nocturne-codegen"
+description = "Code generation for nocturne: emits ZKIR and transcript VM bytecode."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+nocturne-ir = { workspace = true }
+nocturne-metadata = { workspace = true }
+midnight-zkir = { workspace = true }
+midnight-transient-crypto = { workspace = true }
+midnight-base-crypto = { workspace = true }
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

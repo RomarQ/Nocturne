@@ -53,7 +53,7 @@ mod ballot {
 async fn prove_and_verify_voting_with_witness() {
     // Emit ZKIR.
     let ir = {
-        use midnight_codegen::zkir_emitter;
+        use nocturne_codegen::zkir_emitter;
         let module: syn::ItemMod = syn::parse_quote! {
             mod ballot {
                 #[midnight(ledger)]
@@ -81,7 +81,7 @@ async fn prove_and_verify_voting_with_witness() {
                 }
             }
         };
-        let contract = midnight_ir::parse_contract(module).expect("parse");
+        let contract = nocturne_ir::parse_contract(module).expect("parse");
         let output = zkir_emitter::emit_contract(&contract);
         output.circuits.into_iter().next().unwrap().ir_source
     };

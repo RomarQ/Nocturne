@@ -1,0 +1,10 @@
+[package]
+name = "nocturne-primitives"
+description = "Low-level utilities for nocturne: field arithmetic, hashing, alignment."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+midnight-transient-crypto = { workspace = true }
+midnight-base-crypto = { workspace = true }

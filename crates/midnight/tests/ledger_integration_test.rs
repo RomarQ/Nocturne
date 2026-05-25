@@ -20,8 +20,8 @@ use midnight_base_crypto::cost_model::RunningCost;
 use midnight_coin_structure::contract::ContractAddress;
 use midnight_ledger::construct::{ContractCallExt, ContractCallPrototype};
 use midnight_ledger::structure::ProofPreimageVersioned;
-use midnight_ledger_storage::arena::Sp;
-use midnight_ledger_storage::db::InMemoryDB;
+use midnight_storage::arena::Sp;
+use midnight_storage::db::InMemoryDB;
 use midnight_onchain_runtime::context::Effects;
 use midnight_onchain_runtime::ops::Op;
 use midnight_onchain_runtime::result_mode::ResultModeVerify;
@@ -343,7 +343,7 @@ mod ballot {
 }
 
 fn build_counter_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter {
             #[midnight(ledger)]
@@ -356,13 +356,13 @@ fn build_counter_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output.circuits.into_iter().next().unwrap().ir_source
 }
 
 fn build_read_stored_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod reader {
             #[midnight(ledger)]
@@ -377,7 +377,7 @@ fn build_read_stored_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -388,7 +388,7 @@ fn build_read_stored_ir() -> midnight_zkir::IrSource {
 }
 
 fn build_bytes_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_cell {
             #[midnight(ledger)]
@@ -409,7 +409,7 @@ fn build_bytes_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -428,7 +428,7 @@ fn build_peek_digest_ir() -> midnight_zkir::IrSource {
 }
 
 fn build_take_digest_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_witness {
             #[midnight(ledger)]
@@ -446,7 +446,7 @@ fn build_take_digest_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -457,7 +457,7 @@ fn build_take_digest_ir() -> midnight_zkir::IrSource {
 }
 
 fn build_read_count_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_reader {
             #[midnight(ledger)]
@@ -472,7 +472,7 @@ fn build_read_count_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -483,7 +483,7 @@ fn build_read_count_ir() -> midnight_zkir::IrSource {
 }
 
 fn build_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod records {
             #[midnight(ledger)]
@@ -508,7 +508,7 @@ fn build_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -531,7 +531,7 @@ fn build_fetch_ir() -> midnight_zkir::IrSource {
 }
 
 fn build_byte_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod byte_records {
             #[midnight(ledger)]
@@ -560,7 +560,7 @@ fn build_byte_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource 
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -571,7 +571,7 @@ fn build_byte_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource 
 }
 
 fn build_check_member_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod membership {
             #[midnight(ledger)]
@@ -588,7 +588,7 @@ fn build_check_member_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -599,7 +599,7 @@ fn build_check_member_ir() -> midnight_zkir::IrSource {
 }
 
 fn build_flag_raise_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod flag {
             #[midnight(ledger)]
@@ -612,7 +612,7 @@ fn build_flag_raise_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -623,7 +623,7 @@ fn build_flag_raise_ir() -> midnight_zkir::IrSource {
 }
 
 fn build_cast_vote_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod ballot {
             #[midnight(ledger)]
@@ -649,7 +649,7 @@ fn build_cast_vote_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -1616,7 +1616,7 @@ mod cond_writer {
 }
 
 fn build_maybe_raise_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod cond_writer {
             #[midnight(ledger)]
@@ -1637,7 +1637,7 @@ fn build_maybe_raise_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -1754,7 +1754,7 @@ mod nested_cond {
 }
 
 fn build_tick_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod nested_cond {
             #[midnight(ledger)]
@@ -1781,7 +1781,7 @@ fn build_tick_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -1886,7 +1886,7 @@ mod no_else {
 }
 
 fn build_maybe_tick_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod no_else {
             #[midnight(ledger)]
@@ -1905,7 +1905,7 @@ fn build_maybe_tick_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -2011,7 +2011,7 @@ mod cond_read {
 }
 
 fn build_maybe_check_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod cond_read {
             #[midnight(ledger)]
@@ -2030,7 +2030,7 @@ fn build_maybe_check_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -2219,7 +2219,7 @@ mod safe_lookup {
 }
 
 fn build_safe_get_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod safe_lookup {
             #[midnight(ledger)]
@@ -2238,7 +2238,7 @@ fn build_safe_get_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -2420,7 +2420,7 @@ mod map_get_sugar {
 }
 
 fn build_read_if_present_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_get_sugar {
             #[midnight(ledger)]
@@ -2439,7 +2439,7 @@ fn build_read_if_present_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -2620,7 +2620,7 @@ mod if_let_else {
 }
 
 fn build_read_or_count_miss_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod if_let_else {
             #[midnight(ledger)]
@@ -2644,7 +2644,7 @@ fn build_read_or_count_miss_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -2760,7 +2760,7 @@ mod match_get {
 }
 
 fn build_pick_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod match_get {
             #[midnight(ledger)]
@@ -2783,7 +2783,7 @@ fn build_pick_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -2961,7 +2961,7 @@ mod match_get_reversed {
 }
 
 fn build_pick_reversed_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod match_get_reversed {
             #[midnight(ledger)]
@@ -2984,7 +2984,7 @@ fn build_pick_reversed_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -3099,7 +3099,7 @@ mod bytes_get_sugar {
 }
 
 fn build_read_digest_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_get_sugar {
             #[midnight(ledger)]
@@ -3123,7 +3123,7 @@ fn build_read_digest_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -3303,7 +3303,7 @@ mod bytes_v_get_sugar {
 }
 
 fn build_read_blob_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_v_get_sugar {
             #[midnight(ledger)]
@@ -3327,7 +3327,7 @@ fn build_read_blob_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -3506,7 +3506,7 @@ mod set_contract {
 }
 
 fn build_set_contract_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod set_contract {
             #[midnight(ledger)]
@@ -3531,7 +3531,7 @@ fn build_set_contract_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource 
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -3713,7 +3713,7 @@ mod field_cell {
 }
 
 fn build_field_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod field_cell {
             #[midnight(ledger)]
@@ -3734,7 +3734,7 @@ fn build_field_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -3868,7 +3868,7 @@ mod mt_check {
 }
 
 fn build_mt_verify_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_check {
             #[midnight(ledger)]
@@ -3885,7 +3885,7 @@ fn build_mt_verify_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -4021,7 +4021,7 @@ mod mt_insert {
 }
 
 fn build_mt_add_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_insert {
             #[midnight(ledger)]
@@ -4038,7 +4038,7 @@ fn build_mt_add_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -4146,7 +4146,7 @@ mod mt_verify_path {
 }
 
 fn build_mt_verify_path_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_verify_path {
             #[midnight(ledger)]
@@ -4166,7 +4166,7 @@ fn build_mt_verify_path_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -4293,7 +4293,7 @@ mod map_field_key {
 }
 
 fn build_map_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_field_key {
             #[midnight(ledger)]
@@ -4314,7 +4314,7 @@ fn build_map_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -4460,7 +4460,7 @@ mod map_digest_key {
 }
 
 fn build_map_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_digest_key {
             #[midnight(ledger)]
@@ -4484,7 +4484,7 @@ fn build_map_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -4648,7 +4648,7 @@ mod set_field_elem {
 }
 
 fn build_set_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod set_field_elem {
             #[midnight(ledger)]
@@ -4673,7 +4673,7 @@ fn build_set_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -4844,7 +4844,7 @@ mod set_digest_elem {
 }
 
 fn build_set_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod set_digest_elem {
             #[midnight(ledger)]
@@ -4869,7 +4869,7 @@ fn build_set_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5049,7 +5049,7 @@ mod map_b16_key {
 }
 
 fn build_map_b16_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_b16_key {
             #[midnight(ledger)]
@@ -5070,7 +5070,7 @@ fn build_map_b16_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5211,7 +5211,7 @@ mod map_b48_key {
 }
 
 fn build_map_b48_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_b48_key {
             #[midnight(ledger)]
@@ -5232,7 +5232,7 @@ fn build_map_b48_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5377,7 +5377,7 @@ mod mt_b16_insert {
 }
 
 fn build_mt_b16_add_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_b16_insert {
             #[midnight(ledger)]
@@ -5394,7 +5394,7 @@ fn build_mt_b16_add_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5477,7 +5477,7 @@ mod mt_b64_insert {
 }
 
 fn build_mt_b64_add_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_b64_insert {
             #[midnight(ledger)]
@@ -5494,7 +5494,7 @@ fn build_mt_b64_add_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5583,7 +5583,7 @@ mod mt_b16_verify_path {
 }
 
 fn build_mt_b16_verify_path_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_b16_verify_path {
             #[midnight(ledger)]
@@ -5603,7 +5603,7 @@ fn build_mt_b16_verify_path_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5720,7 +5720,7 @@ mod map_tuple_key {
 }
 
 fn build_map_tuple_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_tuple_key {
             #[midnight(ledger)]
@@ -5741,7 +5741,7 @@ fn build_map_tuple_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5885,7 +5885,7 @@ mod for_counter {
 }
 
 fn build_for_counter_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod for_counter {
             #[midnight(ledger)]
@@ -5902,7 +5902,7 @@ fn build_for_counter_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -5987,7 +5987,7 @@ mod for_var_use {
 }
 
 fn build_for_var_use_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod for_var_use {
             #[midnight(ledger)]
@@ -6004,7 +6004,7 @@ fn build_for_var_use_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -6299,7 +6299,7 @@ mod map_struct_key {
 }
 
 fn build_map_struct_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_struct_key {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -6323,7 +6323,7 @@ fn build_map_struct_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -6476,7 +6476,7 @@ mod enum_state {
 }
 
 fn build_enum_state_ir(circuit_name: &str) -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod enum_state {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -6496,7 +6496,7 @@ fn build_enum_state_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -6602,7 +6602,7 @@ mod enum_vote {
 }
 
 fn build_enum_vote_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod enum_vote {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -6629,7 +6629,7 @@ fn build_enum_vote_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -6748,7 +6748,7 @@ mod enum_records {
 }
 
 fn build_enum_records_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod enum_records {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -6770,7 +6770,7 @@ fn build_enum_records_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -6862,7 +6862,7 @@ mod counter_by_n {
 }
 
 fn build_counter_by_n_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_by_n {
             #[midnight(ledger)]
@@ -6875,7 +6875,7 @@ fn build_counter_by_n_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7110,7 +7110,7 @@ mod role_gated_counter {
 }
 
 fn build_role_counter_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod role_gated_counter {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -7137,7 +7137,7 @@ fn build_role_counter_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7243,7 +7243,7 @@ mod let_witness_roundtrip {
 }
 
 fn build_let_witness_roundtrip_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod let_witness_roundtrip {
             #[midnight(ledger)]
@@ -7261,7 +7261,7 @@ fn build_let_witness_roundtrip_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7353,7 +7353,7 @@ mod witness_sum {
 }
 
 fn build_witness_sum_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod witness_sum {
             #[midnight(ledger)]
@@ -7371,7 +7371,7 @@ fn build_witness_sum_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7462,7 +7462,7 @@ mod counter_read_binding {
 }
 
 fn build_counter_read_binding_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_read_binding {
             #[midnight(ledger)]
@@ -7477,7 +7477,7 @@ fn build_counter_read_binding_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7558,7 +7558,7 @@ mod counter_set {
 }
 
 fn build_counter_set_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_set {
             #[midnight(ledger)]
@@ -7575,7 +7575,7 @@ fn build_counter_set_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7665,7 +7665,7 @@ mod inline_sum {
 }
 
 fn build_inline_sum_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod inline_sum {
             #[midnight(ledger)]
@@ -7682,7 +7682,7 @@ fn build_inline_sum_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7826,7 +7826,7 @@ mod payload_enum {
 }
 
 fn build_payload_enum_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod payload_enum {
             #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -7845,7 +7845,7 @@ fn build_payload_enum_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -7950,7 +7950,7 @@ mod match_payload {
 }
 
 fn build_match_payload_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod match_payload {
             #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -7980,7 +7980,7 @@ fn build_match_payload_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -8050,7 +8050,7 @@ async fn match_on_payload_binding_proves_and_verifies() {
 }
 
 #[test]
-#[should_panic(expected = "midnight-edsl: circuit assertion failed")]
+#[should_panic(expected = "nocturne: circuit assertion failed")]
 fn assert_in_circuit_body_panics_on_violation() {
     // Failure path — flag is false, builder panics with the assertion
     // message we emit. Catches witness/state violations before the
@@ -8098,7 +8098,7 @@ mod uint128_pipeline {
 }
 
 fn build_uint128_pipeline_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod uint128_pipeline {
             #[midnight(ledger)]
@@ -8115,7 +8115,7 @@ fn build_uint128_pipeline_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -8213,7 +8213,7 @@ mod option_round_trip {
 }
 
 fn build_option_round_trip_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod option_round_trip {
             #[midnight(ledger)]
@@ -8233,7 +8233,7 @@ fn build_option_round_trip_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -8395,7 +8395,7 @@ mod array_witness_index {
 }
 
 fn build_array_witness_index_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod array_witness_index {
             #[midnight(ledger)]
@@ -8412,7 +8412,7 @@ fn build_array_witness_index_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits
@@ -8521,7 +8521,7 @@ mod if_as_expression {
 }
 
 fn build_if_as_expression_ir() -> midnight_zkir::IrSource {
-    use midnight_codegen::zkir_emitter;
+    use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod if_as_expression {
             #[midnight(ledger)]
@@ -8547,7 +8547,7 @@ fn build_if_as_expression_ir() -> midnight_zkir::IrSource {
             }
         }
     };
-    let contract = midnight_ir::parse_contract(module).expect("parse");
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
     let output = zkir_emitter::emit_contract(&contract);
     output
         .circuits

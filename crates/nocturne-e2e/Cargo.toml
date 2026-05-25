@@ -1,0 +1,8 @@
+[package]
+name = "nocturne-e2e"
+description = "End-to-end testing framework for nocturne contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]

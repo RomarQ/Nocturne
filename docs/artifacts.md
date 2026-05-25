@@ -77,7 +77,7 @@ Human-readable JSON describing the contract's external surface. One file per con
 
 ```json
 {
-  "compiler-version": "midnight-edsl 0.1.0",
+  "compiler-version": "nocturne 0.1.0",
   "language-version": "1.0",
   "runtime-version": "1.0",
   "circuits": [

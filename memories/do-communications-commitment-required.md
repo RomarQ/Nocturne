@@ -27,8 +27,8 @@ If a circuit was generated with `do_communications_commitment: false`, its verif
 
 ## How to apply
 
-- `crates/midnight-codegen/src/zkir_emitter.rs` sets the flag unconditionally to `true`. **Do not** make it conditional on return type or anything else.
-- The invariant is asserted in `crates/midnight-codegen/src/zkir_tests.rs::every_circuit_emits_communications_commitment_slot`.
+- `crates/nocturne-codegen/src/zkir_emitter.rs` sets the flag unconditionally to `true`. **Do not** make it conditional on return type or anything else.
+- The invariant is asserted in `crates/nocturne-codegen/src/zkir_tests.rs::every_circuit_emits_communications_commitment_slot`.
 - Any `ProofPreimage` constructed for our circuits must set `communications_commitment: Some((comm, opening))` with a valid commitment. Use `transient_commit::<[Fr]>(&[inputs..outputs], opening)` to compute. A `(Fr(0), Fr(0))` placeholder works only when `inputs ++ outputs` is empty AND `transient_hash(&[0]) == 0` — both rarely true, so don't rely on it.
 
 ## Tests that catch a regression

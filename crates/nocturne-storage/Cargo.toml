@@ -1,0 +1,11 @@
+[package]
+name = "nocturne-storage"
+description = "Ledger storage abstractions for nocturne contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+nocturne-types = { workspace = true }
+midnight-base-crypto = { workspace = true }
+midnight-transient-crypto = { workspace = true }

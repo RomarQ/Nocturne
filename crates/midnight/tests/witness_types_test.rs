@@ -126,7 +126,7 @@ fn each_witness_type_builds_transcript() {
 /// parses cleanly.
 #[test]
 fn bytes_witness_is_accepted() {
-    use midnight_ir::parse_contract;
+    use nocturne_ir::parse_contract;
 
     let module: syn::ItemMod = syn::parse_quote! {
         mod c {

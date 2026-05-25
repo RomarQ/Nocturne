@@ -25,7 +25,7 @@ What's not yet:
 - Heterogeneous-payload enums (`enum E { A(u64), B(Bytes<32>) }`)
 - ZSwap and Kernel
 - Cross-contract calls
-- Crate rename `midnight-* → nocturne-*` (sequenced separately)
+- Umbrella crate rename `midnight → nocturne` (and the matching attribute namespace, CLI subcommand, and artifact path; internal crates already renamed)
 
 ## Example: counter contract
 
@@ -86,16 +86,16 @@ See [`docs/compiling.md`](docs/compiling.md) for the full build flow and [`docs/
 ```
 crates/
   midnight                  umbrella crate end-users depend on
-  midnight-macro            #[midnight::contract] proc macro
-  midnight-ir               typed IR the macro emits
-  midnight-codegen          ZKIR + transcript + deploy emitters
-  midnight-types            user-facing types (Counter, Cell<T>, Map<...>, ...)
-  midnight-storage          storage primitives mirroring the ledger crate
-  midnight-primitives       crypto + hash primitives
-  midnight-engine           thin layer over the upstream onchain VM
-  midnight-env              runtime stubs used in generated transcript code
-  midnight-metadata         contract-info.json schema
-  midnight-e2e              shared test infrastructure
+  nocturne-macro            #[midnight::contract] proc macro
+  nocturne-ir               typed IR the macro emits
+  nocturne-codegen          ZKIR + transcript + deploy emitters
+  nocturne-types            user-facing types (Counter, Cell<T>, Map<...>, ...)
+  nocturne-storage          storage primitives mirroring the ledger crate
+  nocturne-primitives       crypto + hash primitives
+  nocturne-engine           thin layer over the upstream onchain VM
+  nocturne-env              runtime stubs used in generated transcript code
+  nocturne-metadata         contract-info.json schema
+  nocturne-e2e              shared test infrastructure
 tools/
   cargo-midnight            cargo subcommand for build/keygen/test
 examples/

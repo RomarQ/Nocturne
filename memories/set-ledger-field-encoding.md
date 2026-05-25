@@ -24,8 +24,8 @@ That's the entire on-chain difference between Set::insert(k) and Map::insert(k, 
 ## Implementation
 
 - **Storage** (`crates/midnight-storage/src/set.rs`): `Set<T: Eq + Hash + Clone>` backed by `HashSet<T>`. HashSet-style API: `contains(&T) -> bool`, `insert(T) -> bool`, `remove(&T) -> bool`.
-- **IR** (`crates/midnight-codegen/src/zkir_emitter.rs::emit_set_method`): dispatch by method name; reuses `emit_map_member`/`emit_map_remove`, adds `emit_set_insert` which calls `emit_push_cell(key) + emit_push_null(storage:true)` instead of two `emit_push_cell` calls. `emit_push_null` is a 2-declare helper: `[push_opcode, 0]` + PiSkip{count:2}.
-- **Transcript codegen** (`crates/midnight-codegen/src/transcript_codegen.rs`): dispatch by field type. `extract_field_key_type` unifies `Map<K, V> → K` and `Set<T> → T` so `generate_map_contains_block` is reused for both. New `generate_set_insert` and `generate_set_remove` mirror the Map equivalents; `generate_set_insert` emits `Op::Push { storage: true, value: StateValue::Null }` for the value slot.
+- **IR** (`crates/nocturne-codegen/src/zkir_emitter.rs::emit_set_method`): dispatch by method name; reuses `emit_map_member`/`emit_map_remove`, adds `emit_set_insert` which calls `emit_push_cell(key) + emit_push_null(storage:true)` instead of two `emit_push_cell` calls. `emit_push_null` is a 2-declare helper: `[push_opcode, 0]` + PiSkip{count:2}.
+- **Transcript codegen** (`crates/nocturne-codegen/src/transcript_codegen.rs`): dispatch by field type. `extract_field_key_type` unifies `Map<K, V> → K` and `Set<T> → T` so `generate_map_contains_block` is reused for both. New `generate_set_insert` and `generate_set_remove` mirror the Map equivalents; `generate_set_insert` emits `Op::Push { storage: true, value: StateValue::Null }` for the value slot.
 
 ## Empirical compactc reference
 

@@ -1,0 +1,8 @@
+[package]
+name = "nocturne-types"
+description = "Primitive ZK-compatible types for nocturne contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]

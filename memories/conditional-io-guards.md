@@ -1,7 +1,7 @@
 # Conditional `PrivateInput` / `PublicInput` must carry the branch guard
 
 **Discovered**: 2026-05-19 (during conditional-branches edge-case sweep)
-**Status**: Implemented in `crates/midnight-codegen/src/zkir_emitter.rs` via the `current_io_guard()` helper. Regression tests: `conditional_map_contains_{active,inactive}_proves_and_verifies`, `conditional_cell_set_proves_and_verifies`, `nested_conditional_proves_and_verifies`, `no_else_conditional_false_proves_and_verifies`, `voting_verifies_else_active` in `crates/midnight/tests/ledger_integration_test.rs`.
+**Status**: Implemented in `crates/nocturne-codegen/src/zkir_emitter.rs` via the `current_io_guard()` helper. Regression tests: `conditional_map_contains_{active,inactive}_proves_and_verifies`, `conditional_cell_set_proves_and_verifies`, `nested_conditional_proves_and_verifies`, `no_else_conditional_false_proves_and_verifies`, `voting_verifies_else_active` in `crates/midnight/tests/ledger_integration_test.rs`.
 
 Companion to [[conditional-branch-cond-select-zeroing]]: that fix handles `DeclarePubInput`-side zeroing for the verifier-PI shape; this one handles the prover-side transcript-consumption shape.
 

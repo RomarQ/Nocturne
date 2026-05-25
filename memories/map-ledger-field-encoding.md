@@ -52,7 +52,7 @@ The two non-opcode bytes `0x20` and `0x08` are **not** VM opcodes — they're in
 
 ### `lookup` and `member` (read-only): use `Dup + Idx + Popeq` shape
 
-Both circuits follow the same pattern (similar to the existing `emit_ledger_read` in `crates/midnight-codegen/src/zkir_emitter.rs:520`):
+Both circuits follow the same pattern (similar to the existing `emit_ledger_read` in `crates/nocturne-codegen/src/zkir_emitter.rs:520`):
 
 ```
 Dup(n=0) = 0x30                       → 1 declare
@@ -101,11 +101,11 @@ sugar**: `if let Some(v) = self.map.get(&k) { body }` rewrites to
 `Map<K, V>::contains(&k)` is on-chain compatible for single-Fr key types
 (`Boolean`, `u8..u128`, `Uint<N≤253>`):
 
-- IR: `emit_map_member` in `crates/midnight-codegen/src/zkir_emitter.rs`
+- IR: `emit_map_member` in `crates/nocturne-codegen/src/zkir_emitter.rs`
   produces the Dup + Idx + Push + Member + Popeq sequence, reusing
   `emit_push_cell` for the key.
 - Transcript: the `"contains"`/`"member"` arm in
-  `crates/midnight-codegen/src/transcript_codegen.rs` emits matching
+  `crates/nocturne-codegen/src/transcript_codegen.rs` emits matching
   runtime ops. The Popeq `result` is computed at transcript-build time
   by calling the runtime stub on `state`, so the prover bakes the actual
   Member result into the transcript. Circuits that read state get an
@@ -298,7 +298,7 @@ runtime projection differs (`key.a` vs `key.0`).
 
 How it works:
 
-- The IR parser (`midnight-ir/src/parse.rs`) collects every plain
+- The IR parser (`nocturne-ir/src/parse.rs`) collects every plain
   user struct (without `#[midnight(...)]`) into
   `ContractIR.user_structs: HashMap<String, Vec<UserStructField>>`
   during contract parsing.
@@ -323,6 +323,6 @@ are — but the e2e tests only exercise the single-level case for now.
 ## References
 
 - VM opcodes: `reference-repos/midnight-ledger/onchain-vm/src/ops.rs:95-462`
-- Existing `emit_ledger_read` (Counter read pattern, simplest analogue): `crates/midnight-codegen/src/zkir_emitter.rs:520`
-- Existing key encoding (limited): `crates/midnight-codegen/src/zkir_emitter.rs::emit_key_field_repr`
+- Existing `emit_ledger_read` (Counter read pattern, simplest analogue): `crates/nocturne-codegen/src/zkir_emitter.rs:520`
+- Existing key encoding (limited): `crates/nocturne-codegen/src/zkir_emitter.rs::emit_key_field_repr`
 - Empirical compactc outputs: `/tmp/cond-experiments/map_out/zkir/{put,lookup,member}.zkir`

@@ -1,0 +1,9 @@
+[package]
+name = "nocturne-env"
+description = "Environment trait and runtime context for nocturne contracts."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+nocturne-types = { workspace = true }

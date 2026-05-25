@@ -2,16 +2,16 @@
 resolver = "2"
 members = [
     "crates/midnight",
-    "crates/midnight-macro",
-    "crates/midnight-ir",
-    "crates/midnight-codegen",
-    "crates/midnight-types",
-    "crates/midnight-storage",
-    "crates/midnight-env",
-    "crates/midnight-metadata",
-    "crates/midnight-engine",
-    "crates/midnight-e2e",
-    "crates/midnight-primitives",
+    "crates/nocturne-macro",
+    "crates/nocturne-ir",
+    "crates/nocturne-codegen",
+    "crates/nocturne-types",
+    "crates/nocturne-storage",
+    "crates/nocturne-env",
+    "crates/nocturne-metadata",
+    "crates/nocturne-engine",
+    "crates/nocturne-e2e",
+    "crates/nocturne-primitives",
     "tools/cargo-midnight",
     "examples/counter-contract",
     "examples/kitchen-sink",
@@ -20,24 +20,27 @@ members = [
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-repository = "https://github.com/user/midnight-edsl"
+repository = "https://github.com/RomarQ/Nocturne"
 version = "0.1.0"
 
 [workspace.dependencies]
-# Internal crates
+# Internal crates. The umbrella crate keeps the `midnight` name until
+# Commit B; the rest are renamed here.
 midnight = { path = "crates/midnight", version = "0.1.0" }
-midnight-macro = { path = "crates/midnight-macro", version = "0.1.0" }
-midnight-ir = { path = "crates/midnight-ir", version = "0.1.0" }
-midnight-codegen = { path = "crates/midnight-codegen", version = "0.1.0" }
-midnight-types = { path = "crates/midnight-types", version = "0.1.0" }
-midnight-storage = { path = "crates/midnight-storage", version = "0.1.0" }
-midnight-env = { path = "crates/midnight-env", version = "0.1.0" }
-midnight-metadata = { path = "crates/midnight-metadata", version = "0.1.0" }
-midnight-engine = { path = "crates/midnight-engine", version = "0.1.0" }
-midnight-e2e = { path = "crates/midnight-e2e", version = "0.1.0" }
-midnight-primitives = { path = "crates/midnight-primitives", version = "0.1.0" }
+nocturne-macro = { path = "crates/nocturne-macro", version = "0.1.0" }
+nocturne-ir = { path = "crates/nocturne-ir", version = "0.1.0" }
+nocturne-codegen = { path = "crates/nocturne-codegen", version = "0.1.0" }
+nocturne-types = { path = "crates/nocturne-types", version = "0.1.0" }
+nocturne-storage = { path = "crates/nocturne-storage", version = "0.1.0" }
+nocturne-env = { path = "crates/nocturne-env", version = "0.1.0" }
+nocturne-metadata = { path = "crates/nocturne-metadata", version = "0.1.0" }
+nocturne-engine = { path = "crates/nocturne-engine", version = "0.1.0" }
+nocturne-e2e = { path = "crates/nocturne-e2e", version = "0.1.0" }
+nocturne-primitives = { path = "crates/nocturne-primitives", version = "0.1.0" }
 
-# Midnight ledger crates (from crates.io)
+# Midnight ledger crates (from crates.io). With our internal storage
+# crate renamed to `nocturne-storage`, the upstream `midnight-storage`
+# crate no longer collides and can be depended on by its natural name.
 midnight-zkir = "2.1.0"
 midnight-onchain-vm = "3.0.0"
 midnight-onchain-state = "3.0.0"
@@ -47,7 +50,7 @@ midnight-serialize = "1.0.0"
 midnight-ledger = "8.1.0"
 midnight-onchain-runtime = "3.1.0"
 midnight-coin-structure = "2.0.1"
-midnight-ledger-storage = { package = "midnight-storage", version = "2.0.1" }
+midnight-storage = "2.0.1"
 
 # Proc macro tooling
 syn = { version = "2", features = ["full", "extra-traits", "visit", "visit-mut"] }

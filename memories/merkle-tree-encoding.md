@@ -165,7 +165,7 @@ Each phase is roughly the scope of the Set or Cell::set work we've already shipp
 Implemented 2026-05-19:
 
 - `midnight-storage::MerkleTree<const HEIGHT: usize, T>` wraps the upstream `midnight_transient_crypto::merkle_tree::MerkleTree<()>` plus a `next_index: u64` counter, mirroring the on-chain 2-element Array shape. Insertion drives `next_index` and forwards to `try_update_hash`; `root()` lazily rehashes before reading.
-- `midnight-types::MerkleTreeDigest { field: Field }` mirrors Compact's stdlib struct. Conversion from the upstream `MerkleTreeDigest(Fr)` truncates to the low 128 bits because our `Field` is still a u128 wrapper — same accepted limitation as Phase A.
+- `nocturne-types::MerkleTreeDigest { field: Field }` mirrors Compact's stdlib struct. Conversion from the upstream `MerkleTreeDigest(Fr)` truncates to the low 128 bits because our `Field` is still a u128 wrapper — same accepted limitation as Phase A.
 - New `MerkleLeaf` trait (in midnight-storage) bridges `T` to `[u8]` so the upstream `leaf_hash` (with the `"mdn:lh"` domain separator) consumes it. Impls for `[u8; N]` and `Bytes<N>`. This sidesteps the orphan-rule issue with adding `BinaryHashRepr` to `Bytes<N>` directly.
 - `LedgerType::requires_init()` returns `true` for MerkleTree — first ledger primitive to do so. Constructor IR emission (the actual `Push(Array)` op sequence) is **deferred to Phase D** because today our codegen does not emit constructor IR for any ledger field. None of the e2e tests exercise the deploy path; they build state via Rust constructors and prove against circuits, so requiring constructor IR isn't blocking other phases.
 
@@ -207,7 +207,7 @@ Constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` state (2026
 
 Implemented 2026-05-19:
 
-- **Storage types**: `MerkleTreePath<H, T>`, `MerkleTreePathEntry { sibling, goes_left }` in `midnight-types`. Off-chain helper `merkle_tree_path_root` in `midnight-storage` mirrors the upstream `MerklePath::root()` (`transient-crypto/src/merkle_tree.rs:138-149`). `MerkleTree::path_for_leaf(index, leaf)` wraps upstream's `path_for_leaf` and converts to `MerkleTreePath<H, T>`.
+- **Storage types**: `MerkleTreePath<H, T>`, `MerkleTreePathEntry { sibling, goes_left }` in `nocturne-types`. Off-chain helper `merkle_tree_path_root` in `midnight-storage` mirrors the upstream `MerklePath::root()` (`transient-crypto/src/merkle_tree.rs:138-149`). `MerkleTree::path_for_leaf(index, leaf)` wraps upstream's `path_for_leaf` and converts to `MerkleTreePath<H, T>`.
 
 - **Full-Fr digest representation**. `MerkleTreeDigest` was refactored from `{ field: Field }` (u128-truncated) to `{ bytes: [u8; 32] }` — canonical 32-byte LE Fr. `.field()` still returns the low 128 bits for ergonomic equality against `Field::from(0xDEAD)` style synthetic test digests. The truncation was load-bearing for the chained `merkle_tree_path_root → check_root` flow: the in-circuit Push and the in-circuit Root opcode operate on full Frs, so the witness side has to transmit the full Fr or `Eq` rejects.
 
@@ -226,10 +226,10 @@ Limitation (lifted 2026-05-19): `merkle_tree_path_root` and `MerkleTree::insert`
 ## Files implicated for any implementation
 
 - `crates/midnight-storage/src/merkle_tree.rs` — storage type (`pub struct MerkleTree`, with `insert`, `check_root`, `root` methods)
-- `crates/midnight-codegen/src/zkir_emitter.rs` — `emit_merkle_tree_method` dispatcher; `emit_merkle_tree_insert`, `emit_merkle_tree_check_root`; new `emit_push_array` for the constructor; new `emit_load_imm_field_atom` for `LoadImm -2`
-- `crates/midnight-codegen/src/transcript_codegen.rs` — `generate_merkle_tree_insert`, `generate_merkle_tree_check_root`; constructor emission for the initial Array state
-- `crates/midnight-types/src/merkle_tree.rs` — `MerkleTreeDigest`, `MerkleTreePath`, `MerkleTreePathEntry`
-- `crates/midnight-ir/src/parse.rs` — recognize `MerkleTree<H, T>` field type (parse H as const generic)
+- `crates/nocturne-codegen/src/zkir_emitter.rs` — `emit_merkle_tree_method` dispatcher; `emit_merkle_tree_insert`, `emit_merkle_tree_check_root`; new `emit_push_array` for the constructor; new `emit_load_imm_field_atom` for `LoadImm -2`
+- `crates/nocturne-codegen/src/transcript_codegen.rs` — `generate_merkle_tree_insert`, `generate_merkle_tree_check_root`; constructor emission for the initial Array state
+- `crates/nocturne-types/src/merkle_tree.rs` — `MerkleTreeDigest`, `MerkleTreePath`, `MerkleTreePathEntry`
+- `crates/nocturne-ir/src/parse.rs` — recognize `MerkleTree<H, T>` field type (parse H as const generic)
 - `crates/midnight/tests/ledger_integration_test.rs` — phase-specific e2e tests
 
 ## Empirical compactc references

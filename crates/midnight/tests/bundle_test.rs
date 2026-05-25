@@ -41,8 +41,8 @@ fn test_bundle_creation() {
         }
     };
 
-    let contract = midnight_ir::parse_contract(module).expect("parse");
-    let bundle = midnight_codegen::bundle::build_bundle(&contract);
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let bundle = nocturne_codegen::bundle::build_bundle(&contract);
 
     assert_eq!(bundle.name, "counter");
     assert_eq!(bundle.entry_points, vec!["increment"]);

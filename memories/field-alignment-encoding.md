@@ -28,7 +28,7 @@ For `Cell<Field>::get()` — Popeq declares are 4 total: `[0x0d, 1, -2, value_fr
 
 ## Why the `Field` user-side type stays a `u128` wrapper
 
-`midnight-types::Field` is currently `pub struct Field(u128)` with a "test mode" comment. On-chain `Fr` is BLS12-381's scalar field (~254 bits), so `u128` only covers a strict subset. For Phase A's purposes the subset is enough:
+`nocturne-types::Field` is currently `pub struct Field(u128)` with a "test mode" comment. On-chain `Fr` is BLS12-381's scalar field (~254 bits), so `u128` only covers a strict subset. For Phase A's purposes the subset is enough:
 
 - The transcript codegen converts our `Field` to `Fr` via `Fr::from(field.value())` (u128 → Fr).
 - A Cell<Field> witnessed from the user's `Field` value round-trips through prove+verify because both the IR's PrivateInput and the runtime's AlignedValue see the same `Fr::from(u128)` value.

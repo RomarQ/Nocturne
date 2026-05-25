@@ -1,10 +1,10 @@
-# SPEC.md -- midnight-edsl: A Rust eDSL for Midnight Smart Contracts
+# SPEC.md -- nocturne: A Rust eDSL for Midnight Smart Contracts
 
 ## 1. Vision and Goals
 
-### 1.1 What is midnight-edsl?
+### 1.1 What is nocturne?
 
-midnight-edsl is a Rust eDSL for writing smart contracts targeting the Midnight network. Rust procedural macros transform annotated Rust code into the artifacts required for contract deployment and interaction on Midnight.
+nocturne is a Rust eDSL for writing smart contracts targeting the Midnight network. Rust procedural macros transform annotated Rust code into the artifacts required for contract deployment and interaction on Midnight.
 
 The only hard constraint on output is `midnight-ledger` compliance: the ZKIR must verify, the on-chain transcript ops must execute correctly, and the initial state must deserialize. Surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better than the alternatives.
 
@@ -45,7 +45,7 @@ ContractCall transaction: address + entry_point + transcripts + proof
 
 ### 1.3 Artifacts
 
-midnight-edsl produces:
+nocturne produces:
 - `zkir/<circuit>.zkir` -- ZKIR v2 JSON per circuit (one file per `#[midnight(circuit)]` method, deserialised by `IrSource::load()` downstream).
 - `compiler/contract-info.json` -- metadata describing the contract's external surface (circuit signatures, witness declarations, types).
 - In-source `pub mod transcript` and `pub mod deploy` submodules injected into the user's contract module -- typed Rust runtime code that builds the on-chain transcript and `ProofPreimage` at call time, and constructs the initial `StateValue` at deploy time.
@@ -70,7 +70,7 @@ midnight-edsl produces:
   - `midnight-onchain-state`: `StateValue` for contract state representation
   - `midnight-onchain-vm`: `Op` types for transcript VM operations
 
-- **midnight-rs** (reference) -- Rust SDK being developed in parallel. Its interpreter executes a higher-level Circuit IR format. midnight-edsl can optionally emit Circuit IR for midnight-rs integration, but this is not the primary output.
+- **midnight-rs** (reference) -- Rust SDK being developed in parallel. Its interpreter executes a higher-level Circuit IR format. nocturne can optionally emit Circuit IR for midnight-rs integration, but this is not the primary output.
 
 ### 1.6 Non-Goals
 
@@ -324,7 +324,7 @@ Format:
 
 ```json
 {
-  "compiler-version": "midnight-edsl 0.1.0",
+  "compiler-version": "nocturne 0.1.0",
   "language-version": "1.0",
   "runtime-version": "1.0",
   "circuits": [
@@ -376,24 +376,24 @@ Format:
 ## 7. Crate Architecture
 
 ```
-midnight-edsl/
+nocturne/
   crates/
     midnight/              # Umbrella (re-exports)
-    midnight-macro/        # #[midnight::contract], #[midnight::test]
-    midnight-ir/           # Internal IR (parse + validate)
-    midnight-codegen/      # ZKIR emitter, transcript builder codegen, metadata
-    midnight-types/        # Field, Boolean, Bytes<N>, Uint<N>
+    nocturne-macro/        # #[midnight::contract], #[midnight::test]
+    nocturne-ir/           # Internal IR (parse + validate)
+    nocturne-codegen/      # ZKIR emitter, transcript builder codegen, metadata
+    nocturne-types/        # Field, Boolean, Bytes<N>, Uint<N>
     midnight-storage/      # Cell, Counter, Map, MerkleTree
-    midnight-env/          # Environment context (block height, caller)
-    midnight-metadata/     # contract-info.json generation
-    midnight-engine/       # Off-chain test engine
-    midnight-e2e/          # E2E tests against Midnight node
-    midnight-primitives/   # Field arithmetic, hashing (wraps transient-crypto)
+    nocturne-env/          # Environment context (block height, caller)
+    nocturne-metadata/     # contract-info.json generation
+    nocturne-engine/       # Off-chain test engine
+    nocturne-e2e/          # E2E tests against Midnight node
+    nocturne-primitives/   # Field arithmetic, hashing (wraps transient-crypto)
   tools/
     cargo-midnight/        # Build/keygen/deploy CLI
 ```
 
-### 7.1 Key Crate: midnight-codegen
+### 7.1 Key Crate: nocturne-codegen
 
 - `zkir_emitter` -- Builds `midnight_zkir::IrSource` per circuit. Uses midnight-ledger types directly.
 - `transcript_codegen` -- Generates Rust code for runtime transcript construction.
@@ -402,10 +402,10 @@ midnight-edsl/
 ### 7.2 Dependencies on midnight-ledger
 
 ```
-midnight-codegen → midnight-zkir (IrSource, Instruction)
-midnight-codegen → midnight-transient-crypto (Fr)
-midnight-codegen → midnight-base-crypto (Alignment)
-midnight-primitives → midnight-transient-crypto (field arithmetic, hashing)
+nocturne-codegen → midnight-zkir (IrSource, Instruction)
+nocturne-codegen → midnight-transient-crypto (Fr)
+nocturne-codegen → midnight-base-crypto (Alignment)
+nocturne-primitives → midnight-transient-crypto (field arithmetic, hashing)
 ```
 
 ---

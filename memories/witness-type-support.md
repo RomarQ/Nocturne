@@ -16,7 +16,7 @@
 ## How witnesses flow through codegen
 
 - **Macro-generated witness struct**: each field's type is preserved as the user wrote it.
-- **Transcript builder** (`crates/midnight-codegen/src/transcript_codegen.rs`):
+- **Transcript builder** (`crates/nocturne-codegen/src/transcript_codegen.rs`):
   for single-Fr witnesses, emits `private_transcript.push(Fr::from(witnesses.<field>.value()));`.
   For `Bytes<N>`, emits
   ```
@@ -25,7 +25,7 @@
   ```
   which pushes the right number of Frs in the same order the IR's
   PrivateInputs expect (high-bytes chunk first after `.rev()`).
-- **ZKIR emitter** (`crates/midnight-codegen/src/zkir_emitter.rs`): the
+- **ZKIR emitter** (`crates/nocturne-codegen/src/zkir_emitter.rs`): the
   `WitnessAccess` arm consults `witness_fr_layout(ty)` to decide how many
   `PrivateInput` instructions to emit and what `ConstrainBits` bit width
   to apply to each. For non-Bytes types it falls back to

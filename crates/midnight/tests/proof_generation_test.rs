@@ -39,7 +39,7 @@ mod counter {
 async fn generate_and_verify_proof() {
     // Step 1: Emit ZKIR from the contract.
     let ir = {
-        use midnight_codegen::zkir_emitter;
+        use nocturne_codegen::zkir_emitter;
         let module: syn::ItemMod = syn::parse_quote! {
             mod counter {
                 #[midnight(ledger)]
@@ -54,7 +54,7 @@ async fn generate_and_verify_proof() {
                 }
             }
         };
-        let contract = midnight_ir::parse_contract(module).expect("parse");
+        let contract = nocturne_ir::parse_contract(module).expect("parse");
         let output = zkir_emitter::emit_contract(&contract);
         output.circuits.into_iter().next().unwrap().ir_source
     };

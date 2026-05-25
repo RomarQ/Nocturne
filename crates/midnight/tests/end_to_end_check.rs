@@ -59,7 +59,7 @@ fn end_to_end_counter_increment() {
     // The ZKIR is compiled at macro time; we reconstruct it here to test.
     // In a real system, the ZKIR would be loaded from the .zkir file.
     let ir = {
-        use midnight_codegen::zkir_emitter;
+        use nocturne_codegen::zkir_emitter;
         let module: syn::ItemMod = syn::parse_quote! {
             mod counter {
                 #[midnight(ledger)]
@@ -74,7 +74,7 @@ fn end_to_end_counter_increment() {
                 }
             }
         };
-        let contract = midnight_ir::parse_contract(module).expect("parse");
+        let contract = nocturne_ir::parse_contract(module).expect("parse");
         let output = zkir_emitter::emit_contract(&contract);
         output.circuits.into_iter().next().unwrap().ir_source
     };
