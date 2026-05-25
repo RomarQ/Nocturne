@@ -57,7 +57,7 @@ jobs:
   # ---------- End-to-end: cargo nocturne build + keygen ----------
 
   example:
-    name: Counter example (build + keygen + golden)
+    name: Examples (build + keygen + golden)
     runs-on: ubuntu-latest
     needs: [check]
     steps:
@@ -65,29 +65,47 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Build the workspace so the cargo-nocturne binary and the
-      # examples' proc-macro outputs exist on disk before the keygen
-      # step runs.
+      # Build the workspace so the cargo-nocturne binary and every
+      # example's proc-macro output exist on disk before keygen runs.
+      # cargo build --workspace fires the proc macro for both examples
+      # (counter-contract and kitchen-sink), so a single subsequent
+      # `cargo nocturne build` + `keygen` covers both contracts.
       - name: Build workspace
         run: cargo build --workspace --locked
 
-      - name: cargo nocturne build (counter example)
+      - name: cargo nocturne build
         run: ./target/debug/cargo-nocturne build
 
-      - name: Verify build artifacts
+      - name: Verify counter build artifacts
         run: |
           test -f target/nocturne/counter/zkir/increment.zkir
           test -f target/nocturne/counter/compiler/contract-info.json
 
+      - name: Verify kitchen-sink build artifacts
+        run: |
+          test -f target/nocturne/kitchen_sink/compiler/contract-info.json
+          zkir_count=$(find target/nocturne/kitchen_sink/zkir -name '*.zkir' | wc -l)
+          echo "kitchen-sink emitted ${zkir_count} ZKIR circuit(s)"
+          test "$zkir_count" -gt 0
+
       - name: cargo nocturne keygen
         run: ./target/debug/cargo-nocturne keygen
 
-      - name: Verify keygen outputs
+      - name: Verify counter keygen outputs
         run: |
           test -f target/nocturne/counter/keys/increment.prover
           test -f target/nocturne/counter/keys/increment.verifier
 
-      - name: Verifier key matches compactc golden
+      - name: Verify kitchen-sink keygen outputs
+        run: |
+          zkir_count=$(find target/nocturne/kitchen_sink/zkir -name '*.zkir' | wc -l)
+          prover_count=$(find target/nocturne/kitchen_sink/keys -name '*.prover' | wc -l)
+          verifier_count=$(find target/nocturne/kitchen_sink/keys -name '*.verifier' | wc -l)
+          echo "zkir: ${zkir_count}, prover: ${prover_count}, verifier: ${verifier_count}"
+          test "$prover_count" -eq "$zkir_count"
+          test "$verifier_count" -eq "$zkir_count"
+
+      - name: Verifier key matches compactc golden (counter)
         run: |
           cmp target/nocturne/counter/keys/increment.verifier \
               tests/golden/counter-increment.verifier
