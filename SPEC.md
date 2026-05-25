@@ -6,7 +6,7 @@
 
 midnight-edsl is a Rust eDSL for writing smart contracts targeting the Midnight network. Rust procedural macros transform annotated Rust code into the artifacts required for contract deployment and interaction on Midnight.
 
-midnight-edsl is a **peer to Compact**. Both are frontends that produce the same outputs: ZKIR circuits for proof generation, contract metadata, and runtime logic for transcript construction. midnight-edsl replaces Compact's restricted frontend language with Rust's type system and metaprogramming, and replaces Compact's TypeScript runtime output with Rust runtime code.
+The only hard constraint on output is `midnight-ledger` compliance: the ZKIR must verify, the on-chain transcript ops must execute correctly, and the initial state must deserialize. Surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better than the alternatives.
 
 ### 1.2 How Midnight Contracts Work
 
@@ -43,17 +43,13 @@ ContractCall transaction: address + entry_point + transcripts + proof
   4. Apply state changes
 ```
 
-### 1.3 What Compact Produces (Reference)
+### 1.3 Artifacts
 
-The Compact compiler outputs:
-- `zkir/<circuit>.zkir` -- ZKIR v2 JSON per circuit (IrSource format)
-- `compiler/contract-info.json` -- metadata (circuit signatures, witness declarations, types)
-- `contract/index.js` + `.d.ts` -- TypeScript runtime that builds transcripts and calls the prover
-
-midnight-edsl replaces all three:
-- ZKIR files -- generated from annotated Rust via proc macros
-- contract-info.json -- generated from the contract IR
-- Rust runtime module -- generated instead of TypeScript, providing typed transcript building and proof generation
+midnight-edsl produces:
+- `zkir/<circuit>.zkir` -- ZKIR v2 JSON per circuit (one file per `#[midnight(circuit)]` method, deserialised by `IrSource::load()` downstream).
+- `compiler/contract-info.json` -- metadata describing the contract's external surface (circuit signatures, witness declarations, types).
+- In-source `pub mod transcript` and `pub mod deploy` submodules injected into the user's contract module -- typed Rust runtime code that builds the on-chain transcript and `ProofPreimage` at call time, and constructs the initial `StateValue` at deploy time.
+- After `cargo midnight keygen`: `keys/<circuit>.{prover,verifier}` -- Plonk keys derived from each `.zkir`.
 
 ### 1.4 Design Principles
 
@@ -78,7 +74,6 @@ midnight-edsl replaces all three:
 
 ### 1.6 Non-Goals
 
-- Compact source code compatibility.
 - TypeScript/JavaScript output.
 - IDE visual tools.
 
@@ -238,7 +233,7 @@ The `#[midnight::contract]` macro:
 1. **Parses** the module into internal IR (`ContractIR`, `LedgerIR`, `WitnessIR`, `CircuitIR`, `ExprIR`).
 2. **Validates** against Section 3.2 rules.
 3. **Generates ZKIR** -- one `IrSource` per circuit function, serialized to `.zkir` JSON.
-4. **Generates contract-info.json** -- metadata matching Compact's schema.
+4. **Generates contract-info.json** -- metadata describing the contract's surface (circuit signatures, witness types).
 5. **Generates Rust runtime module** -- typed functions for building transcripts and `ProofPreimage`s.
 6. **Emits test-mode code** -- strips midnight attributes, provides test-mode types for `cargo test`.
 
@@ -249,7 +244,7 @@ target/midnight/<contract>/
   zkir/
     <circuit>.zkir              # ZKIR v2 JSON (IrSource)
   compiler/
-    contract-info.json          # Metadata (same schema as Compact)
+    contract-info.json          # Metadata (circuit signatures, witness types)
 ```
 
 After `cargo midnight keygen`:
@@ -325,7 +320,7 @@ At call time, the generated Rust runtime code:
 
 ### 5.6 contract-info.json
 
-Matches Compact's schema:
+Format:
 
 ```json
 {
@@ -401,7 +396,7 @@ midnight-edsl/
 ### 7.1 Key Crate: midnight-codegen
 
 - `zkir_emitter` -- Builds `midnight_zkir::IrSource` per circuit. Uses midnight-ledger types directly.
-- `transcript_codegen` -- Generates Rust code for runtime transcript construction (replaces Compact's TypeScript output).
+- `transcript_codegen` -- Generates Rust code for runtime transcript construction.
 - `codegen` -- Orchestrates all emitters.
 
 ### 7.2 Dependencies on midnight-ledger

@@ -1,6 +1,6 @@
 # Project guide for Claude Code agents
 
-This is **Nocturne**, a Rust eDSL for **authoring** Midnight smart contracts (peer to Compact). It compiles `#[midnight::contract]` modules to ZKIR + transcript builders, generates Plonk proving/verifier keys, and emits `contract-info.json` matching Compact's schema.
+This is **Nocturne**, a Rust eDSL for **writing** Midnight smart contracts. It compiles `#[midnight::contract]` modules to ZKIR + transcript builders, generates Plonk proving/verifier keys, and emits a `contract-info.json` describing the contract's surface. The only hard constraint on output is that it stays compliant with `midnight-ledger`; surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better.
 
 **Scope**: Nocturne stops at producing artifacts. Deploying, building transactions, wallets, indexer/node RPC are explicitly **not** Nocturne's responsibility — they belong in downstream tools like [`midnight-rs`](https://github.com/RomarQ/midnight-rs). See `memories/project-scope.md`.
 
