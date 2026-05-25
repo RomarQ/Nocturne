@@ -5,32 +5,32 @@
 //! demonstrates that the correct counter was incremented without
 //! revealing which one.
 
-use midnight::runtime::transient_crypto::curve::Fr;
-use midnight::runtime::transient_crypto::hash::transient_commit;
-use midnight::runtime::transient_crypto::proofs::{
+use nocturne::runtime::transient_crypto::curve::Fr;
+use nocturne::runtime::transient_crypto::hash::transient_commit;
+use nocturne::runtime::transient_crypto::proofs::{
     KeyLocation, PARAMS_VERIFIER, ProofPreimage, Zkir,
 };
-use midnight::runtime::transient_crypto::repr::FieldRepr;
-use midnight::types::*;
+use nocturne::runtime::transient_crypto::repr::FieldRepr;
+use nocturne::types::*;
 use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
-#[midnight::contract]
+#[nocturne::contract]
 mod ballot {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct Ballot {
         pub votes_for: Counter,
         pub votes_against: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BallotWitnesses {
         pub choice: Boolean,
     }
 
     impl Ballot {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 votes_for: Counter::zero(),
@@ -38,7 +38,7 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
             if witnesses.choice.into() {
                 self.votes_for.increment();
@@ -56,21 +56,21 @@ async fn prove_and_verify_voting_with_witness() {
         use nocturne_codegen::zkir_emitter;
         let module: syn::ItemMod = syn::parse_quote! {
             mod ballot {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct Ballot {
                     votes_for: Counter,
                     votes_against: Counter,
                 }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct BallotWitnesses {
                     choice: Boolean,
                 }
                 impl Ballot {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { votes_for: Counter::zero(), votes_against: Counter::zero() }
                     }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
                         if witnesses.choice.into() {
                             self.votes_for.increment();

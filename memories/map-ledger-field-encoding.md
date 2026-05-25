@@ -1,7 +1,7 @@
 # `Map<K, V>` ledger field — encoding investigation
 
 **Discovered**: 2026-05-18 (empirical sweep against compactc 0.30.0)
-**Status**: investigation, not yet implemented. `Map<K, V>` exists as an in-memory `HashMap` stub in `crates/midnight-storage/src/map.rs` with no ZKIR or transcript codegen yet.
+**Status**: investigation, not yet implemented. `Map<K, V>` exists as an in-memory `HashMap` stub in `crates/nocturne-storage/src/map.rs` with no ZKIR or transcript codegen yet.
 
 ## VM opcode reference (subset relevant to Map)
 
@@ -168,7 +168,7 @@ Implementation notes:
 - `unwrap_to_aligned_primitive` in `transcript_codegen.rs` unwraps the
   V-type result for `AlignedValue::from`: `Boolean → .value()`,
   `Uint<N> → .value() as u<N>`.
-- Runtime helper `Map::lookup` added in `crates/midnight-storage/src/map.rs`,
+- Runtime helper `Map::lookup` added in `crates/nocturne-storage/src/map.rs`,
   panicking if the key is absent (mirrors the VM behavior at proof time).
 - E2E test: `ledger_integration_test::map_lookup_proves_and_verifies`.
 
@@ -299,7 +299,7 @@ runtime projection differs (`key.a` vs `key.0`).
 How it works:
 
 - The IR parser (`nocturne-ir/src/parse.rs`) collects every plain
-  user struct (without `#[midnight(...)]`) into
+  user struct (without `#[nocturne(...)]`) into
   `ContractIR.user_structs: HashMap<String, Vec<UserStructField>>`
   during contract parsing.
 - `zkir_emitter::ZkirEmitter` and the transcript codegen thread that

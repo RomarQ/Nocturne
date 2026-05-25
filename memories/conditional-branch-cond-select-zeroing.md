@@ -1,7 +1,7 @@
 # Conditional-branch DeclarePubInput zeroing
 
 **Discovered**: 2026-05-18 (after empirical sweep of compactc behavior)
-**Status**: Implemented 2026-05-18 in `crates/nocturne-codegen/src/zkir_emitter.rs`. Regression test: `voting_verifies_with_ledger_shape_pis` in `crates/midnight/tests/ledger_integration_test.rs`.
+**Status**: Implemented 2026-05-18 in `crates/nocturne-codegen/src/zkir_emitter.rs`. Regression test: `voting_verifies_with_ledger_shape_pis` in `crates/nocturne/tests/ledger_integration_test.rs`.
 
 Inside a conditional branch, every value passed to `DeclarePubInput` must be zero when the branch is inactive. The fix is to route the value through `cond_select(branch_guard, active_value, ZERO)` before declaring it.
 

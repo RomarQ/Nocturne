@@ -42,7 +42,7 @@ Mutable indexed writes (`arr[i] = v`) and dynamic indices are out of scope.
 
 ## Tests
 
-- `option_some_payload_proves_and_verifies`, `option_none_branch_proves_and_verifies` in `crates/midnight/tests/ledger_integration_test.rs`.
+- `option_some_payload_proves_and_verifies`, `option_none_branch_proves_and_verifies` in `crates/nocturne/tests/ledger_integration_test.rs`.
 - `array_witness_index_proves_and_verifies` (same file). The test commits to all three `Uint<64>` array elements via `private_transcript_outputs` even though only `arr[1]` is wired into the Cell::set; the ZKIR pre-allocated all 3 slots on first witness touch.
 
 ## Related

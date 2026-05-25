@@ -1,34 +1,34 @@
 //! Integration test: verify that the generated deploy module
 //! produces a valid initial StateValue for contract deployment.
 
-use midnight::runtime::onchain_state::state::StateValue;
-use midnight::types::*;
+use nocturne::runtime::onchain_state::state::StateValue;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn test_initial_state_is_array() {
     let state = counter::deploy::initial_state();
 
@@ -42,11 +42,11 @@ fn test_initial_state_is_array() {
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod multi_field {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct State {
         counter: Counter,
         data: Cell<u64>,
@@ -54,7 +54,7 @@ mod multi_field {
     }
 
     impl State {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 counter: Counter::zero(),
@@ -63,12 +63,12 @@ mod multi_field {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn noop(&mut self) {}
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn test_multi_field_initial_state() {
     let state = multi_field::deploy::initial_state();
 
@@ -81,24 +81,24 @@ fn test_multi_field_initial_state() {
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod mt_holder {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MtHolderState {
         pub entries: MerkleTree<10, Bytes<32>>,
     }
 
     impl MtHolderState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 entries: MerkleTree::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn noop(&mut self) {}
     }
 }
@@ -107,7 +107,7 @@ mod mt_holder {
 /// `[BoundedMerkleTree<()>(height=H, rehashed), Cell<u64>(0)]` —
 /// matching compactc 0.30.0's emission for the same field type.
 /// Anything else fails on-chain Idx/Root access at the first call.
-#[midnight::test]
+#[nocturne::test]
 fn test_merkle_tree_field_initial_state() {
     let state = mt_holder::deploy::initial_state();
     let StateValue::Array(top) = &state else {
@@ -143,8 +143,8 @@ fn test_merkle_tree_field_initial_state() {
         panic!("expected slot 1 to be Cell, got {slot1:?}");
     };
     // value_only_field_repr of u64(0) is a single Fr(0).
-    use midnight::runtime::transient_crypto::curve::Fr;
-    use midnight::runtime::transient_crypto::fab::AlignedValueExt;
+    use nocturne::runtime::transient_crypto::curve::Fr;
+    use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
     let mut frs: Vec<Fr> = Vec::new();
     av.deref().value_only_field_repr(&mut frs);
     assert_eq!(frs, vec![Fr::from(0u64)], "next_index counter must start at 0");

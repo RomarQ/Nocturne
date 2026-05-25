@@ -1,33 +1,33 @@
 //! Integration test: verify that the generated transcript builder
 //! produces real midnight-ledger Op types.
 
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn test_transcript_produces_real_ops() {
     let result = counter::transcript::build_increment_transcript();
 

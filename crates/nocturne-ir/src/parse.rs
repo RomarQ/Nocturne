@@ -9,7 +9,7 @@ use crate::contract::*;
 use crate::error::*;
 use crate::expr::*;
 
-/// Parse a `#[midnight::contract]` module into a `ContractIR`.
+/// Parse a `#[nocturne::contract]` module into a `ContractIR`.
 pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
     let name = module.ident.clone();
     let span = Span::call_site();
@@ -36,7 +36,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                         diagnostics.push(MidnightError::new(
                             s.ident.span(),
                             ErrorCode::DuplicateLedger,
-                            "only one #[midnight(ledger)] struct is allowed per contract",
+                            "only one #[nocturne(ledger)] struct is allowed per contract",
                         ));
                     } else {
                         ledger = Some(parse_ledger_struct(s)?);
@@ -47,7 +47,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                         diagnostics.push(MidnightError::new(
                             s.ident.span(),
                             ErrorCode::DuplicateWitnesses,
-                            "only one #[midnight(witnesses)] struct is allowed per contract",
+                            "only one #[nocturne(witnesses)] struct is allowed per contract",
                         ));
                     } else {
                         witnesses = Some(parse_witnesses_struct(s)?);
@@ -177,7 +177,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
             return Err(MidnightError::new(
                 span,
                 ErrorCode::MissingLedger,
-                "contract must contain exactly one #[midnight(ledger)] struct",
+                "contract must contain exactly one #[nocturne(ledger)] struct",
             ));
         }
     };
@@ -186,7 +186,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
         diagnostics.push(MidnightError::new(
             span,
             ErrorCode::MissingCircuit,
-            "contract must contain at least one #[midnight(circuit)] or #[midnight(constructor)] function",
+            "contract must contain at least one #[nocturne(circuit)] or #[nocturne(constructor)] function",
         ));
     }
 
@@ -561,7 +561,7 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                 })
             } else {
                 // Multi-segment path like `Status::Open`, `Self::CONST`, or
-                // `midnight::disclose`. Stash the `syn::Path` itself so codegen
+                // `nocturne::disclose`. Stash the `syn::Path` itself so codegen
                 // can emit it verbatim — flattening to an `Ident` panics.
                 Ok(ExprIR::Path {
                     span: Span::call_site(),

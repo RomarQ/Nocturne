@@ -201,7 +201,7 @@ Implemented 2026-05-19:
 
 E2E test: `mt_insert_proves_and_verifies` — inserts a single `Bytes<32>` leaf into an empty `MerkleTree<10, Bytes<32>>` and confirms the 10-op transcript proves and verifies via the canonical ledger preimage path.
 
-Constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` state (2026-05-19): `deploy_codegen::generate_deploy_module` now emits the correct `StateValue::Array { [BoundedMerkleTree<()>(blank(H).rehash()), Cell<u64>(0)] }` for `MerkleTree<H, T>` fields. The height `H` is parsed from the field's `syn::Type` (supports both `GenericArgument::Const` and the `Type::Path` fallback syn produces for ambiguous paths). Downstream tools serialize this `StateValue` directly into the deploy transaction. Verified by `test_merkle_tree_field_initial_state` in `crates/midnight/tests/deploy_test.rs`.
+Constructor IR for the initial `Array<BoundedMerkleTree, Cell<u64>>` state (2026-05-19): `deploy_codegen::generate_deploy_module` now emits the correct `StateValue::Array { [BoundedMerkleTree<()>(blank(H).rehash()), Cell<u64>(0)] }` for `MerkleTree<H, T>` fields. The height `H` is parsed from the field's `syn::Type` (supports both `GenericArgument::Const` and the `Type::Path` fallback syn produces for ambiguous paths). Downstream tools serialize this `StateValue` directly into the deploy transaction. Verified by `test_merkle_tree_field_initial_state` in `crates/nocturne/tests/deploy_test.rs`.
 
 ### Phase E notes
 
@@ -225,12 +225,12 @@ Limitation (lifted 2026-05-19): `merkle_tree_path_root` and `MerkleTree::insert`
 
 ## Files implicated for any implementation
 
-- `crates/midnight-storage/src/merkle_tree.rs` — storage type (`pub struct MerkleTree`, with `insert`, `check_root`, `root` methods)
+- `crates/nocturne-storage/src/merkle_tree.rs` — storage type (`pub struct MerkleTree`, with `insert`, `check_root`, `root` methods)
 - `crates/nocturne-codegen/src/zkir_emitter.rs` — `emit_merkle_tree_method` dispatcher; `emit_merkle_tree_insert`, `emit_merkle_tree_check_root`; new `emit_push_array` for the constructor; new `emit_load_imm_field_atom` for `LoadImm -2`
 - `crates/nocturne-codegen/src/transcript_codegen.rs` — `generate_merkle_tree_insert`, `generate_merkle_tree_check_root`; constructor emission for the initial Array state
 - `crates/nocturne-types/src/merkle_tree.rs` — `MerkleTreeDigest`, `MerkleTreePath`, `MerkleTreePathEntry`
 - `crates/nocturne-ir/src/parse.rs` — recognize `MerkleTree<H, T>` field type (parse H as const generic)
-- `crates/midnight/tests/ledger_integration_test.rs` — phase-specific e2e tests
+- `crates/nocturne/tests/ledger_integration_test.rs` — phase-specific e2e tests
 
 ## Empirical compactc references
 

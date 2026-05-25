@@ -1,24 +1,24 @@
 //! Integration test: verify contract-info.json matches Compact's schema.
 
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod ballot {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct Ballot {
         pub votes_for: Counter,
         pub votes_against: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BallotWitnesses {
         pub vote_choice: Boolean,
     }
 
     impl Ballot {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 votes_for: Counter::zero(),
@@ -26,7 +26,7 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
             if witnesses.vote_choice.value() {
                 self.votes_for.increment();
@@ -35,41 +35,41 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn register(&mut self, _voter_id: u64) {
             // placeholder
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn tally(&self) -> (u64, u64) {
             (self.votes_for.value(), self.votes_against.value())
         }
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn test_contract_info_matches_compact_schema() {
     // Generate contract-info for the ballot contract.
     let module: syn::ItemMod = syn::parse_quote! {
         mod ballot {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct Ballot {
                 pub votes_for: Counter,
                 pub votes_against: Counter,
             }
 
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct BallotWitnesses {
                 pub vote_choice: Boolean,
             }
 
             impl Ballot {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self {
                     Self { votes_for: Counter::zero(), votes_against: Counter::zero() }
                 }
 
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
                     if witnesses.vote_choice.value() {
                         self.votes_for.increment();
@@ -78,7 +78,7 @@ fn test_contract_info_matches_compact_schema() {
                     }
                 }
 
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn register(&mut self, voter_id: u64) {}
             }
         }

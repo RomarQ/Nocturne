@@ -1,9 +1,9 @@
 # Compilation artifacts
 
-`#[midnight::contract]` produces three kinds of output, each consumed by a different downstream tool. This document describes what each file is for, how it's generated, what consumes it, and when you should expect it to change.
+`#[nocturne::contract]` produces three kinds of output, each consumed by a different downstream tool. This document describes what each file is for, how it's generated, what consumes it, and when you should expect it to change.
 
 ```
-target/midnight/<contract_name>/
+target/nocturne/<contract_name>/
 ├── zkir/
 │   └── <circuit_name>.zkir       # circuit definition (JSON)
 ├── keys/
@@ -17,14 +17,14 @@ There's a fourth kind of "artifact" that doesn't land on disk: the proc macro al
 
 ## `<circuit_name>.zkir` — circuit definition
 
-JSON serialisation of `midnight_zkir::IrSource` plus a `version` wrapper. One file per `#[midnight(circuit)]` method.
+JSON serialisation of `midnight_zkir::IrSource` plus a `version` wrapper. One file per `#[nocturne(circuit)]` method.
 
 **What it contains**: a stack-based instruction list (`load_imm`, `private_input`, `public_input`, `add`, `mul`, `cond_select`, `declare_pub_input`, …) that describes the Plonk constraint system for one circuit. Also `num_inputs` and `do_communications_commitment: true` (required for on-chain compatibility — see `memories/do-communications-commitment-required.md`).
 
-**Produced by**: the `#[midnight::contract]` proc macro at compile time. Written via `write_if_changed`, so unchanged source leaves the file's mtime alone.
+**Produced by**: the `#[nocturne::contract]` proc macro at compile time. Written via `write_if_changed`, so unchanged source leaves the file's mtime alone.
 
 **Consumed by**:
-- `cargo midnight keygen` — calls `IrSource::load()` then `IrSource::keygen()` to derive prover/verifier keys.
+- `cargo nocturne keygen` — calls `IrSource::load()` then `IrSource::keygen()` to derive prover/verifier keys.
 - Downstream tooling (e.g. midnight-rs) that needs to re-derive proofs or inspect circuit structure.
 
 **Format**: pretty-printed JSON, ~1KB for a single-instruction circuit, scales with circuit complexity. Counter's `increment.zkir` is 1.1KB.
@@ -41,7 +41,7 @@ Binary, tagged-serialized prover key for the Plonk circuit defined by the matchi
 
 **What it contains**: the precomputed witness polynomials, lookup tables, and commitments the prover needs to construct a ZK proof. The prover key encodes the structure of the circuit at the Plonk level, so the same `.zkir` always yields the same key (modulo universal-setup-parameter changes).
 
-**Produced by**: `cargo midnight build` (when missing or stale) or `cargo midnight keygen` (unconditionally). Both call `IrSource::keygen()` with the Midnight universal setup parameters fetched via `MidnightDataProvider`.
+**Produced by**: `cargo nocturne build` (when missing or stale) or `cargo nocturne keygen` (unconditionally). Both call `IrSource::keygen()` with the Midnight universal setup parameters fetched via `MidnightDataProvider`.
 
 **Consumed by**: the client building a transaction. Downstream tools like midnight-rs load the prover key, collect witness values, and call `IrSource::prove(rng, params, pk, &preimage)` to produce a `Proof`.
 
@@ -94,7 +94,7 @@ Human-readable JSON describing the contract's external surface. One file per con
 }
 ```
 
-- `circuits[]` — one entry per `#[midnight(circuit)]`. `pure` is `false` for state-mutating circuits (`&mut self`), `true` for read-only (`&self`). `proof: true` means a ZK proof is required to invoke (the default; the false case is reserved for future "no-proof" circuit shapes).
+- `circuits[]` — one entry per `#[nocturne(circuit)]`. `pure` is `false` for state-mutating circuits (`&mut self`), `true` for read-only (`&self`). `proof: true` means a ZK proof is required to invoke (the default; the false case is reserved for future "no-proof" circuit shapes).
 - `witnesses[]` — declared witness parameter types per circuit. Used by code generators to produce client-side types that match the prover's expected layout.
 - `contracts[]` — reserved for cross-contract call metadata.
 
@@ -113,7 +113,7 @@ Human-readable JSON describing the contract's external surface. One file per con
 
 ## The injected `transcript` and `deploy` submodules
 
-These don't appear under `target/midnight/`. They live inside the user's contract module as generated Rust:
+These don't appear under `target/nocturne/`. They live inside the user's contract module as generated Rust:
 
 ```rust
 pub mod my_contract {
@@ -130,7 +130,7 @@ pub mod my_contract {
 }
 ```
 
-**`transcript::build_<circuit>_transcript(...)`** — one function per circuit. Returns the `Op` sequence and private-input `Fr`s the client submits on-chain. Called at call time (when a user wants to invoke a circuit), not at deploy time. The function signature depends on what the circuit reads: it takes `&State` if the circuit reads ledger state (Map::contains, Cell::get, ...), and `&Witnesses` if the circuit has any `#[midnight(witnesses)]` parameter.
+**`transcript::build_<circuit>_transcript(...)`** — one function per circuit. Returns the `Op` sequence and private-input `Fr`s the client submits on-chain. Called at call time (when a user wants to invoke a circuit), not at deploy time. The function signature depends on what the circuit reads: it takes `&State` if the circuit reads ledger state (Map::contains, Cell::get, ...), and `&Witnesses` if the circuit has any `#[nocturne(witnesses)]` parameter.
 
 **`deploy::initial_state(...)`** — one function per contract. Calls the user's constructor at runtime and encodes each ledger field into the on-chain `StateValue` tree. The function forwards the constructor's parameter list verbatim, so `fn new(admin: Bytes<32>, fee: u64)` produces `initial_state(admin: Bytes<32>, fee: u64) -> StateValue`.
 
@@ -143,8 +143,8 @@ pub mod my_contract {
 | Artifact | Format | Size (counter) | Produced by | Consumed by |
 |---|---|---|---|---|
 | `<circuit>.zkir` | JSON | ~1 KB | proc macro at `cargo build` | `keygen`, midnight-rs |
-| `<circuit>.prover` | binary | ~14 KB | `cargo midnight build`/`keygen` | midnight-rs (proving) |
-| `<circuit>.verifier` | binary | ~1.3 KB | `cargo midnight build`/`keygen` | on-chain ledger, off-chain verifiers |
+| `<circuit>.prover` | binary | ~14 KB | `cargo nocturne build`/`keygen` | midnight-rs (proving) |
+| `<circuit>.verifier` | binary | ~1.3 KB | `cargo nocturne build`/`keygen` | on-chain ledger, off-chain verifiers |
 | `contract-info.json` | JSON | ~300 B | proc macro at `cargo build` | type generators, indexers |
 | `transcript::build_*` | Rust | — | proc macro | midnight-rs (transcript construction) |
 | `deploy::initial_state` | Rust | — | proc macro | midnight-rs (deploy) |

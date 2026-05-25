@@ -67,7 +67,7 @@ pub enum ExprIR {
     /// `assert!(cond)` or `assert_eq!(a, b)`.
     Assert { span: Span, kind: AssertKind },
 
-    /// `midnight::disclose(value)`.
+    /// `nocturne::disclose(value)`.
     Disclose { span: Span, value: Box<ExprIR> },
 
     /// A literal value: integer, bool, string, bytes.

@@ -84,14 +84,14 @@ mod tests {
     fn counter_increment_is_satisfiable() {
         let module: syn::ItemMod = syn::parse2(quote::quote! {
             mod counter {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct CounterState {
                     count: Counter,
                 }
                 impl CounterState {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { count: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn increment(&mut self) { self.count.increment(); }
                 }
             }
@@ -154,14 +154,14 @@ mod tests {
     fn ledger_read_is_satisfiable() {
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod reader {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     value: Cell<u64>,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { value: Cell::new(0u64) } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn read_value(&mut self) {
                         let _v = self.value.get();
                     }
@@ -220,18 +220,18 @@ mod tests {
     fn witness_circuit_is_satisfiable() {
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod secret {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     stored: Cell,
                 }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct W {
                     secret: Field,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { stored: Cell::new(0) } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn store_secret(&mut self, witnesses: &W) {
                         let s = witnesses.secret;
                         self.stored.set(s);
@@ -307,18 +307,18 @@ mod tests {
         //   Popeq{cached:false, result: AlignedValue<V>}                 → [0x0c, 1, V-align, value]
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod records {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     records: Map<Uint<64>, Uint<64>>,
                 }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct W {
                     user_id: Uint<64>,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { records: Map::empty() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn fetch(&self, witnesses: &W) {
                         let _v = self.records.lookup(&witnesses.user_id);
                     }
@@ -383,18 +383,18 @@ mod tests {
         //   Ins{cached:true,  n:1}                                     → [0xa1]
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod records {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     records: Map<Uint<64>, Uint<64>>,
                 }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct W {
                     user_id: Uint<64>,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { records: Map::empty() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn erase(&mut self, witnesses: &W) {
                         self.records.remove(&witnesses.user_id);
                     }
@@ -459,19 +459,19 @@ mod tests {
         //   Ins{cached:true,  n:1}                                      → [0xa1]
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod records {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     records: Map<Uint<64>, Uint<64>>,
                 }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct W {
                     user_id: Uint<64>,
                     amount: Uint<64>,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { records: Map::empty() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn record(&mut self, witnesses: &W) {
                         self.records.insert(witnesses.user_id, witnesses.amount);
                     }
@@ -547,18 +547,18 @@ mod tests {
         // single Fr each.
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod membership {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     members: Map<u64, bool>,
                 }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct W {
                     user_id: Uint<64>,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { members: Map::empty() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn check_member(&mut self, witnesses: &W) {
                         let _exists = self.members.contains(&witnesses.user_id);
                     }
@@ -622,21 +622,21 @@ mod tests {
     fn voting_cast_vote_is_satisfiable() {
         let module: syn::ItemMod = syn::parse2(quote::quote! {
             mod ballot {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct Ballot {
                     votes_for: Counter,
                     votes_against: Counter,
                 }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct W {
                     choice: Boolean,
                 }
                 impl Ballot {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { votes_for: Counter::zero(), votes_against: Counter::zero() }
                     }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn cast_vote(&mut self, witnesses: &W) {
                         if witnesses.choice.into() {
                             self.votes_for.increment();
@@ -715,14 +715,14 @@ mod tests {
     fn circuit_with_public_arg_has_num_inputs() {
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod setter {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     value: Counter,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { value: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn set_value(&mut self, amount: u64) {
                         // Use the amount argument (placeholder logic)
                         self.value.increment();
@@ -775,14 +775,14 @@ mod tests {
     fn circuit_with_return_value_has_output() {
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod reader {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     count: Counter,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { count: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn get_count(&self) -> u64 {
                         self.count.value()
                     }
@@ -811,12 +811,12 @@ mod tests {
     fn typed_params_emit_constraints() {
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod typed {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State { x: Counter }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { x: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn with_u64(&mut self, amount: u64) {
                         self.x.increment();
                     }
@@ -843,14 +843,14 @@ mod tests {
     fn boolean_witness_constrained() {
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod boolw {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State { x: Counter }
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct W { flag: Boolean }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { x: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn check(&mut self, witnesses: &W) {
                         let _f = witnesses.flag;
                     }
@@ -873,14 +873,14 @@ mod tests {
     fn assert_eq_circuit_is_satisfiable() {
         let (name, ir) = compile_first_circuit(quote::quote! {
             mod asserting {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     x: Counter,
                 }
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { x: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn check_eq(&mut self) {
                         let a = 42;
                         let b = 42;

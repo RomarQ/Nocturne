@@ -32,9 +32,9 @@ Generates `build_X_transcript()` functions returning `Vec<Op<ResultModeVerify>>`
 
 `deploy::initial_state()` generates `StateValue::Array` from ledger field types.
 
-### cargo-midnight CLI ✓
+### cargo-nocturne CLI ✓
 
-- `build`: compiles contracts, writes ZKIR + contract-info.json to `target/midnight/`
+- `build`: compiles contracts, writes ZKIR + contract-info.json to `target/nocturne/`
 - `keygen`: generates real Plonk prover/verifier key files (`.prover`, `.verifier`)
 - `test`: runs `cargo test`
 
@@ -72,7 +72,7 @@ Full prove → verify cycle for counter increment circuit.
 | B.1 | MerkleTree operations (insert, member proof) | L | Needs correct alignment for `PersistentHash` on Merkle leaves |
 | B.2 | Map operations (get, set, contains) | M | Key encoding in transcript ops |
 | B.3 | Cell with typed values (not just u64) | M | `AlignedValue` construction for different types |
-| B.4 | Custom ADTs (`#[midnight(state_type)]`) | L | Enum/struct → `StateValue` encoding |
+| B.4 | Custom ADTs (`#[nocturne(state_type)]`) | L | Enum/struct → `StateValue` encoding |
 | B.5 | `for` loop unrolling (const bounds) | L | Detect `for i in 0..N`, unroll |
 | B.6 | `match` on enums | L | Cascaded `CondSelect` |
 | B.7 | Proof generation test for voting contract with witnesses | M | Validates conditional branch proving |
@@ -86,7 +86,7 @@ Midnight contracts — it ends at producing artifacts (ZKIR, `.prover`,
 
 On-chain compatibility of those artifacts is validated by going through the
 canonical `midnight-ledger` code paths in
-`crates/midnight/tests/ledger_integration_test.rs` — no real node needed.
+`crates/nocturne/tests/ledger_integration_test.rs` — no real node needed.
 
 Tools that deploy/call Nocturne-compiled contracts:
 
@@ -102,7 +102,7 @@ Tools that deploy/call Nocturne-compiled contracts:
 | C.1 | `Map<K, V>` ledger field | L | Key encoding in transcript ops, `get`/`set`/`contains`/`remove` |
 | C.2 | `MerkleTree<DEPTH>` insert + membership proof | L | Needs correct alignment for `PersistentHash` on leaves |
 | C.3 | `Cell<T>` for arbitrary `T` (not just `u64`/`bool`) | M | `AlignedValue` construction for user types |
-| C.4 | Custom ADTs (`#[midnight(state_type)]`) | L | Enum/struct → `StateValue` encoding |
+| C.4 | Custom ADTs (`#[nocturne(state_type)]`) | L | Enum/struct → `StateValue` encoding |
 | C.5 | `for` loop unrolling (const bounds) | L | Detect `for i in 0..N`, unroll |
 | C.6 | `match` on enums | L | Cascaded `CondSelect` |
 | C.7 | `Bytes<N>` as witness (multi-Fr emission) | L | See `memories/witness-type-support.md` |
@@ -124,7 +124,7 @@ Tools that deploy/call Nocturne-compiled contracts:
 nocturne/
   crates/
     midnight/           Umbrella (re-exports runtime types)
-    nocturne-macro/     #[midnight::contract], #[midnight::test]
+    nocturne-macro/     #[nocturne::contract], #[nocturne::test]
     nocturne-ir/        Internal IR (parse + validate)
     nocturne-codegen/   ZKIR emitter + transcript codegen + deploy codegen
     nocturne-types/     Field, Boolean, Bytes<N>, Uint<N>
@@ -135,7 +135,7 @@ nocturne/
     nocturne-e2e/       (stub) E2E framework
     nocturne-primitives/(stub) Field arithmetic
   tools/
-    cargo-midnight/     Build/keygen/test CLI
+    cargo-nocturne/     Build/keygen/test CLI
   examples/
     counter-contract/   Example contract with tests
 ```

@@ -3,37 +3,37 @@
 //!
 //! This proves the complete pipeline: Rust contract → ZKIR + transcript → satisfiable proof.
 
-use midnight::runtime::transient_crypto::curve::Fr;
-use midnight::runtime::transient_crypto::hash::transient_commit;
-use midnight::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
-use midnight::runtime::transient_crypto::repr::FieldRepr;
-use midnight::types::*;
+use nocturne::runtime::transient_crypto::curve::Fr;
+use nocturne::runtime::transient_crypto::hash::transient_commit;
+use nocturne::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
+use nocturne::runtime::transient_crypto::repr::FieldRepr;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn end_to_end_counter_increment() {
     // Step 1: Build transcript ops using generated transcript builder.
     let transcript = counter::transcript::build_increment_transcript();
@@ -62,14 +62,14 @@ fn end_to_end_counter_increment() {
         use nocturne_codegen::zkir_emitter;
         let module: syn::ItemMod = syn::parse_quote! {
             mod counter {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct CounterState {
                     count: Counter,
                 }
                 impl CounterState {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { count: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn increment(&mut self) { self.count.increment(); }
                 }
             }

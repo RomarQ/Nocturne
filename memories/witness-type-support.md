@@ -46,7 +46,7 @@ For general `Bytes<N>`:
 
 ## Tests
 
-- `crates/midnight/tests/witness_types_test.rs::multi_witness_struct_constructs` — multi-typed witness struct compiles.
+- `crates/nocturne/tests/witness_types_test.rs::multi_witness_struct_constructs` — multi-typed witness struct compiles.
 - `each_witness_type_builds_transcript` — Boolean/Field/Uint witnesses serialize correctly.
 - `bytes_witness_is_accepted` — `Bytes<32>` witness contract parses cleanly.
-- `crates/midnight/tests/ledger_integration_test.rs::bytes32_witness_proves_and_verifies` — `Bytes<32>` witness round-trips through `ContractCallExt::construct_proof` + prove + verify.
+- `crates/nocturne/tests/ledger_integration_test.rs::bytes32_witness_proves_and_verifies` — `Bytes<32>` witness round-trips through `ContractCallExt::construct_proof` + prove + verify.

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/midnight",
+    "crates/nocturne",
     "crates/nocturne-macro",
     "crates/nocturne-ir",
     "crates/nocturne-codegen",
@@ -12,7 +12,7 @@ members = [
     "crates/nocturne-engine",
     "crates/nocturne-e2e",
     "crates/nocturne-primitives",
-    "tools/cargo-midnight",
+    "tools/cargo-nocturne",
     "examples/counter-contract",
     "examples/kitchen-sink",
 ]
@@ -24,9 +24,8 @@ repository = "https://github.com/RomarQ/Nocturne"
 version = "0.1.0"
 
 [workspace.dependencies]
-# Internal crates. The umbrella crate keeps the `midnight` name until
-# Commit B; the rest are renamed here.
-midnight = { path = "crates/midnight", version = "0.1.0" }
+# Internal crates.
+nocturne = { path = "crates/nocturne", version = "0.1.0" }
 nocturne-macro = { path = "crates/nocturne-macro", version = "0.1.0" }
 nocturne-ir = { path = "crates/nocturne-ir", version = "0.1.0" }
 nocturne-codegen = { path = "crates/nocturne-codegen", version = "0.1.0" }

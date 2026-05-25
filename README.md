@@ -5,7 +5,7 @@
 
 A Rust eDSL for writing [Midnight](https://midnight.network) smart contracts.
 
-You write contracts as ordinary Rust modules annotated with `#[midnight::contract]`, and a proc macro lowers them to ZKIR circuits, Plonk prover/verifier keys, transcript builders, and contract metadata. The only hard constraint on output is `midnight-ledger` compliance: the ZKIR must verify, the on-chain transcript ops must execute correctly, and the initial state must deserialize. Surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better.
+You write contracts as ordinary Rust modules annotated with `#[nocturne::contract]`, and a proc macro lowers them to ZKIR circuits, Plonk prover/verifier keys, transcript builders, and contract metadata. The only hard constraint on output is `midnight-ledger` compliance: the ZKIR must verify, the on-chain transcript ops must execute correctly, and the initial state must deserialize. Surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better.
 
 ## Status
 
@@ -17,7 +17,7 @@ What's in:
 - Value types: `Boolean`, `Field`, `Uint<N>` for N ≤ 128, `Bytes<N>` for N ≤ 32, `Option<T>`, `[T; N]` for N ≤ 11, tuples up to arity 11, user structs, homogeneous-payload enums
 - Control flow: `if`/`else`, `match` on user enums and `Option`, const-bounded `for` loops, `assert!` / `assert_eq!`, `if`-as-expression with `cond_select` multiplex
 - Cross-circuit: parameterized constructors with `deploy::initial_state(...)`, witness reads inside `let` bindings, `disclose(_)`, `merkle_tree_path_root(_)`
-- Tooling: `cargo midnight build` (auto-keygens stale circuits), `cargo midnight keygen`, `cargo midnight test`
+- Tooling: `cargo nocturne build` (auto-keygens stale circuits), `cargo nocturne keygen`, `cargo nocturne test`
 
 What's not yet:
 
@@ -25,34 +25,33 @@ What's not yet:
 - Heterogeneous-payload enums (`enum E { A(u64), B(Bytes<32>) }`)
 - ZSwap and Kernel
 - Cross-contract calls
-- Umbrella crate rename `midnight → nocturne` (and the matching attribute namespace, CLI subcommand, and artifact path; internal crates already renamed)
 
 ## Example: counter contract
 
 ```rust
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 pub mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         pub count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self { count: Counter::zero() }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn get_count(&self) -> u64 {
             self.count.value()
         }
@@ -63,12 +62,12 @@ pub mod counter {
 Build it:
 
 ```sh
-cargo install --path tools/cargo-midnight
+cargo install --path tools/cargo-nocturne
 cd examples/counter-contract
-cargo midnight build
+cargo nocturne build
 ```
 
-You'll get this under `target/midnight/counter/`:
+You'll get this under `target/nocturne/counter/`:
 
 ```
 zkir/increment.zkir
@@ -77,7 +76,7 @@ keys/increment.verifier
 compiler/contract-info.json
 ```
 
-`zkir/*.zkir` is the circuit definition (one per `#[midnight(circuit)]`). `keys/*.{prover,verifier}` are Plonk keys derived from the ZKIR. `contract-info.json` describes the contract's surface (circuit signatures, witness types) for indexers and code generators.
+`zkir/*.zkir` is the circuit definition (one per `#[nocturne(circuit)]`). `keys/*.{prover,verifier}` are Plonk keys derived from the ZKIR. `contract-info.json` describes the contract's surface (circuit signatures, witness types) for indexers and code generators.
 
 See [`docs/compiling.md`](docs/compiling.md) for the full build flow and [`docs/artifacts.md`](docs/artifacts.md) for what each file is for and who consumes it.
 
@@ -85,8 +84,8 @@ See [`docs/compiling.md`](docs/compiling.md) for the full build flow and [`docs/
 
 ```
 crates/
-  midnight                  umbrella crate end-users depend on
-  nocturne-macro            #[midnight::contract] proc macro
+  nocturne                  umbrella crate end-users depend on
+  nocturne-macro            #[nocturne::contract] proc macro
   nocturne-ir               typed IR the macro emits
   nocturne-codegen          ZKIR + transcript + deploy emitters
   nocturne-types            user-facing types (Counter, Cell<T>, Map<...>, ...)
@@ -97,7 +96,7 @@ crates/
   nocturne-metadata         contract-info.json schema
   nocturne-e2e              shared test infrastructure
 tools/
-  cargo-midnight            cargo subcommand for build/keygen/test
+  cargo-nocturne            cargo subcommand for build/keygen/test
 examples/
   counter-contract          minimal example
   kitchen-sink              exercises every supported primitive

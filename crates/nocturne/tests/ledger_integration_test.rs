@@ -11,10 +11,10 @@
 
 use std::borrow::Cow;
 
-use midnight::runtime::transient_crypto::curve::Fr;
-use midnight::runtime::transient_crypto::hash::transient_commit;
-use midnight::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
-use midnight::types::*;
+use nocturne::runtime::transient_crypto::curve::Fr;
+use nocturne::runtime::transient_crypto::hash::transient_commit;
+use nocturne::runtime::transient_crypto::proofs::{KeyLocation, ProofPreimage, Zkir};
+use nocturne::types::*;
 
 use midnight_base_crypto::cost_model::RunningCost;
 use midnight_coin_structure::contract::ContractAddress;
@@ -28,111 +28,111 @@ use midnight_onchain_runtime::result_mode::ResultModeVerify;
 use midnight_onchain_runtime::state::{ContractOperation, EntryPointBuf};
 use midnight_onchain_runtime::transcript::{Transcript, TranscriptVersion};
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         pub count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod reader {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct ReaderState {
         pub stored: Cell<u64>,
     }
 
     impl ReaderState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 stored: Cell::new(0u64),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn read_stored(&self) {
             let _v = self.stored.get();
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod bytes_cell {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct BytesCellState {
         pub digest: Cell<Bytes<32>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BytesCellWitnesses {
         pub new_digest: Bytes<32>,
     }
 
     impl BytesCellState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 digest: Cell::new(Bytes::<32>::zeroed()),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn rotate_digest(&mut self, witnesses: &BytesCellWitnesses) {
             self.digest.set(witnesses.new_digest.clone());
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn peek_digest(&self) {
             let _d = self.digest.get();
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod bytes_witness {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct BytesWitnessState {
         pub count: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BytesWitnessWitnesses {
         pub digest: Bytes<32>,
     }
 
     impl BytesWitnessState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn take_digest(&mut self, witnesses: &BytesWitnessWitnesses) {
             // Reference the witness so PrivateInput + ConstrainBits are
             // emitted. The actual digest isn't pushed on chain in this
@@ -144,186 +144,186 @@ mod bytes_witness {
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter_reader {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterReaderState {
         pub count: Counter,
     }
 
     impl CounterReaderState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn read_count(&self) {
             let _v = self.count.value();
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod records {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct RecordsState {
         pub records: Map<Uint<64>, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct RecordsWitnesses {
         pub user_id: Uint<64>,
         pub amount: Uint<64>,
     }
 
     impl RecordsState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &RecordsWitnesses) {
             self.records.insert(witnesses.user_id, witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn erase(&mut self, witnesses: &RecordsWitnesses) {
             self.records.remove(&witnesses.user_id);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn fetch(&self, witnesses: &RecordsWitnesses) {
             let _v = self.records.lookup(&witnesses.user_id);
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod byte_records {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct ByteRecordsState {
         pub records: Map<Bytes<32>, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct ByteRecordsWitnesses {
         pub digest: Bytes<32>,
         pub amount: Uint<64>,
     }
 
     impl ByteRecordsState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &ByteRecordsWitnesses) {
             self.records
                 .insert(witnesses.digest.clone(), witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &ByteRecordsWitnesses) {
             let _exists = self.records.contains(&witnesses.digest);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn fetch(&self, witnesses: &ByteRecordsWitnesses) {
             let _v = self.records.lookup(&witnesses.digest);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn erase(&mut self, witnesses: &ByteRecordsWitnesses) {
             self.records.remove(&witnesses.digest);
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod membership {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MembersState {
         pub members: Map<Uint<64>, Boolean>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MembersWitnesses {
         pub user_id: Uint<64>,
     }
 
     impl MembersState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 members: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &MembersWitnesses) {
             let _exists = self.members.contains(&witnesses.user_id);
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod flag {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct FlagState {
         pub raised: Cell<bool>,
     }
 
     impl FlagState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 raised: Cell::new(false),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn raise(&mut self) {
             self.raised.set(true);
         }
     }
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod ballot {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct Ballot {
         pub votes_for: Counter,
         pub votes_against: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BallotWitnesses {
         pub choice: Boolean,
     }
 
     impl Ballot {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 votes_for: Counter::zero(),
@@ -331,7 +331,7 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
             if witnesses.choice.value() {
                 self.votes_for.increment();
@@ -346,12 +346,12 @@ fn build_counter_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CounterState { count: Counter }
             impl CounterState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn increment(&mut self) { self.count.increment(); }
             }
         }
@@ -365,12 +365,12 @@ fn build_read_stored_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod reader {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct ReaderState { stored: Cell<u64> }
             impl ReaderState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { stored: Cell::new(0u64) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn read_stored(&self) {
                     let _v = self.stored.get();
                 }
@@ -391,18 +391,18 @@ fn build_bytes_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_cell {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct BytesCellState { digest: Cell<Bytes<32>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct BytesCellWitnesses { pub new_digest: Bytes<32> }
             impl BytesCellState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { digest: Cell::new(Bytes::<32>::zeroed()) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn rotate_digest(&mut self, witnesses: &BytesCellWitnesses) {
                     self.digest.set(witnesses.new_digest.clone());
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn peek_digest(&self) {
                     let _d = self.digest.get();
                 }
@@ -431,14 +431,14 @@ fn build_take_digest_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_witness {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct BytesWitnessState { count: Counter }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct BytesWitnessWitnesses { pub digest: Bytes<32> }
             impl BytesWitnessState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn take_digest(&mut self, witnesses: &BytesWitnessWitnesses) {
                     let _d = witnesses.digest.clone();
                     self.count.increment();
@@ -460,12 +460,12 @@ fn build_read_count_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_reader {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CounterReaderState { count: Counter }
             impl CounterReaderState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn read_count(&self) {
                     let _v = self.count.value();
                 }
@@ -486,22 +486,22 @@ fn build_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod records {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct RecordsState { records: Map<Uint<64>, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct RecordsWitnesses { pub user_id: Uint<64>, pub amount: Uint<64> }
             impl RecordsState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &RecordsWitnesses) {
                     self.records.insert(witnesses.user_id, witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn erase(&mut self, witnesses: &RecordsWitnesses) {
                     self.records.remove(&witnesses.user_id);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn fetch(&self, witnesses: &RecordsWitnesses) {
                     let _v = self.records.lookup(&witnesses.user_id);
                 }
@@ -534,26 +534,26 @@ fn build_byte_records_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource 
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod byte_records {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct ByteRecordsState { records: Map<Bytes<32>, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct ByteRecordsWitnesses { pub digest: Bytes<32>, pub amount: Uint<64> }
             impl ByteRecordsState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &ByteRecordsWitnesses) {
                     self.records.insert(witnesses.digest.clone(), witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &ByteRecordsWitnesses) {
                     let _exists = self.records.contains(&witnesses.digest);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn fetch(&self, witnesses: &ByteRecordsWitnesses) {
                     let _v = self.records.lookup(&witnesses.digest);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn erase(&mut self, witnesses: &ByteRecordsWitnesses) {
                     self.records.remove(&witnesses.digest);
                 }
@@ -574,14 +574,14 @@ fn build_check_member_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod membership {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MembersState { members: Map<Uint<64>, Boolean> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MembersWitnesses { pub user_id: Uint<64> }
             impl MembersState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { members: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &MembersWitnesses) {
                     let _exists = self.members.contains(&witnesses.user_id);
                 }
@@ -602,12 +602,12 @@ fn build_flag_raise_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod flag {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct FlagState { raised: Cell<bool> }
             impl FlagState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { raised: Cell::new(false) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn raise(&mut self) { self.raised.set(true); }
             }
         }
@@ -626,19 +626,19 @@ fn build_cast_vote_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod ballot {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct Ballot {
                 pub votes_for: Counter,
                 pub votes_against: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct BallotWitnesses { pub choice: Boolean }
             impl Ballot {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self {
                     Self { votes_for: Counter::zero(), votes_against: Counter::zero() }
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
                     if witnesses.choice.value() {
                         self.votes_for.increment();
@@ -665,7 +665,7 @@ fn build_cast_vote_ir() -> midnight_zkir::IrSource {
 fn canonical_preimage(
     ir_circuit_name: &str,
     active_ops: Vec<Op<ResultModeVerify, InMemoryDB>>,
-    private_transcript_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue>,
+    private_transcript_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue>,
 ) -> ProofPreimage {
     let rand = Fr::from(0xdeadu64);
     let input = ().into();
@@ -684,11 +684,11 @@ fn canonical_preimage(
         key_location: KeyLocation(Cow::Owned(format!("test::{ir_circuit_name}"))),
     };
 
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     let mut io_repr: Vec<Fr> = Vec::new();
-    midnight::runtime::transient_crypto::fab::ValueReprAlignedValue(prototype.input.clone())
+    nocturne::runtime::transient_crypto::fab::ValueReprAlignedValue(prototype.input.clone())
         .field_repr(&mut io_repr);
-    midnight::runtime::transient_crypto::fab::ValueReprAlignedValue(prototype.output.clone())
+    nocturne::runtime::transient_crypto::fab::ValueReprAlignedValue(prototype.output.clone())
         .field_repr(&mut io_repr);
     let comm_comm = transient_commit::<[Fr]>(&io_repr, rand);
 
@@ -723,7 +723,7 @@ async fn counter_ledger_constructed_preimage_satisfies_circuit() {
 
 #[tokio::test]
 async fn counter_ledger_constructed_preimage_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_counter_ir();
@@ -755,10 +755,10 @@ async fn counter_ledger_constructed_preimage_proves_and_verifies() {
 /// `memories/conditional-branch-cond-select-zeroing.md`.
 #[tokio::test]
 async fn voting_verifies_with_ledger_shape_pis() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_cast_vote_ir();
@@ -830,8 +830,8 @@ async fn voting_verifies_with_ledger_shape_pis() {
 /// (see `memories/storage-cell-encoding-gap.md`).
 #[tokio::test]
 async fn flag_raise_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_flag_raise_ir();
@@ -875,8 +875,8 @@ async fn flag_raise_proves_and_verifies() {
 /// so the off-chain Popeq and the on-chain VM agree.
 #[tokio::test]
 async fn map_contains_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_check_member_ir();
@@ -891,8 +891,8 @@ async fn map_contains_proves_and_verifies() {
     // concatenated value-only field_repr of these AlignedValues. Order
     // matches the order of PrivateInput instructions in the IR (here:
     // the single Uint<64> witness for user_id).
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             12345u64,
         )];
     let preimage = canonical_preimage(
@@ -932,8 +932,8 @@ async fn map_contains_proves_and_verifies() {
 /// ledger-shape PIs. Inserts return no value, so there's no Popeq.
 #[tokio::test]
 async fn map_insert_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_record_ir();
@@ -950,9 +950,9 @@ async fn map_insert_proves_and_verifies() {
     let _ = &mut state; // silence unused warning
 
     // PrivateInput reads in IR order: user_id, then amount.
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> = vec![
-        midnight::runtime::base_crypto::fab::AlignedValue::from(7u64),
-        midnight::runtime::base_crypto::fab::AlignedValue::from(42u64),
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> = vec![
+        nocturne::runtime::base_crypto::fab::AlignedValue::from(7u64),
+        nocturne::runtime::base_crypto::fab::AlignedValue::from(42u64),
     ];
     let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
 
@@ -986,8 +986,8 @@ async fn map_insert_proves_and_verifies() {
 /// at the circuit level (Option<V> plumbing waits for Stage 2 / Map::get).
 #[tokio::test]
 async fn map_remove_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_erase_ir();
@@ -999,8 +999,8 @@ async fn map_remove_proves_and_verifies() {
 
     // PrivateInput reads only `user_id` for erase. The `amount` witness is
     // never accessed by the circuit, so it's not in the private transcript.
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             7u64,
         )];
     let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
@@ -1037,8 +1037,8 @@ async fn map_remove_proves_and_verifies() {
 /// made the on-chain verify hash diverge.
 #[tokio::test]
 async fn cell_get_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_stored_ir();
@@ -1076,8 +1076,8 @@ async fn cell_get_proves_and_verifies() {
 /// identical.
 #[tokio::test]
 async fn counter_value_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_count_ir();
@@ -1121,8 +1121,8 @@ async fn counter_value_proves_and_verifies() {
 /// claimed value.
 #[tokio::test]
 async fn map_lookup_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_fetch_ir();
@@ -1139,8 +1139,8 @@ async fn map_lookup_proves_and_verifies() {
     let nocturne_transcript = records::transcript::build_fetch_transcript(&state, &witnesses);
 
     // PrivateInput reads only `user_id` for fetch.
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             7u64,
         )];
     let preimage = canonical_preimage("fetch", nocturne_transcript.ops.clone(), private_outputs);
@@ -1177,8 +1177,8 @@ async fn map_lookup_proves_and_verifies() {
 /// is the next milestone).
 #[tokio::test]
 async fn bytes32_witness_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_take_digest_ir();
@@ -1190,8 +1190,8 @@ async fn bytes32_witness_proves_and_verifies() {
     // The witness expands to ceil(32/31) = 2 Frs. Passing the [u8; 32] as
     // a single AlignedValue tells construct_proof to use the same
     // chunk-and-reverse encoding the IR's PrivateInputs expect.
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             [0xABu8; 32],
         )];
     let preimage = canonical_preimage(
@@ -1232,8 +1232,8 @@ async fn bytes32_witness_proves_and_verifies() {
 /// `value_vars` and emits one DeclarePubInput per Fr the value occupies.
 #[tokio::test]
 async fn cell_bytes32_set_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_rotate_digest_ir();
@@ -1242,8 +1242,8 @@ async fn cell_bytes32_set_proves_and_verifies() {
     };
     let nocturne_transcript = bytes_cell::transcript::build_rotate_digest_transcript(&witnesses);
 
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             [0x77u8; 32],
         )];
     let preimage = canonical_preimage(
@@ -1282,8 +1282,8 @@ async fn cell_bytes32_set_proves_and_verifies() {
 /// back through `state.digest.get()` for the Popeq result.
 #[tokio::test]
 async fn cell_bytes32_get_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_peek_digest_ir();
@@ -1327,8 +1327,8 @@ async fn cell_bytes32_get_proves_and_verifies() {
 /// Uint<64>> example. This is the multi-Fr K end-to-end test.
 #[tokio::test]
 async fn map_bytes_insert_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("record");
@@ -1339,9 +1339,9 @@ async fn map_bytes_insert_proves_and_verifies() {
     let nocturne_transcript = byte_records::transcript::build_record_transcript(&witnesses);
 
     // Witnesses in IR-emission order: digest (2 Frs), then amount (1 Fr).
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> = vec![
-        midnight::runtime::base_crypto::fab::AlignedValue::from([0x5Au8; 32]),
-        midnight::runtime::base_crypto::fab::AlignedValue::from(99u64),
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> = vec![
+        nocturne::runtime::base_crypto::fab::AlignedValue::from([0x5Au8; 32]),
+        nocturne::runtime::base_crypto::fab::AlignedValue::from(99u64),
     ];
     let preimage = canonical_preimage("record", nocturne_transcript.ops.clone(), private_outputs);
 
@@ -1373,8 +1373,8 @@ async fn map_bytes_insert_proves_and_verifies() {
 /// the Bytes<32> key. Map is empty, so the Member result is false.
 #[tokio::test]
 async fn map_bytes_contains_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("check_member");
@@ -1388,8 +1388,8 @@ async fn map_bytes_contains_proves_and_verifies() {
 
     // Only the `digest` witness is referenced by check_member, so the
     // private transcript contains exactly its 2 Frs.
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             [0x33u8; 32],
         )];
     let preimage = canonical_preimage(
@@ -1426,8 +1426,8 @@ async fn map_bytes_contains_proves_and_verifies() {
 /// State is pre-populated, so lookup returns the stored value.
 #[tokio::test]
 async fn map_bytes_lookup_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("fetch");
@@ -1442,8 +1442,8 @@ async fn map_bytes_lookup_proves_and_verifies() {
     let nocturne_transcript = byte_records::transcript::build_fetch_transcript(&state, &witnesses);
 
     // Only `digest` is accessed by `fetch`.
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             [0x7Eu8; 32],
         )];
     let preimage = canonical_preimage("fetch", nocturne_transcript.ops.clone(), private_outputs);
@@ -1475,8 +1475,8 @@ async fn map_bytes_lookup_proves_and_verifies() {
 /// compatible transcript with a multi-Fr key in the Push path.
 #[tokio::test]
 async fn map_bytes_remove_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_byte_records_circuit_ir("erase");
@@ -1486,8 +1486,8 @@ async fn map_bytes_remove_proves_and_verifies() {
     };
     let nocturne_transcript = byte_records::transcript::build_erase_transcript(&witnesses);
 
-    let private_outputs: Vec<midnight::runtime::base_crypto::fab::AlignedValue> =
-        vec![midnight::runtime::base_crypto::fab::AlignedValue::from(
+    let private_outputs: Vec<nocturne::runtime::base_crypto::fab::AlignedValue> =
+        vec![nocturne::runtime::base_crypto::fab::AlignedValue::from(
             [0xC3u8; 32],
         )];
     let preimage = canonical_preimage("erase", nocturne_transcript.ops.clone(), private_outputs);
@@ -1522,10 +1522,10 @@ async fn map_bytes_remove_proves_and_verifies() {
 /// (then) branch.
 #[tokio::test]
 async fn voting_verifies_else_active() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_cast_vote_ir();
@@ -1579,22 +1579,22 @@ async fn voting_verifies_else_active() {
         .expect("on-chain verify must succeed for the else-active path");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod cond_writer {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CondWriterState {
         pub raised: Cell<bool>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct CondWriterWitnesses {
         pub do_it: Boolean,
     }
 
     impl CondWriterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 raised: Cell::new(false),
@@ -1604,7 +1604,7 @@ mod cond_writer {
         // Conditional write — only one branch's Cell::set ops are in the
         // active transcript; the other branch's IR-declared PIs must zero out
         // via cond_select to match Op::Noop padding.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn maybe_raise(&mut self, witnesses: &CondWriterWitnesses) {
             if witnesses.do_it.value() {
                 self.raised.set(true);
@@ -1619,14 +1619,14 @@ fn build_maybe_raise_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod cond_writer {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CondWriterState { raised: Cell<bool> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct CondWriterWitnesses { pub do_it: Boolean }
             impl CondWriterState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { raised: Cell::new(false) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn maybe_raise(&mut self, witnesses: &CondWriterWitnesses) {
                     if witnesses.do_it.value() {
                         self.raised.set(true);
@@ -1654,10 +1654,10 @@ fn build_maybe_raise_ir() -> midnight_zkir::IrSource {
 /// the ledger inserts for inactive segments.
 #[tokio::test]
 async fn conditional_cell_set_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_raise_ir();
@@ -1711,25 +1711,25 @@ async fn conditional_cell_set_proves_and_verifies() {
         .expect("on-chain verify must succeed for conditional Cell::set");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod nested_cond {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct NestedCondState {
         pub a: Counter,
         pub b: Counter,
         pub c: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct NestedCondWitnesses {
         pub outer: Boolean,
         pub inner: Boolean,
     }
 
     impl NestedCondState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 a: Counter::zero(),
@@ -1738,7 +1738,7 @@ mod nested_cond {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn tick(&mut self, witnesses: &NestedCondWitnesses) {
             if witnesses.outer.value() {
                 if witnesses.inner.value() {
@@ -1757,16 +1757,16 @@ fn build_tick_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod nested_cond {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct NestedCondState { a: Counter, b: Counter, c: Counter }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct NestedCondWitnesses { pub outer: Boolean, pub inner: Boolean }
             impl NestedCondState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self {
                     Self { a: Counter::zero(), b: Counter::zero(), c: Counter::zero() }
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn tick(&mut self, witnesses: &NestedCondWitnesses) {
                     if witnesses.outer.value() {
                         if witnesses.inner.value() {
@@ -1797,10 +1797,10 @@ fn build_tick_ir() -> midnight_zkir::IrSource {
 /// Noop-interleaved transcript field_repr.
 #[tokio::test]
 async fn nested_conditional_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_tick_ir();
@@ -1854,29 +1854,29 @@ async fn nested_conditional_proves_and_verifies() {
         .expect("on-chain verify must succeed for nested if-else");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod no_else {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct NoElseState {
         pub count: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct NoElseWitnesses {
         pub do_it: Boolean,
     }
 
     impl NoElseState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn maybe_tick(&mut self, witnesses: &NoElseWitnesses) {
             if witnesses.do_it.value() {
                 self.count.increment();
@@ -1889,14 +1889,14 @@ fn build_maybe_tick_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod no_else {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct NoElseState { count: Counter }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct NoElseWitnesses { pub do_it: Boolean }
             impl NoElseState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn maybe_tick(&mut self, witnesses: &NoElseWitnesses) {
                     if witnesses.do_it.value() {
                         self.count.increment();
@@ -1921,10 +1921,10 @@ fn build_maybe_tick_ir() -> midnight_zkir::IrSource {
 /// Op::Noop padding the ledger inserts matches.
 #[tokio::test]
 async fn no_else_conditional_false_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_tick_ir();
@@ -1978,30 +1978,30 @@ async fn no_else_conditional_false_proves_and_verifies() {
         .expect("on-chain verify must succeed for no-else conditional (false)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod cond_read {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CondReadState {
         pub members: Map<Uint<64>, Boolean>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct CondReadWitnesses {
         pub do_check: Boolean,
         pub user_id: Uint<64>,
     }
 
     impl CondReadState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 members: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn maybe_check(&self, witnesses: &CondReadWitnesses) {
             if witnesses.do_check.value() {
                 let _exists = self.members.contains(&witnesses.user_id);
@@ -2014,14 +2014,14 @@ fn build_maybe_check_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod cond_read {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CondReadState { members: Map<Uint<64>, Boolean> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct CondReadWitnesses { pub do_check: Boolean, pub user_id: Uint<64> }
             impl CondReadState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { members: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn maybe_check(&self, witnesses: &CondReadWitnesses) {
                     if witnesses.do_check.value() {
                         let _exists = self.members.contains(&witnesses.user_id);
@@ -2048,10 +2048,10 @@ fn build_maybe_check_ir() -> midnight_zkir::IrSource {
 /// (do_check=true) to confirm the basic structure proves and verifies.
 #[tokio::test]
 async fn conditional_map_contains_active_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_check_ir();
@@ -2118,10 +2118,10 @@ async fn conditional_map_contains_active_proves_and_verifies() {
 /// or fails.
 #[tokio::test]
 async fn conditional_map_contains_inactive_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_check_ir();
@@ -2182,22 +2182,22 @@ async fn conditional_map_contains_inactive_proves_and_verifies() {
         .expect("on-chain verify must succeed for conditional Map::contains (inactive)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod safe_lookup {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct SafeLookupState {
         pub records: Map<Uint<64>, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct SafeLookupWitnesses {
         pub user_id: Uint<64>,
     }
 
     impl SafeLookupState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
@@ -2209,7 +2209,7 @@ mod safe_lookup {
         // `Popeq.as_cell()` panic on `StateValue::Null`. This is the IR
         // shape that any `Option<V>`-returning `Map::get` sugar will compile
         // to. Tests both branches (present + absent).
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn safe_get(&self, witnesses: &SafeLookupWitnesses) {
             if self.records.contains(&witnesses.user_id) {
                 let _v = self.records.lookup(&witnesses.user_id);
@@ -2222,14 +2222,14 @@ fn build_safe_get_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod safe_lookup {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct SafeLookupState { records: Map<Uint<64>, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct SafeLookupWitnesses { pub user_id: Uint<64> }
             impl SafeLookupState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn safe_get(&self, witnesses: &SafeLookupWitnesses) {
                     if self.records.contains(&witnesses.user_id) {
                         let _v = self.records.lookup(&witnesses.user_id);
@@ -2253,10 +2253,10 @@ fn build_safe_get_ir() -> midnight_zkir::IrSource {
 /// lookup's Popeq value is the stored V, and the proof verifies on-chain.
 #[tokio::test]
 async fn safe_get_present_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_safe_get_ir();
@@ -2325,10 +2325,10 @@ async fn safe_get_present_proves_and_verifies() {
 /// constructs and verifies through the canonical ledger path.
 #[tokio::test]
 async fn safe_get_absent_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_safe_get_ir();
@@ -2384,22 +2384,22 @@ async fn safe_get_absent_proves_and_verifies() {
         .expect("on-chain verify must succeed for safe-get (key absent)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod map_get_sugar {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MapGetSugarState {
         pub records: Map<Uint<64>, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MapGetSugarWitnesses {
         pub user_id: Uint<64>,
     }
 
     impl MapGetSugarState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
@@ -2410,7 +2410,7 @@ mod map_get_sugar {
         // this to the contains+lookup pattern at the IR level. The user's
         // source still type-checks against `Map::get -> Option<V>` because
         // the storage layer keeps the HashMap-style API.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn read_if_present(&self, witnesses: &MapGetSugarWitnesses) {
             if let Some(_v) = self.records.get(&witnesses.user_id) {
                 let _hold = _v;
@@ -2423,14 +2423,14 @@ fn build_read_if_present_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_get_sugar {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MapGetSugarState { records: Map<Uint<64>, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MapGetSugarWitnesses { pub user_id: Uint<64> }
             impl MapGetSugarState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn read_if_present(&self, witnesses: &MapGetSugarWitnesses) {
                     if let Some(_v) = self.records.get(&witnesses.user_id) {
                         let _hold = _v;
@@ -2456,10 +2456,10 @@ fn build_read_if_present_ir() -> midnight_zkir::IrSource {
 /// Key present → both contains and lookup fire on the active path.
 #[tokio::test]
 async fn map_get_sugar_present_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_if_present_ir();
@@ -2522,10 +2522,10 @@ async fn map_get_sugar_present_proves_and_verifies() {
 /// lookup branch is inactive, no PrivateInput/PublicInput consumption.
 #[tokio::test]
 async fn map_get_sugar_absent_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_if_present_ir();
@@ -2581,23 +2581,23 @@ async fn map_get_sugar_absent_proves_and_verifies() {
         .expect("on-chain verify must succeed for `if let Some(v) = map.get(&k)` (absent)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod if_let_else {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct IfLetElseState {
         pub records: Map<Uint<64>, Uint<64>>,
         pub fallback_hits: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct IfLetElseWitnesses {
         pub user_id: Uint<64>,
     }
 
     impl IfLetElseState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
@@ -2608,7 +2608,7 @@ mod if_let_else {
         // `if let Some(v) = ... { ... } else { ... }`. The else branch
         // increments a counter when the key is absent — exercises both
         // arms of the rewrite (then = lookup, else = preserved verbatim).
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn read_or_count_miss(&mut self, witnesses: &IfLetElseWitnesses) {
             if let Some(_v) = self.records.get(&witnesses.user_id) {
                 let _hold = _v;
@@ -2623,17 +2623,17 @@ fn build_read_or_count_miss_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod if_let_else {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct IfLetElseState {
                 records: Map<Uint<64>, Uint<64>>,
                 fallback_hits: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct IfLetElseWitnesses { pub user_id: Uint<64> }
             impl IfLetElseState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn read_or_count_miss(&mut self, witnesses: &IfLetElseWitnesses) {
                     if let Some(_v) = self.records.get(&witnesses.user_id) {
                         let _hold = _v;
@@ -2659,10 +2659,10 @@ fn build_read_or_count_miss_ir() -> midnight_zkir::IrSource {
 /// runs; the lookup branch is inactive (no Popeq consumption).
 #[tokio::test]
 async fn if_let_else_absent_runs_else_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_or_count_miss_ir();
@@ -2718,23 +2718,23 @@ async fn if_let_else_absent_runs_else_proves_and_verifies() {
         .expect("on-chain verify must succeed for if-let-Some-with-else (else-active)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod match_get {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MatchGetState {
         pub records: Map<Uint<64>, Uint<64>>,
         pub fallback_hits: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MatchGetWitnesses {
         pub user_id: Uint<64>,
     }
 
     impl MatchGetState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
@@ -2745,7 +2745,7 @@ mod match_get {
         // `match self.map.get(&k) { Some(v) => ..., None => ... }`. The
         // parser rewrites to the same contains+lookup if-else the if-let
         // sugar produces.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn pick(&mut self, witnesses: &MatchGetWitnesses) {
             match self.records.get(&witnesses.user_id) {
                 Some(_v) => {
@@ -2763,17 +2763,17 @@ fn build_pick_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod match_get {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MatchGetState {
                 records: Map<Uint<64>, Uint<64>>,
                 fallback_hits: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MatchGetWitnesses { pub user_id: Uint<64> }
             impl MatchGetState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn pick(&mut self, witnesses: &MatchGetWitnesses) {
                     match self.records.get(&witnesses.user_id) {
                         Some(_v) => { let _hold = _v; }
@@ -2798,10 +2798,10 @@ fn build_pick_ir() -> midnight_zkir::IrSource {
 /// present → Some arm fires; lookup runs.
 #[tokio::test]
 async fn match_get_present_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_pick_ir();
@@ -2862,10 +2862,10 @@ async fn match_get_present_proves_and_verifies() {
 /// `match self.map.get(&k)` — None arm fires, fallback counter increments.
 #[tokio::test]
 async fn match_get_absent_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_pick_ir();
@@ -2920,23 +2920,23 @@ async fn match_get_absent_proves_and_verifies() {
         .expect("on-chain verify must succeed for `match map.get(&k) { Some, None }` (absent)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod match_get_reversed {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MatchGetReversedState {
         pub records: Map<Uint<64>, Uint<64>>,
         pub fallback_hits: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MatchGetReversedWitnesses {
         pub user_id: Uint<64>,
     }
 
     impl MatchGetReversedState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
@@ -2946,7 +2946,7 @@ mod match_get_reversed {
 
         // Arms in reverse order — None first, Some second. The match
         // matcher accepts both orderings.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn pick_reversed(&mut self, witnesses: &MatchGetReversedWitnesses) {
             match self.records.get(&witnesses.user_id) {
                 None => {
@@ -2964,17 +2964,17 @@ fn build_pick_reversed_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod match_get_reversed {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MatchGetReversedState {
                 records: Map<Uint<64>, Uint<64>>,
                 fallback_hits: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MatchGetReversedWitnesses { pub user_id: Uint<64> }
             impl MatchGetReversedState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn pick_reversed(&mut self, witnesses: &MatchGetReversedWitnesses) {
                     match self.records.get(&witnesses.user_id) {
                         None => { self.fallback_hits.increment(); }
@@ -2998,10 +2998,10 @@ fn build_pick_reversed_ir() -> midnight_zkir::IrSource {
 /// normalizes ordering so both shapes lower to the same IR.
 #[tokio::test]
 async fn match_get_reversed_arms_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_pick_reversed_ir();
@@ -3060,23 +3060,23 @@ async fn match_get_reversed_arms_proves_and_verifies() {
         .expect("on-chain verify must succeed for `match` with reversed arms");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod bytes_get_sugar {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct BytesGetSugarState {
         pub records: Map<Bytes<32>, Uint<64>>,
         pub fallback_hits: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BytesGetSugarWitnesses {
         pub digest: Bytes<32>,
     }
 
     impl BytesGetSugarState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
@@ -3087,7 +3087,7 @@ mod bytes_get_sugar {
         // Multi-Fr K (`Bytes<32>` = 2 Frs) flowing through the Map::get
         // sugar — exercises the if-let-Some rewrite alongside the multi-Fr
         // contains+lookup paths.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn read_digest(&mut self, witnesses: &BytesGetSugarWitnesses) {
             if let Some(_v) = self.records.get(&witnesses.digest) {
                 let _hold = _v;
@@ -3102,17 +3102,17 @@ fn build_read_digest_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_get_sugar {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct BytesGetSugarState {
                 records: Map<Bytes<32>, Uint<64>>,
                 fallback_hits: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct BytesGetSugarWitnesses { pub digest: Bytes<32> }
             impl BytesGetSugarState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn read_digest(&mut self, witnesses: &BytesGetSugarWitnesses) {
                     if let Some(_v) = self.records.get(&witnesses.digest) {
                         let _hold = _v;
@@ -3139,10 +3139,10 @@ fn build_read_digest_ir() -> midnight_zkir::IrSource {
 /// in lookup walks 2 Fr key chunks.
 #[tokio::test]
 async fn bytes_get_sugar_present_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_digest_ir();
@@ -3204,10 +3204,10 @@ async fn bytes_get_sugar_present_proves_and_verifies() {
 /// must all guard out without consuming.
 #[tokio::test]
 async fn bytes_get_sugar_absent_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_digest_ir();
@@ -3263,23 +3263,23 @@ async fn bytes_get_sugar_absent_proves_and_verifies() {
         .expect("on-chain verify must succeed for Map<Bytes<32>, _>::get sugar (absent)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod bytes_v_get_sugar {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct BytesVGetSugarState {
         pub records: Map<Uint<64>, Bytes<32>>,
         pub fallback_hits: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BytesVGetSugarWitnesses {
         pub user_id: Uint<64>,
     }
 
     impl BytesVGetSugarState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
@@ -3291,7 +3291,7 @@ mod bytes_v_get_sugar {
         // through the conditional Map::get sugar. The inactive-branch
         // Popeq must guard out both V Fr chunks (each PublicInput carries
         // the branch guard so neither consumes).
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn read_blob(&mut self, witnesses: &BytesVGetSugarWitnesses) {
             if let Some(_v) = self.records.get(&witnesses.user_id) {
                 let _hold = _v;
@@ -3306,17 +3306,17 @@ fn build_read_blob_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod bytes_v_get_sugar {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct BytesVGetSugarState {
                 records: Map<Uint<64>, Bytes<32>>,
                 fallback_hits: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct BytesVGetSugarWitnesses { pub user_id: Uint<64> }
             impl BytesVGetSugarState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty(), fallback_hits: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn read_blob(&mut self, witnesses: &BytesVGetSugarWitnesses) {
                     if let Some(_v) = self.records.get(&witnesses.user_id) {
                         let _hold = _v;
@@ -3341,10 +3341,10 @@ fn build_read_blob_ir() -> midnight_zkir::IrSource {
 /// present → the lookup's multi-Fr Popeq fires on the active branch.
 #[tokio::test]
 async fn bytes_v_get_sugar_present_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_blob_ir();
@@ -3407,10 +3407,10 @@ async fn bytes_v_get_sugar_present_proves_and_verifies() {
 /// guard-out (2 PublicInputs, both inactive).
 #[tokio::test]
 async fn bytes_v_get_sugar_absent_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_read_blob_ir();
@@ -3466,39 +3466,39 @@ async fn bytes_v_get_sugar_absent_proves_and_verifies() {
         .expect("on-chain verify must succeed for Map<_, Bytes<32>>::get sugar (absent)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod set_contract {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct SetContractState {
         pub members: Set<Bytes<32>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct SetContractWitnesses {
         pub digest: Bytes<32>,
     }
 
     impl SetContractState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 members: Set::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn add(&mut self, witnesses: &SetContractWitnesses) {
             self.members.insert(witnesses.digest.clone());
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check(&self, witnesses: &SetContractWitnesses) {
             let _exists = self.members.contains(&witnesses.digest);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn erase(&mut self, witnesses: &SetContractWitnesses) {
             self.members.remove(&witnesses.digest);
         }
@@ -3509,22 +3509,22 @@ fn build_set_contract_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource 
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod set_contract {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct SetContractState { members: Set<Bytes<32>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct SetContractWitnesses { pub digest: Bytes<32> }
             impl SetContractState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { members: Set::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn add(&mut self, witnesses: &SetContractWitnesses) {
                     self.members.insert(witnesses.digest.clone());
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check(&self, witnesses: &SetContractWitnesses) {
                     let _exists = self.members.contains(&witnesses.digest);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn erase(&mut self, witnesses: &SetContractWitnesses) {
                     self.members.remove(&witnesses.digest);
                 }
@@ -3547,9 +3547,9 @@ fn build_set_contract_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource 
 /// pattern is Idx + Push(Cell(key)) + Push(Null) + Ins + Ins.
 #[tokio::test]
 async fn set_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_contract_circuit_ir("add");
@@ -3592,9 +3592,9 @@ async fn set_insert_proves_and_verifies() {
 /// (Member opcode is shared, Set just stores Null values).
 #[tokio::test]
 async fn set_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_contract_circuit_ir("check");
@@ -3637,9 +3637,9 @@ async fn set_contains_proves_and_verifies() {
 /// `Set<Bytes<32>>::remove(&k)`. Identical to `Map::remove` — Rem + Ins.
 #[tokio::test]
 async fn set_remove_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_contract_circuit_ir("erase");
@@ -3678,34 +3678,34 @@ async fn set_remove_proves_and_verifies() {
         .expect("on-chain verify must succeed for Set<Bytes<32>>::remove");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod field_cell {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct FieldCellState {
         pub slot: Cell<Field>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct FieldCellWitnesses {
         pub new_field: Field,
     }
 
     impl FieldCellState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 slot: Cell::new(Field::zero()),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn write_field(&mut self, witnesses: &FieldCellWitnesses) {
             self.slot.set(witnesses.new_field);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn read_field(&self) {
             let _v = self.slot.get();
         }
@@ -3716,18 +3716,18 @@ fn build_field_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod field_cell {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct FieldCellState { slot: Cell<Field> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct FieldCellWitnesses { pub new_field: Field }
             impl FieldCellState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { slot: Cell::new(Field::zero()) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn write_field(&mut self, witnesses: &FieldCellWitnesses) {
                     self.slot.set(witnesses.new_field);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn read_field(&self) {
                     let _v = self.slot.get();
                 }
@@ -3751,10 +3751,10 @@ fn build_field_cell_circuit_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// MerkleTree::checkRoot (Phase A of the staged plan).
 #[tokio::test]
 async fn cell_field_set_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::curve::Fr;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::curve::Fr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_field_cell_circuit_ir("write_field");
@@ -3802,9 +3802,9 @@ async fn cell_field_set_proves_and_verifies() {
 /// alignment declares, mirroring the Push side.
 #[tokio::test]
 async fn cell_field_get_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::curve::Fr;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::curve::Fr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_field_cell_circuit_ir("read_field");
@@ -3838,29 +3838,29 @@ async fn cell_field_get_proves_and_verifies() {
         .expect("on-chain verify must succeed for Cell<Field>::get");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod mt_check {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MtCheckState {
         pub entries: MerkleTree<10, Bytes<32>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MtCheckWitnesses {
         pub expected_root: MerkleTreeDigest,
     }
 
     impl MtCheckState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 entries: MerkleTree::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn verify(&self, witnesses: &MtCheckWitnesses) {
             let _ok = self.entries.check_root(&witnesses.expected_root);
         }
@@ -3871,14 +3871,14 @@ fn build_mt_verify_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_check {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MtCheckState { entries: MerkleTree<10, Bytes<32>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MtCheckWitnesses { pub expected_root: MerkleTreeDigest }
             impl MtCheckState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn verify(&self, witnesses: &MtCheckWitnesses) {
                     let _ok = self.entries.check_root(&witnesses.expected_root);
                 }
@@ -3902,10 +3902,10 @@ fn build_mt_verify_ir() -> midnight_zkir::IrSource {
 /// Phase A `AlignmentAtom::Field` work the user-digest Push depends on.
 #[tokio::test]
 async fn mt_check_root_matches_empty_tree_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::curve::Fr;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::curve::Fr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_verify_ir();
@@ -3948,10 +3948,10 @@ async fn mt_check_root_matches_empty_tree_proves_and_verifies() {
 /// — `check_root` is a query, not an assertion.
 #[tokio::test]
 async fn mt_check_root_mismatch_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::curve::Fr;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::curve::Fr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_verify_ir();
@@ -3991,29 +3991,29 @@ async fn mt_check_root_mismatch_proves_and_verifies() {
         .expect("on-chain verify must succeed for MerkleTree::check_root (mismatch)");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod mt_insert {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MtInsertState {
         pub entries: MerkleTree<10, Bytes<32>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MtInsertWitnesses {
         pub leaf: Bytes<32>,
     }
 
     impl MtInsertState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 entries: MerkleTree::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn add(&mut self, witnesses: &MtInsertWitnesses) {
             self.entries.insert(&witnesses.leaf);
         }
@@ -4024,14 +4024,14 @@ fn build_mt_add_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_insert {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MtInsertState { entries: MerkleTree<10, Bytes<32>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MtInsertWitnesses { pub leaf: Bytes<32> }
             impl MtInsertState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn add(&mut self, witnesses: &MtInsertWitnesses) {
                     self.entries.insert(&witnesses.leaf);
                 }
@@ -4063,9 +4063,9 @@ fn build_mt_add_ir() -> midnight_zkir::IrSource {
 /// Insertion has no return value, so there's no Popeq.
 #[tokio::test]
 async fn mt_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_add_ir();
@@ -4115,29 +4115,29 @@ async fn mt_insert_proves_and_verifies() {
 //     agree on every chunk.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod mt_verify_path {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MtVerifyPathState {
         pub entries: MerkleTree<3, Bytes<32>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MtVerifyPathWitnesses {
         pub path: MerkleTreePath<3, Bytes<32>>,
     }
 
     impl MtVerifyPathState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 entries: MerkleTree::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn verify_path(&self, witnesses: &MtVerifyPathWitnesses) {
             let computed = merkle_tree_path_root(&witnesses.path);
             let _ok = self.entries.check_root(&computed);
@@ -4149,16 +4149,16 @@ fn build_mt_verify_path_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_verify_path {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MtVerifyPathState { entries: MerkleTree<3, Bytes<32>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MtVerifyPathWitnesses {
                 pub path: MerkleTreePath<3, Bytes<32>>,
             }
             impl MtVerifyPathState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn verify_path(&self, witnesses: &MtVerifyPathWitnesses) {
                     let computed = merkle_tree_path_root(&witnesses.path);
                     let _ok = self.entries.check_root(&computed);
@@ -4182,9 +4182,9 @@ fn build_mt_verify_path_ir() -> midnight_zkir::IrSource {
 /// result is `true`.
 #[tokio::test]
 async fn mt_verify_path_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_verify_path_ir();
@@ -4199,7 +4199,7 @@ async fn mt_verify_path_proves_and_verifies() {
 
     // Sanity: off-chain helper agrees with the tree's own root.
     assert_eq!(
-        midnight::types::merkle_tree_path_root(&path),
+        nocturne::types::merkle_tree_path_root(&path),
         state.entries.root(),
         "off-chain merkle_tree_path_root must match tree.root() for the inserted leaf",
     );
@@ -4257,35 +4257,35 @@ async fn mt_verify_path_proves_and_verifies() {
 // support beyond the existing Uint<64> / Bytes<32> coverage.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod map_field_key {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MapFieldState {
         pub records: Map<Field, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MapFieldWitnesses {
         pub key: Field,
         pub amount: Uint<64>,
     }
 
     impl MapFieldState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &MapFieldWitnesses) {
             self.records.insert(witnesses.key, witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &MapFieldWitnesses) {
             let _exists = self.records.contains(&witnesses.key);
         }
@@ -4296,18 +4296,18 @@ fn build_map_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_field_key {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MapFieldState { records: Map<Field, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MapFieldWitnesses { pub key: Field, pub amount: Uint<64> }
             impl MapFieldState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &MapFieldWitnesses) {
                     self.records.insert(witnesses.key, witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &MapFieldWitnesses) {
                     let _exists = self.records.contains(&witnesses.key);
                 }
@@ -4330,9 +4330,9 @@ fn build_map_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// a Field-aligned key Push.
 #[tokio::test]
 async fn map_field_key_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_field_ir("record");
@@ -4378,9 +4378,9 @@ async fn map_field_key_insert_proves_and_verifies() {
 /// matches the on-chain Member opcode against a Field-aligned key Push.
 #[tokio::test]
 async fn map_field_key_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_field_ir("check_member");
@@ -4424,35 +4424,35 @@ async fn map_field_key_contains_proves_and_verifies() {
         .expect("on-chain verify must succeed for Map<Field, _>::contains");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod map_digest_key {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MapDigestState {
         pub records: Map<MerkleTreeDigest, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MapDigestWitnesses {
         pub key: MerkleTreeDigest,
         pub amount: Uint<64>,
     }
 
     impl MapDigestState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &MapDigestWitnesses) {
             self.records.insert(witnesses.key, witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &MapDigestWitnesses) {
             let _exists = self.records.contains(&witnesses.key);
         }
@@ -4463,21 +4463,21 @@ fn build_map_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_digest_key {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MapDigestState { records: Map<MerkleTreeDigest, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MapDigestWitnesses {
                 pub key: MerkleTreeDigest,
                 pub amount: Uint<64>,
             }
             impl MapDigestState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &MapDigestWitnesses) {
                     self.records.insert(witnesses.key, witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &MapDigestWitnesses) {
                     let _exists = self.records.contains(&witnesses.key);
                 }
@@ -4500,9 +4500,9 @@ fn build_map_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// truncation.
 #[tokio::test]
 async fn map_digest_key_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_digest_ir("record");
@@ -4551,9 +4551,9 @@ async fn map_digest_key_insert_proves_and_verifies() {
 /// is `false` for an empty map.
 #[tokio::test]
 async fn map_digest_key_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_digest_ir("check_member");
@@ -4608,39 +4608,39 @@ async fn map_digest_key_contains_proves_and_verifies() {
 // that down end-to-end.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod set_field_elem {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct SetFieldState {
         pub members: Set<Field>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct SetFieldWitnesses {
         pub elem: Field,
     }
 
     impl SetFieldState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 members: Set::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn add(&mut self, witnesses: &SetFieldWitnesses) {
             self.members.insert(witnesses.elem);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check(&self, witnesses: &SetFieldWitnesses) {
             let _exists = self.members.contains(&witnesses.elem);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn erase(&mut self, witnesses: &SetFieldWitnesses) {
             self.members.remove(&witnesses.elem);
         }
@@ -4651,22 +4651,22 @@ fn build_set_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod set_field_elem {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct SetFieldState { members: Set<Field> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct SetFieldWitnesses { pub elem: Field }
             impl SetFieldState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { members: Set::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn add(&mut self, witnesses: &SetFieldWitnesses) {
                     self.members.insert(witnesses.elem);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check(&self, witnesses: &SetFieldWitnesses) {
                     let _exists = self.members.contains(&witnesses.elem);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn erase(&mut self, witnesses: &SetFieldWitnesses) {
                     self.members.remove(&witnesses.elem);
                 }
@@ -4685,9 +4685,9 @@ fn build_set_field_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn set_field_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_field_ir("add");
@@ -4725,9 +4725,9 @@ async fn set_field_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_field_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_field_ir("check");
@@ -4766,9 +4766,9 @@ async fn set_field_contains_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_field_remove_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_field_ir("erase");
@@ -4804,39 +4804,39 @@ async fn set_field_remove_proves_and_verifies() {
         .expect("on-chain verify must succeed for Set<Field>::remove");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod set_digest_elem {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct SetDigestState {
         pub members: Set<MerkleTreeDigest>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct SetDigestWitnesses {
         pub elem: MerkleTreeDigest,
     }
 
     impl SetDigestState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 members: Set::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn add(&mut self, witnesses: &SetDigestWitnesses) {
             self.members.insert(witnesses.elem);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check(&self, witnesses: &SetDigestWitnesses) {
             let _exists = self.members.contains(&witnesses.elem);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn erase(&mut self, witnesses: &SetDigestWitnesses) {
             self.members.remove(&witnesses.elem);
         }
@@ -4847,22 +4847,22 @@ fn build_set_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod set_digest_elem {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct SetDigestState { members: Set<MerkleTreeDigest> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct SetDigestWitnesses { pub elem: MerkleTreeDigest }
             impl SetDigestState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { members: Set::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn add(&mut self, witnesses: &SetDigestWitnesses) {
                     self.members.insert(witnesses.elem);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check(&self, witnesses: &SetDigestWitnesses) {
                     let _exists = self.members.contains(&witnesses.elem);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn erase(&mut self, witnesses: &SetDigestWitnesses) {
                     self.members.remove(&witnesses.elem);
                 }
@@ -4881,9 +4881,9 @@ fn build_set_digest_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn set_digest_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_digest_ir("add");
@@ -4923,9 +4923,9 @@ async fn set_digest_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_digest_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_digest_ir("check");
@@ -4966,9 +4966,9 @@ async fn set_digest_contains_proves_and_verifies() {
 
 #[tokio::test]
 async fn set_digest_remove_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_set_digest_ir("erase");
@@ -5013,35 +5013,35 @@ async fn set_digest_remove_proves_and_verifies() {
 // Map<Bytes<32>, _> is already exercised by the byte_records tests.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod map_b16_key {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MapB16State {
         pub records: Map<Bytes<16>, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MapB16Witnesses {
         pub key: Bytes<16>,
         pub amount: Uint<64>,
     }
 
     impl MapB16State {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &MapB16Witnesses) {
             self.records.insert(witnesses.key.clone(), witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &MapB16Witnesses) {
             let _exists = self.records.contains(&witnesses.key);
         }
@@ -5052,18 +5052,18 @@ fn build_map_b16_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_b16_key {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MapB16State { records: Map<Bytes<16>, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MapB16Witnesses { pub key: Bytes<16>, pub amount: Uint<64> }
             impl MapB16State {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &MapB16Witnesses) {
                     self.records.insert(witnesses.key.clone(), witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &MapB16Witnesses) {
                     let _exists = self.records.contains(&witnesses.key);
                 }
@@ -5085,9 +5085,9 @@ fn build_map_b16_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// shorter alignment without regressing the Bytes<32> path.
 #[tokio::test]
 async fn map_b16_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b16_ir("record");
@@ -5130,9 +5130,9 @@ async fn map_b16_insert_proves_and_verifies() {
 /// `Map<Bytes<16>, Uint<64>>::contains(&k)` — single-Fr key Member lookup.
 #[tokio::test]
 async fn map_b16_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b16_ir("check_member");
@@ -5175,35 +5175,35 @@ async fn map_b16_contains_proves_and_verifies() {
         .expect("on-chain verify must succeed for Map<Bytes<16>, _>::contains");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod map_b48_key {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MapB48State {
         pub records: Map<Bytes<48>, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MapB48Witnesses {
         pub key: Bytes<48>,
         pub amount: Uint<64>,
     }
 
     impl MapB48State {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &MapB48Witnesses) {
             self.records.insert(witnesses.key.clone(), witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &MapB48Witnesses) {
             let _exists = self.records.contains(&witnesses.key);
         }
@@ -5214,18 +5214,18 @@ fn build_map_b48_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_b48_key {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MapB48State { records: Map<Bytes<48>, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MapB48Witnesses { pub key: Bytes<48>, pub amount: Uint<64> }
             impl MapB48State {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &MapB48Witnesses) {
                     self.records.insert(witnesses.key.clone(), witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &MapB48Witnesses) {
                     let _exists = self.records.contains(&witnesses.key);
                 }
@@ -5248,9 +5248,9 @@ fn build_map_b48_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// beyond the Bytes<32>-only coverage.
 #[tokio::test]
 async fn map_b48_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b48_ir("record");
@@ -5293,9 +5293,9 @@ async fn map_b48_insert_proves_and_verifies() {
 /// `Map<Bytes<48>, Uint<64>>::contains(&k)` — multi-Fr key Member lookup.
 #[tokio::test]
 async fn map_b48_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_b48_ir("check_member");
@@ -5347,29 +5347,29 @@ async fn map_b48_contains_proves_and_verifies() {
 //                persistent_hash with alignment [Bytes{6}, Bytes{64}]).
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod mt_b16_insert {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MtB16InsertState {
         pub entries: MerkleTree<10, Bytes<16>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MtB16InsertWitnesses {
         pub leaf: Bytes<16>,
     }
 
     impl MtB16InsertState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 entries: MerkleTree::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn add(&mut self, witnesses: &MtB16InsertWitnesses) {
             self.entries.insert(&witnesses.leaf);
         }
@@ -5380,14 +5380,14 @@ fn build_mt_b16_add_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_b16_insert {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MtB16InsertState { entries: MerkleTree<10, Bytes<16>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MtB16InsertWitnesses { pub leaf: Bytes<16> }
             impl MtB16InsertState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn add(&mut self, witnesses: &MtB16InsertWitnesses) {
                     self.entries.insert(&witnesses.leaf);
                 }
@@ -5409,9 +5409,9 @@ fn build_mt_b16_add_ir() -> midnight_zkir::IrSource {
 /// 2 Fr inputs (domain_sep + 1 leaf chunk).
 #[tokio::test]
 async fn mt_b16_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_b16_add_ir();
@@ -5447,29 +5447,29 @@ async fn mt_b16_insert_proves_and_verifies() {
         .expect("on-chain verify must succeed for MerkleTree<_, Bytes<16>>::insert");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod mt_b64_insert {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MtB64InsertState {
         pub entries: MerkleTree<10, Bytes<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MtB64InsertWitnesses {
         pub leaf: Bytes<64>,
     }
 
     impl MtB64InsertState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 entries: MerkleTree::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn add(&mut self, witnesses: &MtB64InsertWitnesses) {
             self.entries.insert(&witnesses.leaf);
         }
@@ -5480,14 +5480,14 @@ fn build_mt_b64_add_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_b64_insert {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MtB64InsertState { entries: MerkleTree<10, Bytes<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MtB64InsertWitnesses { pub leaf: Bytes<64> }
             impl MtB64InsertState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn add(&mut self, witnesses: &MtB64InsertWitnesses) {
                     self.entries.insert(&witnesses.leaf);
                 }
@@ -5510,9 +5510,9 @@ fn build_mt_b64_add_ir() -> midnight_zkir::IrSource {
 /// 4 Fr inputs (domain_sep + 3 leaf chunks).
 #[tokio::test]
 async fn mt_b64_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_b64_add_ir();
@@ -5552,29 +5552,29 @@ async fn mt_b64_insert_proves_and_verifies() {
 // single-Fr Bytes<16> leaf, exercising the lifted alignment in
 // `emit_merkle_tree_path_root`.
 
-#[midnight::contract]
+#[nocturne::contract]
 mod mt_b16_verify_path {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MtB16VerifyPathState {
         pub entries: MerkleTree<3, Bytes<16>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MtB16VerifyPathWitnesses {
         pub path: MerkleTreePath<3, Bytes<16>>,
     }
 
     impl MtB16VerifyPathState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 entries: MerkleTree::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn verify_path(&self, witnesses: &MtB16VerifyPathWitnesses) {
             let computed = merkle_tree_path_root(&witnesses.path);
             let _ok = self.entries.check_root(&computed);
@@ -5586,16 +5586,16 @@ fn build_mt_b16_verify_path_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod mt_b16_verify_path {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MtB16VerifyPathState { entries: MerkleTree<3, Bytes<16>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MtB16VerifyPathWitnesses {
                 pub path: MerkleTreePath<3, Bytes<16>>,
             }
             impl MtB16VerifyPathState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { entries: MerkleTree::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn verify_path(&self, witnesses: &MtB16VerifyPathWitnesses) {
                     let computed = merkle_tree_path_root(&witnesses.path);
                     let _ok = self.entries.check_root(&computed);
@@ -5615,9 +5615,9 @@ fn build_mt_b16_verify_path_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn mt_b16_verify_path_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_mt_b16_verify_path_ir();
@@ -5627,7 +5627,7 @@ async fn mt_b16_verify_path_proves_and_verifies() {
     let path = state.entries.path_for_leaf(0, leaf.clone());
 
     assert_eq!(
-        midnight::types::merkle_tree_path_root(&path),
+        nocturne::types::merkle_tree_path_root(&path),
         state.entries.root(),
         "off-chain merkle_tree_path_root must match tree.root() for Bytes<16> leaf",
     );
@@ -5684,35 +5684,35 @@ async fn mt_b16_verify_path_proves_and_verifies() {
 // probe — single-Fr per component, no multi-Fr edge cases.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod map_tuple_key {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MapTupleState {
         pub records: Map<(Field, Uint<64>), Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MapTupleWitnesses {
         pub key: (Field, Uint<64>),
         pub amount: Uint<64>,
     }
 
     impl MapTupleState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &MapTupleWitnesses) {
             self.records.insert(witnesses.key, witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &MapTupleWitnesses) {
             let _exists = self.records.contains(&witnesses.key);
         }
@@ -5723,18 +5723,18 @@ fn build_map_tuple_ir(circuit_name: &str) -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod map_tuple_key {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MapTupleState { records: Map<(Field, Uint<64>), Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MapTupleWitnesses { pub key: (Field, Uint<64>), pub amount: Uint<64> }
             impl MapTupleState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &MapTupleWitnesses) {
                     self.records.insert(witnesses.key, witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &MapTupleWitnesses) {
                     let _exists = self.records.contains(&witnesses.key);
                 }
@@ -5753,9 +5753,9 @@ fn build_map_tuple_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn map_tuple_key_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_tuple_ir("record");
@@ -5802,9 +5802,9 @@ async fn map_tuple_key_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn map_tuple_key_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_tuple_ir("check_member");
@@ -5857,17 +5857,17 @@ async fn map_tuple_key_contains_proves_and_verifies() {
 // iteration emits its own VM ops as if written out by hand.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod for_counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct ForCounterState {
         pub count: Counter,
     }
 
     impl ForCounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
@@ -5875,7 +5875,7 @@ mod for_counter {
         }
 
         // Unrolls to three Counter::increment() emissions.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn inc_three(&mut self) {
             for _i in 0..3 {
                 self.count.increment();
@@ -5888,12 +5888,12 @@ fn build_for_counter_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod for_counter {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct ForCounterState { count: Counter }
             impl ForCounterState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn inc_three(&mut self) {
                     for _i in 0..3 {
                         self.count.increment();
@@ -5914,8 +5914,8 @@ fn build_for_counter_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn for_loop_unroll_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_for_counter_ir();
@@ -5957,17 +5957,17 @@ async fn for_loop_unroll_proves_and_verifies() {
         .expect("on-chain verify must succeed for the unrolled for-loop circuit");
 }
 
-#[midnight::contract]
+#[nocturne::contract]
 mod for_var_use {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct ForVarState {
         pub last: Cell<u64>,
     }
 
     impl ForVarState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 last: Cell::new(0u64),
@@ -5977,7 +5977,7 @@ mod for_var_use {
         // Three `Cell::set` calls with values 0, 1, 2 (last wins). The
         // loop variable `i` is substituted by the iteration value at
         // parse time, so each iteration carries a distinct literal.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn fill(&mut self) {
             for i in 0..3u64 {
                 self.last.set(i);
@@ -5990,12 +5990,12 @@ fn build_for_var_use_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod for_var_use {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct ForVarState { last: Cell<u64> }
             impl ForVarState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { last: Cell::new(0u64) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn fill(&mut self) {
                     for i in 0..3u64 {
                         self.last.set(i);
@@ -6020,8 +6020,8 @@ fn build_for_var_use_ir() -> midnight_zkir::IrSource {
 /// compilation breaks because `i` isn't in scope at the call site.
 #[tokio::test]
 async fn for_loop_var_substituted_into_literals() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_for_var_use_ir();
@@ -6069,10 +6069,10 @@ async fn for_loop_var_substituted_into_literals() {
 /// line up with the Noop-padded transcript the ledger sees.
 #[tokio::test]
 async fn conditional_cell_set_else_active_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_maybe_raise_ir();
@@ -6132,10 +6132,10 @@ async fn conditional_cell_set_else_active_proves_and_verifies() {
 /// outer else's `self.c.increment()` must both cond_select to zero.
 #[tokio::test]
 async fn nested_conditional_inner_else_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_tick_ir();
@@ -6192,10 +6192,10 @@ async fn nested_conditional_inner_else_proves_and_verifies() {
 /// cond_select to zero. Only `self.c.increment()` is active.
 #[tokio::test]
 async fn nested_conditional_outer_else_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_tick_ir();
@@ -6257,7 +6257,7 @@ async fn nested_conditional_outer_else_proves_and_verifies() {
 // novelty is field projection by name (`key.a` vs `key.0`).
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod map_struct_key {
     use super::*;
 
@@ -6267,31 +6267,31 @@ mod map_struct_key {
         pub b: Uint<64>,
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MapStructState {
         pub records: Map<MyKey, Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MapStructWitnesses {
         pub key: MyKey,
         pub amount: Uint<64>,
     }
 
     impl MapStructState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 records: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &MapStructWitnesses) {
             self.records.insert(witnesses.key, witnesses.amount);
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn check_member(&self, witnesses: &MapStructWitnesses) {
             let _exists = self.records.contains(&witnesses.key);
         }
@@ -6305,18 +6305,18 @@ fn build_map_struct_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             pub struct MyKey { pub a: Field, pub b: Uint<64> }
 
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MapStructState { records: Map<MyKey, Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MapStructWitnesses { pub key: MyKey, pub amount: Uint<64> }
             impl MapStructState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { records: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &MapStructWitnesses) {
                     self.records.insert(witnesses.key, witnesses.amount);
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn check_member(&self, witnesses: &MapStructWitnesses) {
                     let _exists = self.records.contains(&witnesses.key);
                 }
@@ -6335,9 +6335,9 @@ fn build_map_struct_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn map_struct_key_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_struct_ir("record");
@@ -6385,9 +6385,9 @@ async fn map_struct_key_insert_proves_and_verifies() {
 
 #[tokio::test]
 async fn map_struct_key_contains_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_map_struct_ir("check_member");
@@ -6439,7 +6439,7 @@ async fn map_struct_key_contains_proves_and_verifies() {
 // carrying the variant discriminant.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod enum_state {
     use super::*;
 
@@ -6450,25 +6450,25 @@ mod enum_state {
         Cancelled,
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct EnumStateLedger {
         pub status: Cell<Status>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct EnumStateWitnesses {
         pub new_status: Status,
     }
 
     impl EnumStateLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 status: Cell::new(Status::Open),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn transition(&mut self, witnesses: &EnumStateWitnesses) {
             self.status.set(witnesses.new_status);
         }
@@ -6482,14 +6482,14 @@ fn build_enum_state_ir(circuit_name: &str) -> midnight_zkir::IrSource {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             pub enum Status { Open, Closed, Cancelled }
 
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct EnumStateLedger { status: Cell<Status> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct EnumStateWitnesses { pub new_status: Status }
             impl EnumStateLedger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { status: Cell::new(Status::Open) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn transition(&mut self, witnesses: &EnumStateWitnesses) {
                     self.status.set(witnesses.new_status);
                 }
@@ -6510,9 +6510,9 @@ fn build_enum_state_ir(circuit_name: &str) -> midnight_zkir::IrSource {
 /// as the Bytes<1> discriminant.
 #[tokio::test]
 async fn enum_cell_set_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_enum_state_ir("transition");
@@ -6557,7 +6557,7 @@ async fn enum_cell_set_proves_and_verifies() {
 // pub inputs and that runtime equality goes through `.discriminant()`.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod enum_vote {
     use super::*;
 
@@ -6567,19 +6567,19 @@ mod enum_vote {
         Against,
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct EnumBallot {
         pub votes_for: Counter,
         pub votes_against: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct EnumBallotWitnesses {
         pub choice: Vote,
     }
 
     impl EnumBallot {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 votes_for: Counter::zero(),
@@ -6587,7 +6587,7 @@ mod enum_vote {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn cast_vote(&mut self, witnesses: &EnumBallotWitnesses) {
             match witnesses.choice {
                 Vote::For => {
@@ -6607,19 +6607,19 @@ fn build_enum_vote_ir() -> midnight_zkir::IrSource {
         mod enum_vote {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             pub enum Vote { For, Against }
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct EnumBallot {
                 pub votes_for: Counter,
                 pub votes_against: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct EnumBallotWitnesses { pub choice: Vote }
             impl EnumBallot {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self {
                     Self { votes_for: Counter::zero(), votes_against: Counter::zero() }
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn cast_vote(&mut self, witnesses: &EnumBallotWitnesses) {
                     match witnesses.choice {
                         Vote::For => { self.votes_for.increment(); }
@@ -6643,10 +6643,10 @@ fn build_enum_vote_ir() -> midnight_zkir::IrSource {
 /// is driven by a user enum + match, not a Boolean witness + if.
 #[tokio::test]
 async fn enum_match_vote_verifies_with_ledger_shape_pis() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_enum_vote_ir();
@@ -6709,7 +6709,7 @@ async fn enum_match_vote_verifies_with_ledger_shape_pis() {
 // transcript in the right slot ordering.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod enum_records {
     use super::*;
 
@@ -6720,26 +6720,26 @@ mod enum_records {
         Closed,
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct EnumRecords {
         pub status_of: Map<Uint<64>, Status>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct EnumRecordsWitnesses {
         pub user_id: Uint<64>,
         pub new_status: Status,
     }
 
     impl EnumRecords {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 status_of: Map::empty(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn set_status(&mut self, witnesses: &EnumRecordsWitnesses) {
             self.status_of
                 .insert(witnesses.user_id, witnesses.new_status);
@@ -6753,17 +6753,17 @@ fn build_enum_records_ir() -> midnight_zkir::IrSource {
         mod enum_records {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             pub enum Status { Pending, Active, Closed }
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct EnumRecords { status_of: Map<Uint<64>, Status> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct EnumRecordsWitnesses {
                 pub user_id: Uint<64>,
                 pub new_status: Status,
             }
             impl EnumRecords {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { status_of: Map::empty() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn set_status(&mut self, witnesses: &EnumRecordsWitnesses) {
                     self.status_of.insert(witnesses.user_id, witnesses.new_status);
                 }
@@ -6782,9 +6782,9 @@ fn build_enum_records_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn map_with_enum_value_insert_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_enum_records_ir();
@@ -6837,24 +6837,24 @@ async fn map_with_enum_value_insert_proves_and_verifies() {
 // builder's Op::Addi { immediate: N }.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter_by_n {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterByN {
         pub count: Counter,
     }
 
     impl CounterByN {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn bump(&mut self) {
             self.count.increment_by(7);
         }
@@ -6865,12 +6865,12 @@ fn build_counter_by_n_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_by_n {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CounterByN { count: Counter }
             impl CounterByN {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn bump(&mut self) { self.count.increment_by(7); }
             }
         }
@@ -6887,8 +6887,8 @@ fn build_counter_by_n_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn counter_increment_by_n_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_counter_by_n_ir();
@@ -6925,7 +6925,7 @@ async fn counter_increment_by_n_proves_and_verifies() {
 // previous always-zero default.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod init_values {
     use super::*;
 
@@ -6936,7 +6936,7 @@ mod init_values {
         Finished,
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct InitState {
         pub limit: Cell<u64>,
         pub phase: Cell<Phase>,
@@ -6945,7 +6945,7 @@ mod init_values {
     }
 
     impl InitState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 limit: Cell::new(42u64),
@@ -6955,7 +6955,7 @@ mod init_values {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn touch(&mut self) {
             self.seen.increment();
         }
@@ -6964,9 +6964,9 @@ mod init_values {
 
 #[test]
 fn constructor_initial_values_flow_into_state_value() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_state::state::StateValue;
-    use midnight::runtime::storage::arena::Sp;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_state::state::StateValue;
+    use nocturne::runtime::storage::arena::Sp;
 
     let state = init_values::deploy::initial_state();
     let StateValue::Array(ref fields) = state else {
@@ -6990,7 +6990,7 @@ fn constructor_initial_values_flow_into_state_value() {
     );
 
     // Field 2: Cell<Bytes<32>>("nocturne:v1" padded with zeros)
-    let expected_tag = midnight::types::Bytes::<32>::from_slice("nocturne:v1".as_bytes());
+    let expected_tag = nocturne::types::Bytes::<32>::from_slice("nocturne:v1".as_bytes());
     assert_eq!(
         collected[2],
         StateValue::Cell(Sp::new(AlignedValue::from(*expected_tag.as_bytes()))),
@@ -7009,18 +7009,18 @@ fn constructor_initial_values_flow_into_state_value() {
 // Constructor parameters flow into deploy::initial_state(_).
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod parametric_init {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct AdminState {
         pub admin: Cell<Bytes<32>>,
         pub fee_bps: Cell<u64>,
     }
 
     impl AdminState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new(admin: Bytes<32>, fee_bps: u64) -> Self {
             Self {
                 admin: Cell::new(admin),
@@ -7028,18 +7028,18 @@ mod parametric_init {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn noop(&mut self) {}
     }
 }
 
 #[test]
 fn constructor_params_flow_into_initial_state() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_state::state::StateValue;
-    use midnight::runtime::storage::arena::Sp;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_state::state::StateValue;
+    use nocturne::runtime::storage::arena::Sp;
 
-    let admin = midnight::types::Bytes::<32>::from_slice("admin@example".as_bytes());
+    let admin = nocturne::types::Bytes::<32>::from_slice("admin@example".as_bytes());
     let state = parametric_init::deploy::initial_state(admin.clone(), 250u64);
     let StateValue::Array(ref fields) = state else {
         panic!("expected StateValue::Array");
@@ -7065,7 +7065,7 @@ fn constructor_params_flow_into_initial_state() {
 // where the enum drives both an assertion and a match-based mutation.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod role_gated_counter {
     use super::*;
 
@@ -7075,19 +7075,19 @@ mod role_gated_counter {
         Member,
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct RoleCounter {
         pub admin_ops: Counter,
         pub member_ops: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct RoleCallerWitnesses {
         pub caller: Caller,
     }
 
     impl RoleCounter {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 admin_ops: Counter::zero(),
@@ -7095,7 +7095,7 @@ mod role_gated_counter {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &RoleCallerWitnesses) {
             match witnesses.caller {
                 Caller::Admin => {
@@ -7115,19 +7115,19 @@ fn build_role_counter_ir() -> midnight_zkir::IrSource {
         mod role_gated_counter {
             #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
             pub enum Caller { Admin, Member }
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct RoleCounter {
                 pub admin_ops: Counter,
                 pub member_ops: Counter,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct RoleCallerWitnesses { pub caller: Caller }
             impl RoleCounter {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self {
                     Self { admin_ops: Counter::zero(), member_ops: Counter::zero() }
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &RoleCallerWitnesses) {
                     match witnesses.caller {
                         Caller::Admin => { self.admin_ops.increment_by(3); }
@@ -7149,10 +7149,10 @@ fn build_role_counter_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn role_gated_counter_admin_branch_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_role_counter_ir();
@@ -7212,29 +7212,29 @@ async fn role_gated_counter_admin_branch_verifies() {
 // now carries the real witness value through to the Cell::set call.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod let_witness_roundtrip {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct LetWitnessState {
         pub stored: Cell<Bytes<32>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct LetWitnessWitnesses {
         pub incoming: Bytes<32>,
     }
 
     impl LetWitnessState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 stored: Cell::new(Bytes::<32>::zeroed()),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn store(&mut self, witnesses: &LetWitnessWitnesses) {
             let v = witnesses.incoming.clone();
             self.stored.set(v);
@@ -7246,14 +7246,14 @@ fn build_let_witness_roundtrip_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod let_witness_roundtrip {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct LetWitnessState { stored: Cell<Bytes<32>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct LetWitnessWitnesses { pub incoming: Bytes<32> }
             impl LetWitnessState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { stored: Cell::new(Bytes::<32>::zeroed()) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn store(&mut self, witnesses: &LetWitnessWitnesses) {
                     let v = witnesses.incoming.clone();
                     self.stored.set(v);
@@ -7273,9 +7273,9 @@ fn build_let_witness_roundtrip_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn let_witness_bound_value_reaches_cell_set() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_let_witness_roundtrip_ir();
@@ -7321,30 +7321,30 @@ async fn let_witness_bound_value_reaches_cell_set() {
 // AlignedValue must match what `set` would produce for the raw sum.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod witness_sum {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct SumLedger {
         pub total: Cell<Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct SumWitnesses {
         pub a: Uint<64>,
         pub b: Uint<64>,
     }
 
     impl SumLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 total: Cell::new(Uint::<64>::from(0u64)),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn store_sum(&mut self, witnesses: &SumWitnesses) {
             let s = witnesses.a + witnesses.b;
             self.total.set(s);
@@ -7356,14 +7356,14 @@ fn build_witness_sum_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod witness_sum {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct SumLedger { total: Cell<Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct SumWitnesses { pub a: Uint<64>, pub b: Uint<64> }
             impl SumLedger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { total: Cell::new(Uint::<64>::from(0u64)) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn store_sum(&mut self, witnesses: &SumWitnesses) {
                     let s = witnesses.a.clone() + witnesses.b.clone();
                     self.total.set(s);
@@ -7383,9 +7383,9 @@ fn build_witness_sum_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn witness_arithmetic_let_binding_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_witness_sum_ir();
@@ -7437,24 +7437,24 @@ async fn witness_arithmetic_let_binding_proves_and_verifies() {
 // Pins that LedgerAccess::value flows through the let binding.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter_read_binding {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterRead {
         pub count: Counter,
     }
 
     impl CounterRead {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn snapshot(&self) {
             let _n = self.count.value();
         }
@@ -7465,12 +7465,12 @@ fn build_counter_read_binding_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_read_binding {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CounterRead { count: Counter }
             impl CounterRead {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn snapshot(&self) {
                     let _n = self.count.value();
                 }
@@ -7489,8 +7489,8 @@ fn build_counter_read_binding_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn counter_value_let_binding_proves_and_verifies() {
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_counter_read_binding_ir();
@@ -7528,29 +7528,29 @@ async fn counter_value_let_binding_proves_and_verifies() {
 // pattern reuses the Cell::set codegen path.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter_set {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterSetState {
         pub count: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct CounterSetWitnesses {
         pub target: Uint<64>,
     }
 
     impl CounterSetState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn assign(&mut self, witnesses: &CounterSetWitnesses) {
             self.count.set(witnesses.target.value() as u64);
         }
@@ -7561,14 +7561,14 @@ fn build_counter_set_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter_set {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CounterSetState { count: Counter }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct CounterSetWitnesses { pub target: Uint<64> }
             impl CounterSetState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn assign(&mut self, witnesses: &CounterSetWitnesses) {
                     self.count.set(witnesses.target.value() as u64);
                 }
@@ -7587,9 +7587,9 @@ fn build_counter_set_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn counter_set_from_witness_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_counter_set_ir();
@@ -7633,30 +7633,30 @@ async fn counter_set_from_witness_proves_and_verifies() {
 // fires the witness pushes from the surrounding context.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod inline_sum {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct InlineSumLedger {
         pub total: Cell<Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct InlineSumWitnesses {
         pub a: Uint<64>,
         pub b: Uint<64>,
     }
 
     impl InlineSumLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 total: Cell::new(Uint::<64>::from(0u64)),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn put(&mut self, witnesses: &InlineSumWitnesses) {
             self.total
                 .set(witnesses.a + witnesses.b);
@@ -7668,14 +7668,14 @@ fn build_inline_sum_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod inline_sum {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct InlineSumLedger { total: Cell<Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct InlineSumWitnesses { pub a: Uint<64>, pub b: Uint<64> }
             impl InlineSumLedger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { total: Cell::new(Uint::<64>::from(0u64)) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn put(&mut self, witnesses: &InlineSumWitnesses) {
                     self.total.set(witnesses.a.clone() + witnesses.b.clone());
                 }
@@ -7694,9 +7694,9 @@ fn build_inline_sum_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn inline_witness_arithmetic_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_inline_sum_ir();
@@ -7744,29 +7744,29 @@ async fn inline_witness_arithmetic_proves_and_verifies() {
 // the failure path (assertion panics with the message we emit).
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod assert_runtime {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct AssertLedger {
         pub seen: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct AssertWitnesses {
         pub flag: Boolean,
     }
 
     impl AssertLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 seen: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn require_flag(&mut self, witnesses: &AssertWitnesses) {
             assert!(witnesses.flag.value(), "flag must be true");
             self.seen.increment();
@@ -7790,7 +7790,7 @@ fn assert_in_circuit_body_evaluates_at_runtime() {
 // reach the on-chain transcript in the right order.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod payload_enum {
     use super::*;
 
@@ -7800,25 +7800,25 @@ mod payload_enum {
         Burn(Uint<64>),
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct PayloadEnumLedger {
         pub last: Cell<Action>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct PayloadEnumWitnesses {
         pub next: Action,
     }
 
     impl PayloadEnumLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 last: Cell::new(Action::Mint(Uint::<64>::from(0u64))),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record(&mut self, witnesses: &PayloadEnumWitnesses) {
             self.last.set(witnesses.next.clone());
         }
@@ -7831,14 +7831,14 @@ fn build_payload_enum_ir() -> midnight_zkir::IrSource {
         mod payload_enum {
             #[derive(Clone, Debug, PartialEq, Eq, Hash)]
             pub enum Action { Mint(Uint<64>), Burn(Uint<64>) }
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct PayloadEnumLedger { last: Cell<Action> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct PayloadEnumWitnesses { pub next: Action }
             impl PayloadEnumLedger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { last: Cell::new(Action::Mint(Uint::<64>::from(0u64))) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn record(&mut self, witnesses: &PayloadEnumWitnesses) {
                     self.last.set(witnesses.next.clone());
                 }
@@ -7857,9 +7857,9 @@ fn build_payload_enum_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn payload_enum_cell_set_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_payload_enum_ir();
@@ -7905,7 +7905,7 @@ async fn payload_enum_cell_set_proves_and_verifies() {
 // homogeneous payload from each variant arm, no synthetic accessor.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod match_payload {
     use super::*;
 
@@ -7915,19 +7915,19 @@ mod match_payload {
         Burn(Uint<64>),
     }
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct MintBurn {
         pub minted: Cell<Uint<64>>,
         pub burned: Cell<Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct MintBurnWitnesses {
         pub action: Action,
     }
 
     impl MintBurn {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 minted: Cell::new(Uint::<64>::from(0u64)),
@@ -7935,7 +7935,7 @@ mod match_payload {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn apply(&mut self, witnesses: &MintBurnWitnesses) {
             match witnesses.action.clone() {
                 Action::Mint(amount) => {
@@ -7955,22 +7955,22 @@ fn build_match_payload_ir() -> midnight_zkir::IrSource {
         mod match_payload {
             #[derive(Clone, Debug, PartialEq, Eq, Hash)]
             pub enum Action { Mint(Uint<64>), Burn(Uint<64>) }
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct MintBurn {
                 pub minted: Cell<Uint<64>>,
                 pub burned: Cell<Uint<64>>,
             }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct MintBurnWitnesses { pub action: Action }
             impl MintBurn {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self {
                     Self {
                         minted: Cell::new(Uint::<64>::from(0u64)),
                         burned: Cell::new(Uint::<64>::from(0u64)),
                     }
                 }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn apply(&mut self, witnesses: &MintBurnWitnesses) {
                     match witnesses.action.clone() {
                         Action::Mint(amount) => { self.minted.set(amount); }
@@ -7992,10 +7992,10 @@ fn build_match_payload_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn match_on_payload_binding_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_match_payload_ir();
@@ -8068,29 +8068,29 @@ fn assert_in_circuit_body_panics_on_violation() {
 // `primitive_cast_for_type`, and the prove + verify round-trip.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod uint128_pipeline {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct U128Ledger {
         pub big: Cell<Uint<128>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct U128Witnesses {
         pub w: Uint<128>,
     }
 
     impl U128Ledger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 big: Cell::new(Uint::<128>::from(0u64)),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn set_big(&mut self, witnesses: &U128Witnesses) {
             self.big.set(witnesses.w);
         }
@@ -8101,14 +8101,14 @@ fn build_uint128_pipeline_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod uint128_pipeline {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct U128Ledger { big: Cell<Uint<128>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct U128Witnesses { pub w: Uint<128> }
             impl U128Ledger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { big: Cell::new(Uint::<128>::from(0u64)) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn set_big(&mut self, witnesses: &U128Witnesses) {
                     self.big.set(witnesses.w);
                 }
@@ -8127,9 +8127,9 @@ fn build_uint128_pipeline_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn uint128_pipeline_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_uint128_pipeline_ir();
@@ -8173,29 +8173,29 @@ async fn uint128_pipeline_proves_and_verifies() {
 // Compact's `Maybe<T>` via the upstream `Aligned for Option<T>` impl.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod option_round_trip {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct OptLedger {
         pub stored: Cell<Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct OptWitnesses {
         pub maybe: Option<Uint<64>>,
     }
 
     impl OptLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 stored: Cell::new(Uint::<64>::from(0u64)),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         #[allow(clippy::single_match)]
         pub fn apply(&mut self, witnesses: &OptWitnesses) {
             // Use a `match` (not `if let Some(_)`) so we exercise the
@@ -8216,14 +8216,14 @@ fn build_option_round_trip_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod option_round_trip {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct OptLedger { stored: Cell<Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct OptWitnesses { pub maybe: Option<Uint<64>> }
             impl OptLedger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn apply(&mut self, witnesses: &OptWitnesses) {
                     match witnesses.maybe {
                         Some(amount) => { self.stored.set(amount); }
@@ -8245,10 +8245,10 @@ fn build_option_round_trip_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn option_some_payload_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_option_round_trip_ir();
@@ -8304,10 +8304,10 @@ async fn option_some_payload_proves_and_verifies() {
 
 #[tokio::test]
 async fn option_none_branch_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::onchain_vm::ops::Op as VmOp;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::onchain_vm::ops::Op as VmOp;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_option_round_trip_ir();
@@ -8365,29 +8365,29 @@ async fn option_none_branch_proves_and_verifies() {
 // `Vector<3, Uint<64>>` (an N-tuple) via the upstream tuple `Aligned` impl.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod array_witness_index {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct ArrLedger {
         pub stored: Cell<Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct ArrWitnesses {
         pub buckets: [Uint<64>; 3],
     }
 
     impl ArrLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 stored: Cell::new(Uint::<64>::from(0u64)),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn apply(&mut self, witnesses: &ArrWitnesses) {
             self.stored.set(witnesses.buckets[1]);
         }
@@ -8398,14 +8398,14 @@ fn build_array_witness_index_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod array_witness_index {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct ArrLedger { stored: Cell<Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct ArrWitnesses { pub buckets: [Uint<64>; 3] }
             impl ArrLedger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn apply(&mut self, witnesses: &ArrWitnesses) {
                     self.stored.set(witnesses.buckets[1]);
                 }
@@ -8424,9 +8424,9 @@ fn build_array_witness_index_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn array_witness_index_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_array_witness_index_ir();
@@ -8484,16 +8484,16 @@ async fn array_witness_index_proves_and_verifies() {
 // guard machinery.
 // ---------------------------------------------------------------------------
 
-#[midnight::contract]
+#[nocturne::contract]
 mod if_as_expression {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct IfLedger {
         pub stored: Cell<Uint<64>>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct IfWitnesses {
         pub flag: Boolean,
         pub a: Uint<64>,
@@ -8501,14 +8501,14 @@ mod if_as_expression {
     }
 
     impl IfLedger {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 stored: Cell::new(Uint::<64>::from(0u64)),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn apply(&mut self, witnesses: &IfWitnesses) {
             let chosen = if witnesses.flag.value() {
                 witnesses.a
@@ -8524,18 +8524,18 @@ fn build_if_as_expression_ir() -> midnight_zkir::IrSource {
     use nocturne_codegen::zkir_emitter;
     let module: syn::ItemMod = syn::parse_quote! {
         mod if_as_expression {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct IfLedger { stored: Cell<Uint<64>> }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct IfWitnesses {
                 pub flag: Boolean,
                 pub a: Uint<64>,
                 pub b: Uint<64>,
             }
             impl IfLedger {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn apply(&mut self, witnesses: &IfWitnesses) {
                     let chosen = if witnesses.flag.value() {
                         witnesses.a
@@ -8559,9 +8559,9 @@ fn build_if_as_expression_ir() -> midnight_zkir::IrSource {
 
 #[tokio::test]
 async fn if_as_expression_then_branch_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_if_as_expression_ir();
@@ -8606,9 +8606,9 @@ async fn if_as_expression_then_branch_proves_and_verifies() {
 
 #[tokio::test]
 async fn if_as_expression_else_branch_proves_and_verifies() {
-    use midnight::runtime::base_crypto::fab::AlignedValue;
-    use midnight::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
-    use midnight::runtime::transient_crypto::repr::FieldRepr;
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
 
     let ir = build_if_as_expression_ir();

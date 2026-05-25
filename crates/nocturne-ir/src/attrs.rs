@@ -14,7 +14,7 @@ pub enum MidnightAttr {
 }
 
 impl MidnightAttr {
-    /// Try to parse a midnight attribute from a `#[midnight(...)]` attribute.
+    /// Try to parse a midnight attribute from a `#[nocturne(...)]` attribute.
     pub fn from_attribute(attr: &Attribute) -> Option<Self> {
         if !is_midnight_attr(attr) {
             return None;
@@ -45,7 +45,7 @@ impl MidnightAttr {
 
 /// Check if an attribute's path is `midnight`.
 fn is_midnight_attr(attr: &Attribute) -> bool {
-    attr.path().is_ident("midnight")
+    attr.path().is_ident("nocturne")
 }
 
 /// Extract the first midnight attribute from a list of attributes.

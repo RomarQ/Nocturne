@@ -5,12 +5,12 @@
 pub use nocturne_macro::contract;
 pub use nocturne_macro::test;
 
-/// Off-chain identity function for the `midnight::disclose(_)` syntax.
+/// Off-chain identity function for the `nocturne::disclose(_)` syntax.
 ///
 /// The IR parser already detects this call by path and lowers it to
 /// `ExprIR::Disclose` — the ZKIR emitter then emits the matching
 /// `DeclarePubInput` + `PiSkip`. At plain Rust evaluation (e.g. the
-/// user's transcript-builder call sites or `#[midnight::test]`
+/// user's transcript-builder call sites or `#[nocturne::test]`
 /// helpers), the call has no on-chain semantics; it just yields the
 /// value verbatim so the surrounding code type-checks.
 #[inline]

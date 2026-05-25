@@ -1,7 +1,7 @@
 # `Cell<Field>` and `AlignmentAtom::Field` encoding
 
 **Discovered/implemented**: 2026-05-19 (Phase A of the staged MerkleTree plan)
-**Status**: Implemented end-to-end. Tests: `cell_field_{set,get}_proves_and_verifies` in `crates/midnight/tests/ledger_integration_test.rs`. Prerequisite landed for the `MerkleTree::checkRoot` work documented in [[merkle-tree-encoding]].
+**Status**: Implemented end-to-end. Tests: `cell_field_{set,get}_proves_and_verifies` in `crates/nocturne/tests/ledger_integration_test.rs`. Prerequisite landed for the `MerkleTree::checkRoot` work documented in [[merkle-tree-encoding]].
 
 ## What changed
 

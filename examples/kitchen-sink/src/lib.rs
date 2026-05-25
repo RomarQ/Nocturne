@@ -20,9 +20,9 @@
 //!   `let` bindings (Counter::value / Cell::get), `disclose(_)`, and
 //!   `merkle_tree_path_root(_)`.
 
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 pub mod kitchen_sink {
     use super::*;
 
@@ -61,7 +61,7 @@ pub mod kitchen_sink {
     // Ledger state
     // -----------------------------------------------------------------
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct State {
         /// Counter exercising both `.increment()` and `.increment_by(N)`.
         pub total_ops: Counter,
@@ -121,7 +121,7 @@ pub mod kitchen_sink {
     // Witness state
     // -----------------------------------------------------------------
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct Witnesses {
         pub caller: Bytes<32>,
         pub amount: Uint<64>,
@@ -156,7 +156,7 @@ pub mod kitchen_sink {
         // forwards these to the user constructor.
         // -------------------------------------------------------------
 
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new(admin: Bytes<32>, fee_bps: Uint<64>) -> Self {
             Self {
                 total_ops: Counter::zero(),
@@ -185,7 +185,7 @@ pub mod kitchen_sink {
         // const-N variant of Counter::increment.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn advance_phase(&mut self, witnesses: &Witnesses) {
             // Match on a user enum — lowers to a nested If chain with
             // discriminant equality.
@@ -209,7 +209,7 @@ pub mod kitchen_sink {
         // calls — plain Rust syntax, no synthetic accessor.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn apply_last_action(&mut self) {
             let action = self.last_action.get();
             match action {
@@ -227,7 +227,7 @@ pub mod kitchen_sink {
         // Cell<Uint<64>> write, plus a const-N Counter bump.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn store_fee(&mut self, witnesses: &Witnesses) {
             let total = witnesses.amount + witnesses.extra;
             self.fee_bps.set(total);
@@ -239,7 +239,7 @@ pub mod kitchen_sink {
         // binding.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn rotate_admin(&mut self, witnesses: &Witnesses) {
             let new_admin = witnesses.caller.clone();
             self.admin.set(new_admin);
@@ -250,10 +250,10 @@ pub mod kitchen_sink {
         // Cell<Boolean>.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn flip_flag(&mut self, witnesses: &Witnesses) {
             assert!(witnesses.flag.value() || !witnesses.flag.value(), "tautology");
-            self.flagged.set(midnight::disclose(witnesses.flag));
+            self.flagged.set(nocturne::disclose(witnesses.flag));
         }
 
         // -------------------------------------------------------------
@@ -261,7 +261,7 @@ pub mod kitchen_sink {
         // insert side by side.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn deposit(&mut self, witnesses: &Witnesses) {
             self.balances.insert(witnesses.caller.clone(), witnesses.amount);
             self.members.insert(witnesses.caller.clone());
@@ -273,7 +273,7 @@ pub mod kitchen_sink {
         // lookup).
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn settle_if_present(&mut self, witnesses: &Witnesses) {
             if let Some(_v) = self.balances.get(&witnesses.caller) {
                 self.balances.remove(&witnesses.caller);
@@ -285,7 +285,7 @@ pub mod kitchen_sink {
         // Circuit: match-on-Map::get sugar (Some(v) / None arms).
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn observe_balance(&self, witnesses: &Witnesses) {
             match self.balances.get(&witnesses.caller) {
                 Some(_v) => {
@@ -301,7 +301,7 @@ pub mod kitchen_sink {
         // Circuit: tuple-keyed Map insert + struct-keyed Map contains.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn index_record(&mut self, witnesses: &Witnesses) {
             self.pair_index
                 .insert((witnesses.caller.clone(), witnesses.epoch), witnesses.amount);
@@ -312,7 +312,7 @@ pub mod kitchen_sink {
         // Circuit: MerkleTree::insert + Counter::value() let binding.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn commit(&mut self, witnesses: &Witnesses) {
             self.commits.insert(&witnesses.leaf);
             let _n = self.total_ops.value();
@@ -324,7 +324,7 @@ pub mod kitchen_sink {
         // a message.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn verify_membership(&self, witnesses: &Witnesses) {
             let computed = merkle_tree_path_root(&witnesses.path);
             let _ok = self.commits.check_root(&computed);
@@ -334,7 +334,7 @@ pub mod kitchen_sink {
         // Circuit: const-bounded for-loop unrolling.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn bump_loop(&mut self) {
             for _i in 0..3 {
                 self.total_ops.increment();
@@ -345,10 +345,10 @@ pub mod kitchen_sink {
         // Circuit: assert_eq! over a witness Field disclose.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn record_commit(&mut self, witnesses: &Witnesses) {
             let v = witnesses.commit_value;
-            self.last_commit.set(midnight::disclose(v));
+            self.last_commit.set(nocturne::disclose(v));
         }
 
         // -------------------------------------------------------------
@@ -356,7 +356,7 @@ pub mod kitchen_sink {
         // the 65..=128 arm of `primitive_cast_for_type`.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn store_big(&mut self, witnesses: &Witnesses) {
             self.big_total.set(witnesses.big_amount);
         }
@@ -367,7 +367,7 @@ pub mod kitchen_sink {
         // synthesis of `<T as Default>::default()` for the payload).
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         #[allow(clippy::single_match)]
         pub fn apply_maybe(&mut self, witnesses: &Witnesses) {
             match witnesses.maybe_amount {
@@ -383,7 +383,7 @@ pub mod kitchen_sink {
         // multiplexes the branch result wires via ZKIR `cond_select`.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn pick_one(&mut self, witnesses: &Witnesses) {
             let picked = if witnesses.which.value() {
                 witnesses.option_a
@@ -399,7 +399,7 @@ pub mod kitchen_sink {
         // literal-indexed `ExprIR::Index` entries.
         // -------------------------------------------------------------
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn sum_buckets(&mut self, witnesses: &Witnesses) {
             // Single-element read is enough to exercise the IR variant;
             // the full per-element walk happens at the witness layout
@@ -411,7 +411,7 @@ pub mod kitchen_sink {
         // Query (off-chain, not part of the on-chain transcript).
         // -------------------------------------------------------------
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn ops_so_far(&self) -> u64 {
             self.total_ops.value()
         }
@@ -428,58 +428,58 @@ mod tests {
     // before reaching this assertion, but the explicit calls also pin
     // the public API surface that downstream tools (e.g. midnight-rs)
     // depend on.
-    #[midnight::test]
+    #[nocturne::test]
     fn transcripts_build() {
-        let admin = midnight::types::Bytes::<32>::zeroed();
-        let fee = midnight::types::Uint::<64>::from(100u64);
+        let admin = nocturne::types::Bytes::<32>::zeroed();
+        let fee = nocturne::types::Uint::<64>::from(100u64);
         let _deploy = super::kitchen_sink::deploy::initial_state(admin.clone(), fee);
 
         let witnesses = Witnesses {
             caller: admin.clone(),
-            amount: midnight::types::Uint::<64>::from(7u64),
-            extra: midnight::types::Uint::<64>::from(3u64),
-            epoch: midnight::types::Uint::<32>::from(1u64),
-            leaf: midnight::types::Bytes::<32>::zeroed(),
-            commit_value: midnight::types::Field::from(42u64),
+            amount: nocturne::types::Uint::<64>::from(7u64),
+            extra: nocturne::types::Uint::<64>::from(3u64),
+            epoch: nocturne::types::Uint::<32>::from(1u64),
+            leaf: nocturne::types::Bytes::<32>::zeroed(),
+            commit_value: nocturne::types::Field::from(42u64),
             phase_next: Phase::Active,
-            flag: midnight::types::Boolean::from(true),
+            flag: nocturne::types::Boolean::from(true),
             record: RecordKey {
                 holder: admin.clone(),
-                epoch: midnight::types::Uint::<32>::from(1u64),
+                epoch: nocturne::types::Uint::<32>::from(1u64),
             },
-            big_amount: midnight::types::Uint::<128>::from((1u128 << 96) + 3),
-            maybe_amount: Some(midnight::types::Uint::<64>::from(13u64)),
-            which: midnight::types::Boolean::from(true),
-            option_a: midnight::types::Uint::<64>::from(55u64),
-            option_b: midnight::types::Uint::<64>::from(99u64),
+            big_amount: nocturne::types::Uint::<128>::from((1u128 << 96) + 3),
+            maybe_amount: Some(nocturne::types::Uint::<64>::from(13u64)),
+            which: nocturne::types::Boolean::from(true),
+            option_a: nocturne::types::Uint::<64>::from(55u64),
+            option_b: nocturne::types::Uint::<64>::from(99u64),
             buckets: [
-                midnight::types::Uint::<64>::from(1u64),
-                midnight::types::Uint::<64>::from(2u64),
-                midnight::types::Uint::<64>::from(3u64),
-                midnight::types::Uint::<64>::from(4u64),
+                nocturne::types::Uint::<64>::from(1u64),
+                nocturne::types::Uint::<64>::from(2u64),
+                nocturne::types::Uint::<64>::from(3u64),
+                nocturne::types::Uint::<64>::from(4u64),
             ],
-            path: midnight::types::MerkleTreePath::<5, midnight::types::Bytes<32>> {
-                leaf: midnight::types::Bytes::<32>::zeroed(),
+            path: nocturne::types::MerkleTreePath::<5, nocturne::types::Bytes<32>> {
+                leaf: nocturne::types::Bytes::<32>::zeroed(),
                 path: [
-                    midnight::types::MerkleTreePathEntry {
-                        sibling: midnight::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
-                        goes_left: midnight::types::Boolean::from(false),
+                    nocturne::types::MerkleTreePathEntry {
+                        sibling: nocturne::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
+                        goes_left: nocturne::types::Boolean::from(false),
                     },
-                    midnight::types::MerkleTreePathEntry {
-                        sibling: midnight::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
-                        goes_left: midnight::types::Boolean::from(false),
+                    nocturne::types::MerkleTreePathEntry {
+                        sibling: nocturne::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
+                        goes_left: nocturne::types::Boolean::from(false),
                     },
-                    midnight::types::MerkleTreePathEntry {
-                        sibling: midnight::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
-                        goes_left: midnight::types::Boolean::from(false),
+                    nocturne::types::MerkleTreePathEntry {
+                        sibling: nocturne::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
+                        goes_left: nocturne::types::Boolean::from(false),
                     },
-                    midnight::types::MerkleTreePathEntry {
-                        sibling: midnight::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
-                        goes_left: midnight::types::Boolean::from(false),
+                    nocturne::types::MerkleTreePathEntry {
+                        sibling: nocturne::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
+                        goes_left: nocturne::types::Boolean::from(false),
                     },
-                    midnight::types::MerkleTreePathEntry {
-                        sibling: midnight::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
-                        goes_left: midnight::types::Boolean::from(false),
+                    nocturne::types::MerkleTreePathEntry {
+                        sibling: nocturne::types::MerkleTreeDigest::from_le_bytes([0u8; 32]),
+                        goes_left: nocturne::types::Boolean::from(false),
                     },
                 ],
             },

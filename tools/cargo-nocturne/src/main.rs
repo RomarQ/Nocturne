@@ -4,8 +4,8 @@ use std::process::Command;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // When invoked as `cargo midnight`, cargo passes "midnight" as argv[1].
-    let subcommand = if args.get(1).map(|s| s.as_str()) == Some("midnight") {
+    // When invoked as `cargo nocturne`, cargo passes "nocturne" as argv[1].
+    let subcommand = if args.get(1).map(|s| s.as_str()) == Some("nocturne") {
         args.get(2).map(|s| s.as_str())
     } else {
         args.get(1).map(|s| s.as_str())
@@ -16,11 +16,11 @@ fn main() {
         Some("keygen") => cmd_keygen(),
         Some("test") => cmd_test(),
         Some("deploy") => {
-            eprintln!("cargo-midnight: deploy not yet implemented");
+            eprintln!("cargo-nocturne: deploy not yet implemented");
             std::process::exit(1);
         }
         Some(other) => {
-            eprintln!("cargo-midnight: unknown subcommand '{other}'");
+            eprintln!("cargo-nocturne: unknown subcommand '{other}'");
             std::process::exit(1);
         }
         None => print_usage(),
@@ -28,9 +28,9 @@ fn main() {
 }
 
 fn print_usage() {
-    println!("cargo-midnight: Midnight smart contract build tool");
+    println!("cargo-nocturne: Midnight smart contract build tool");
     println!();
-    println!("Usage: cargo midnight <command>");
+    println!("Usage: cargo nocturne <command>");
     println!();
     println!("Commands:");
     println!("  build    Compile contract, emit ZKIR + contract-info.json");
@@ -57,17 +57,17 @@ fn cmd_build() {
     }
 
     let target_dir = find_target_dir();
-    let midnight_dir = target_dir.join("midnight");
+    let nocturne_dir = target_dir.join("nocturne");
 
-    if !midnight_dir.exists() {
+    if !nocturne_dir.exists() {
         println!("Build succeeded. No contract artifacts found.");
-        println!("Tip: artifacts are generated when a crate uses #[midnight::contract].");
+        println!("Tip: artifacts are generated when a crate uses #[nocturne::contract].");
         return;
     }
 
     let mut found = false;
     let mut needs_keygen: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&midnight_dir) {
+    if let Ok(entries) = std::fs::read_dir(&nocturne_dir) {
         for entry in entries.flatten() {
             if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 continue;
@@ -105,7 +105,7 @@ fn cmd_build() {
         return;
     }
 
-    println!("\nArtifacts at: {}", midnight_dir.display());
+    println!("\nArtifacts at: {}", nocturne_dir.display());
 
     if needs_keygen.is_empty() {
         println!("Keys are up to date.");
@@ -153,23 +153,23 @@ fn keys_need_update(zkir_path: &Path) -> bool {
     }
 }
 
-/// Run `IrSource::keygen()` on every .zkir file under `target/midnight/`.
+/// Run `IrSource::keygen()` on every .zkir file under `target/nocturne/`.
 /// Unlike `cmd_build`, this re-keygens unconditionally — useful when
 /// the universal setup params change or you want to refresh stale keys.
 fn cmd_keygen() {
     let target_dir = find_target_dir();
-    let midnight_dir = target_dir.join("midnight");
+    let nocturne_dir = target_dir.join("nocturne");
 
-    if !midnight_dir.exists() {
-        eprintln!("No midnight artifacts found. Run `cargo midnight build` first.");
+    if !nocturne_dir.exists() {
+        eprintln!("No nocturne artifacts found. Run `cargo nocturne build` first.");
         std::process::exit(1);
     }
 
     let mut zkir_files = Vec::new();
-    find_zkir_files(&midnight_dir, &mut zkir_files);
+    find_zkir_files(&nocturne_dir, &mut zkir_files);
 
     if zkir_files.is_empty() {
-        eprintln!("No .zkir files found in {}", midnight_dir.display());
+        eprintln!("No .zkir files found in {}", nocturne_dir.display());
         std::process::exit(1);
     }
 
@@ -268,7 +268,7 @@ fn load_and_keygen(path: &Path) -> Result<(u8, usize), Box<dyn std::error::Error
         let (pk, vk) = ir.keygen(&pp).await?;
 
         // Write key files to a sibling `keys/` directory, matching the
-        // compactc layout (`target/midnight/<contract>/{zkir,compiler,keys}/`).
+        // compactc layout (`target/nocturne/<contract>/{zkir,compiler,keys}/`).
         // Downstream tooling expects prover/verifier files separated from
         // the ZKIR sources, not interleaved with them.
         let zkir_dir = path.parent().unwrap();

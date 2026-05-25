@@ -1,7 +1,7 @@
 # `Map::get(&K) -> Option<V>` — parser-level contains+lookup sugar
 
 **Discovered/implemented**: 2026-05-19
-**Status**: Implemented. The parser detects `if let Some(v) = self.<map>.get(&k) { body }` and rewrites the IR to `if self.<map>.contains(&k) { let v = self.<map>.lookup(&k); body }`. Tests: `map_get_sugar_{present,absent}_proves_and_verifies` and the underlying `safe_get_{present,absent}` in `crates/midnight/tests/ledger_integration_test.rs`.
+**Status**: Implemented. The parser detects `if let Some(v) = self.<map>.get(&k) { body }` and rewrites the IR to `if self.<map>.contains(&k) { let v = self.<map>.lookup(&k); body }`. Tests: `map_get_sugar_{present,absent}_proves_and_verifies` and the underlying `safe_get_{present,absent}` in `crates/nocturne/tests/ledger_integration_test.rs`.
 
 ## Why `Map::get` can't be a single opcode
 
@@ -19,7 +19,7 @@ if let Some(<v>) = self.<map_field>.get(<key>) { body }
 
 ## Why the user-source still compiles as plain Rust
 
-The macro keeps the user's original module intact (it only adds the `transcript` submodule alongside). The user's `if let Some(v) = self.map.get(&k)` is plain Rust against `Map::get -> Option<V>` from `crates/midnight-storage/src/map.rs`. Type-checking happens normally; the rewrite only affects the generated transcript builder and the ZKIR emission.
+The macro keeps the user's original module intact (it only adds the `transcript` submodule alongside). The user's `if let Some(v) = self.map.get(&k)` is plain Rust against `Map::get -> Option<V>` from `crates/nocturne-storage/src/map.rs`. Type-checking happens normally; the rewrite only affects the generated transcript builder and the ZKIR emission.
 
 ## Required substrate
 
@@ -40,7 +40,7 @@ All four shapes lower to the same `if contains(k) { let v = lookup(k); ... } els
 
 ## Verified key/value type matrix
 
-The sugar composes cleanly with multi-Fr key and value encodings — no fixes were needed beyond the existing [[conditional-io-guards]] and multi-Fr Map work. Tests in `crates/midnight/tests/ledger_integration_test.rs`:
+The sugar composes cleanly with multi-Fr key and value encodings — no fixes were needed beyond the existing [[conditional-io-guards]] and multi-Fr Map work. Tests in `crates/nocturne/tests/ledger_integration_test.rs`:
 
 | K | V | Tests |
 |---|---|---|
@@ -57,4 +57,4 @@ Each test exercises both the active path (key present → lookup fires) and the 
 - The else / None arm can't access `v` (it's only bound inside the Some/then branch).
 - Match arms with guards (`Some(v) if pred(v) =>`) aren't recognized — a guard could refuse the lookup despite contains=true, breaking the soundness of the rewrite.
 - Only the binary Some+None match is supported; richer patterns (`Some(0) => ..., Some(_) => ..., None => ...`) fall through to `Unsupported`.
-- The user-source still needs the storage-layer `Map::get` method (`crates/midnight-storage/src/map.rs`) so the Rust type check passes; we deliberately don't strip it.
+- The user-source still needs the storage-layer `Map::get` method (`crates/nocturne-storage/src/map.rs`) so the Rust type check passes; we deliberately don't strip it.

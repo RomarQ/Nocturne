@@ -26,16 +26,6 @@ chain.
 **Unblocker**: confirmation from `midnight-foundation` of the canonical Kernel
 slot index + the on-chain runtime injection contract.
 
-## Crate rename `midnight-* → nocturne-*`
-
-**Blocker**: explicit project policy.
-
-`CLAUDE.md` says: "When editing manifests, leave the name as-is — don't
-preemptively rename." The rename is sequenced by the project owner; don't
-start it autonomously.
-
-**Unblocker**: explicit owner instruction.
-
 ## Enum sum types with HETEROGENEOUS payloads
 
 **Status**: homogeneous-payload variants landed in commit 27c8228.
@@ -94,7 +84,7 @@ These were on prior "remaining items" lists and were resolved in-tree:
 - let-bindings carrying witness reads, witness arithmetic, and ledger
   reads (commits f53d5e9 + f2ac5bf + 9a07b66).
 - `as` cast as a transparent IR passthrough (commit fd0f123).
-- `midnight::disclose` runtime stub + `ExprIR::Tuple` arg lowering (commit
+- `nocturne::disclose` runtime stub + `ExprIR::Tuple` arg lowering (commit
   b612508).
 - `Uint<N>` audit for `64 < N ≤ 128` (commit 3efaeb5). The codegen was
   already generic; the commit added the `as u128` cast branch + a
@@ -113,3 +103,10 @@ These were on prior "remaining items" lists and were resolved in-tree:
   multiplexes branch result wires via ZKIR `cond_select` and emits a
   Rust `if`-expression on the transcript side. Statement-only branches
   keep the prior if-as-statement behaviour.
+- Crate rename `midnight-* → nocturne-*` (commits c35e9fa + this
+  commit). Stage A renamed the ten internal crates and dropped the
+  upstream `midnight-storage` collision. Stage B renamed the umbrella
+  crate `midnight → nocturne`, the `#[midnight(...)]` attribute
+  namespace to `#[nocturne(...)]`, the `cargo midnight` subcommand to
+  `cargo nocturne`, and the `target/midnight/` artifact directory to
+  `target/nocturne/`.

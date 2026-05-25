@@ -1,26 +1,26 @@
 //! Integration test: a more complex contract with witnesses, if/else,
 //! and multiple circuit functions.
 
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod ballot {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct Ballot {
         votes_for: Counter,
         votes_against: Counter,
         has_ended: Cell<bool>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BallotWitnesses {
         pub vote_choice: Boolean,
     }
 
     impl Ballot {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 votes_for: Counter::zero(),
@@ -29,7 +29,7 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
             if witnesses.vote_choice.value() {
                 self.votes_for.increment();
@@ -38,24 +38,24 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn end_ballot(&mut self) {
             self.has_ended.set(true);
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn get_tally(&self) -> (u64, u64) {
             (self.votes_for.value(), self.votes_against.value())
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn is_ended(&self) -> bool {
             self.has_ended.get()
         }
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn test_voting_flow() {
     let mut state = ballot::Ballot::new();
 

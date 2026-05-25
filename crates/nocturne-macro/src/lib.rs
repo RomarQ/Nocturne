@@ -1,6 +1,6 @@
 //! Procedural macros for nocturne.
 //!
-//! Provides `#[midnight::contract]` and `#[midnight::test]` attribute macros.
+//! Provides `#[nocturne::contract]` and `#[nocturne::test]` attribute macros.
 
 use proc_macro::TokenStream;
 
@@ -90,7 +90,7 @@ pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     output.into()
 }
 
-/// Strip all `#[midnight(...)]` attributes from a module's items.
+/// Strip all `#[nocturne(...)]` attributes from a module's items.
 fn strip_midnight_attrs_from_module(mut module: syn::ItemMod) -> syn::ItemMod {
     if let Some((brace, ref mut items)) = module.content {
         let cleaned_items: Vec<syn::Item> = items.drain(..).map(strip_item_attrs).collect();
@@ -131,7 +131,7 @@ fn strip_item_attrs(item: syn::Item) -> syn::Item {
 }
 
 fn is_midnight_attr(attr: &syn::Attribute) -> bool {
-    attr.path().is_ident("midnight")
+    attr.path().is_ident("nocturne")
 }
 
 fn find_artifact_dir(contract_name: &str) -> std::path::PathBuf {
@@ -151,7 +151,7 @@ fn find_artifact_dir(contract_name: &str) -> std::path::PathBuf {
         })
         .unwrap_or_else(|_| "target".to_string());
     std::path::PathBuf::from(target)
-        .join("midnight")
+        .join("nocturne")
         .join(contract_name)
 }
 
@@ -191,7 +191,7 @@ fn write_artifacts(
 /// Write `content` to `path` only when the existing content differs.
 /// Stops the proc macro from touching `.zkir` and `contract-info.json`
 /// on every build — without this, downstream tools that key off file
-/// mtimes (e.g. `cargo midnight build`'s "is this circuit's keygen
+/// mtimes (e.g. `cargo nocturne build`'s "is this circuit's keygen
 /// stale?" check) would re-run on every invocation even when nothing
 /// actually changed.
 fn write_if_changed(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {

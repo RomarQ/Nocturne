@@ -6,10 +6,10 @@ Nocturne is an embedded DSL in Rust for **writing** Midnight smart contracts. It
 
 ## In scope
 
-- The `#[midnight::contract]` proc-macro frontend
+- The `#[nocturne::contract]` proc-macro frontend
 - ZKIR generation (`crates/nocturne-codegen`)
 - Compile-time transcript-builder generation
-- `keygen` (via `cargo midnight keygen` → midnight-zkir)
+- `keygen` (via `cargo nocturne keygen` → midnight-zkir)
 - `contract-info.json` matching Compact's schema
 - Type system: ledger types (Counter, Cell, Map, MerkleTree, ...), witness types (Boolean, Field, Uint<N>, Bytes<N>)
 - Compile-time correctness checks and clear errors for unsupported patterns
@@ -21,12 +21,12 @@ Nocturne is an embedded DSL in Rust for **writing** Midnight smart contracts. It
 - Building transactions (`Intent::add_call`, transaction signing)
 - Wallet management
 - Node RPC / indexer queries
-- `cargo midnight deploy` / `cargo midnight call` CLI commands
+- `cargo nocturne deploy` / `cargo nocturne call` CLI commands
 
 Anything that talks to a running Midnight node belongs in a downstream tool such as [`midnight-rs`](https://github.com/RomarQ/midnight-rs) or Compact's TypeScript runtime.
 
 ## How to apply
 
 - When prioritizing work, weight features that improve **authoring** (more types, better errors, more language patterns supported). Deprioritize anything that touches transaction construction or node RPC.
-- When validating "is this on-chain compatible," reach for `crates/midnight/tests/ledger_integration_test.rs` (drives Nocturne artifacts through midnight-ledger's canonical code path). Don't propose standing up a Midnight node.
+- When validating "is this on-chain compatible," reach for `crates/nocturne/tests/ledger_integration_test.rs` (drives Nocturne artifacts through midnight-ledger's canonical code path). Don't propose standing up a Midnight node.
 - When a user asks "how do I deploy this," point them at midnight-rs or another SDK — don't propose building deployment into Nocturne.

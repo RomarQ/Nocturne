@@ -19,18 +19,18 @@ mod tests {
     fn counter_increment_encodes_transcript_ops() {
         let circuits = compile_circuits(quote::quote! {
             mod counter {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct CounterState {
                     count: Counter,
                 }
 
                 impl CounterState {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { count: Counter::zero() }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn increment(&mut self) {
                         self.count.increment();
                     }
@@ -82,14 +82,14 @@ mod tests {
     fn print_counter_zkir() {
         let circuits = compile_circuits(quote::quote! {
             mod counter {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct CounterState {
                     count: Counter,
                 }
                 impl CounterState {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { count: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn increment(&mut self) { self.count.increment(); }
                 }
             }
@@ -103,18 +103,18 @@ mod tests {
     fn zkir_roundtrip_json() {
         let circuits = compile_circuits(quote::quote! {
             mod counter {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct CounterState {
                     count: Counter,
                 }
 
                 impl CounterState {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { count: Counter::zero() }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn increment(&mut self) {
                         self.count.increment();
                     }
@@ -141,23 +141,23 @@ mod tests {
     fn witness_access_emits_private_input() {
         let circuits = compile_circuits(quote::quote! {
             mod secret {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     value: Cell,
                 }
 
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct Witnesses {
                     secret: Field,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { value: Cell::new(0) }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn use_secret(&mut self, witnesses: &Witnesses) {
                         let s = witnesses.secret;
                         self.value.set(s);
@@ -179,18 +179,18 @@ mod tests {
     fn assert_eq_emits_constrain_eq() {
         let circuits = compile_circuits(quote::quote! {
             mod constrained {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     x: Counter,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { x: Counter::zero() }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn check(&mut self) {
                         let a = 42;
                         let b = 42;
@@ -213,23 +213,23 @@ mod tests {
     fn persistent_hash_emits_instruction() {
         let circuits = compile_circuits(quote::quote! {
             mod hashing {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     commitment: Cell,
                 }
 
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct Witnesses {
                     secret: Field,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { commitment: Cell::new(0) }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn commit(&mut self, witnesses: &Witnesses) {
                         let hash = persistent_hash(witnesses.secret);
                         self.commitment.set(hash);
@@ -251,18 +251,18 @@ mod tests {
     fn ledger_read_emits_public_input() {
         let circuits = compile_circuits(quote::quote! {
             mod reader {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     value: Cell,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { value: Cell::new(0) }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn read_it(&mut self) {
                         let v = self.value.get();
                     }
@@ -293,20 +293,20 @@ mod tests {
     fn disclose_emits_declare_pub_input() {
         let circuits = compile_circuits(quote::quote! {
             mod disclosing {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     threshold: Cell,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { threshold: Cell::new(0) }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn reveal(&mut self) {
-                        self.threshold.set(midnight::disclose(42));
+                        self.threshold.set(nocturne::disclose(42));
                     }
                 }
             }
@@ -343,29 +343,29 @@ mod tests {
         // conditional branches, public arg, multi-circuit contract.
         let circuits = compile_circuits(quote::quote! {
             mod shapes {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     count: Counter,
                     flag: Cell<bool>,
                 }
 
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct Witnesses {
                     pub choice: Boolean,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { count: Counter::zero(), flag: Cell::new(false) }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn increment(&mut self) {
                         self.count.increment();
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn cast(&mut self, witnesses: &Witnesses) {
                         if witnesses.choice.value() {
                             self.count.increment();
@@ -374,7 +374,7 @@ mod tests {
                         }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn get_count(&self) -> u64 {
                         self.count.value()
                     }

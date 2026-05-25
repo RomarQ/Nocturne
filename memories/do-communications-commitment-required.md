@@ -34,4 +34,4 @@ If a circuit was generated with `do_communications_commitment: false`, its verif
 ## Tests that catch a regression
 
 - `every_circuit_emits_communications_commitment_slot` — unit test on the emitter.
-- `counter_ledger_constructed_preimage_proves_and_verifies` in `crates/midnight/tests/ledger_integration_test.rs` — goes through the canonical `ContractCallExt::construct_proof` path and would fail at verify time.
+- `counter_ledger_constructed_preimage_proves_and_verifies` in `crates/nocturne/tests/ledger_integration_test.rs` — goes through the canonical `ContractCallExt::construct_proof` path and would fail at verify time.

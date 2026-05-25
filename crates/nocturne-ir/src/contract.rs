@@ -23,7 +23,7 @@ pub struct ContractIR {
     /// All other items in the module (passed through unchanged).
     pub other_items: Vec<syn::Item>,
     /// User-defined `struct` items in the contract module that don't
-    /// carry a `#[midnight(...)]` annotation. Indexed by the struct's
+    /// carry a `#[nocturne(...)]` annotation. Indexed by the struct's
     /// outer ident; each entry is the named-field list in declaration
     /// order. Used by codegen to layout user structs as Map/Set keys
     /// (treats them like a named tuple of their fields).
@@ -56,7 +56,7 @@ pub struct UserEnumVariant {
     pub payload: Option<Type>,
 }
 
-/// IR for the `#[midnight(ledger)]` struct.
+/// IR for the `#[nocturne(ledger)]` struct.
 #[derive(Debug)]
 pub struct LedgerIR {
     pub span: Span,
@@ -101,7 +101,7 @@ impl LedgerTypeKind {
     }
 }
 
-/// IR for the `#[midnight(witnesses)]` struct.
+/// IR for the `#[nocturne(witnesses)]` struct.
 #[derive(Debug)]
 pub struct WitnessIR {
     pub span: Span,
@@ -117,7 +117,7 @@ pub struct WitnessFieldIR {
     pub ty: Type,
 }
 
-/// IR for a `#[midnight(constructor)]` function.
+/// IR for a `#[nocturne(constructor)]` function.
 #[derive(Debug)]
 pub struct ConstructorIR {
     pub span: Span,
@@ -126,7 +126,7 @@ pub struct ConstructorIR {
     pub body: Vec<ExprIR>,
 }
 
-/// IR for a `#[midnight(circuit)]` function.
+/// IR for a `#[nocturne(circuit)]` function.
 #[derive(Debug)]
 pub struct CircuitIR {
     pub span: Span,
@@ -145,7 +145,7 @@ pub struct CircuitIR {
     pub return_type: Option<Type>,
 }
 
-/// IR for a `#[midnight(query)]` function.
+/// IR for a `#[nocturne(query)]` function.
 #[derive(Debug)]
 pub struct QueryIR {
     pub span: Span,

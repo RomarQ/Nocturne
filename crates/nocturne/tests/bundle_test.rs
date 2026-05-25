@@ -1,41 +1,41 @@
 //! Test the ContractBundle API.
 
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         pub count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn test_bundle_creation() {
     let module: syn::ItemMod = syn::parse_quote! {
         mod counter {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct CounterState { count: Counter }
             impl CounterState {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn increment(&mut self) { self.count.increment(); }
             }
         }

@@ -56,9 +56,9 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                     let aligned = cell_aligned_value_expr(inner.as_ref(), &accessor, user_enums);
                     quote! {
                         {
-                            use midnight::runtime::base_crypto::fab::AlignedValue;
-                            use midnight::runtime::onchain_state::state::StateValue;
-                            use midnight::runtime::storage::arena::Sp;
+                            use nocturne::runtime::base_crypto::fab::AlignedValue;
+                            use nocturne::runtime::onchain_state::state::StateValue;
+                            use nocturne::runtime::storage::arena::Sp;
                             fields.push(StateValue::Cell(Sp::new(AlignedValue::from(#aligned))));
                         }
                     }
@@ -77,10 +77,10 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                         .expect("MerkleTree<H, T> field must declare H as a const literal");
                     quote! {
                         {
-                            use midnight::runtime::base_crypto::fab::AlignedValue;
-                            use midnight::runtime::onchain_state::state::StateValue;
-                            use midnight::runtime::storage::arena::Sp;
-                            let blank_tree = midnight::runtime::transient_crypto::merkle_tree::MerkleTree::<()>::blank(#height).rehash();
+                            use nocturne::runtime::base_crypto::fab::AlignedValue;
+                            use nocturne::runtime::onchain_state::state::StateValue;
+                            use nocturne::runtime::storage::arena::Sp;
+                            let blank_tree = nocturne::runtime::transient_crypto::merkle_tree::MerkleTree::<()>::blank(#height).rehash();
                             let inner: Vec<StateValue> = vec![
                                 StateValue::BoundedMerkleTree(blank_tree),
                                 StateValue::Cell(Sp::new(AlignedValue::from(0u64))),
@@ -104,16 +104,16 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
     quote! {
         /// Generated deployment helpers.
         pub mod deploy {
-            // Pull in `midnight::types` (Bytes / Uint / Field / ...) and the
+            // Pull in `nocturne::types` (Bytes / Uint / Field / ...) and the
             // user's contract module so generated patterns can name the user's
             // own enums and structs (e.g. `Action::Mint` in a payload-enum
             // initializer). Without `use super::*` deploy can't resolve the
             // user-defined types.
             #[allow(unused_imports)]
-            use midnight::types::*;
+            use nocturne::types::*;
             #[allow(unused_imports)]
             use super::*;
-            use midnight::runtime::onchain_state::state::StateValue;
+            use nocturne::runtime::onchain_state::state::StateValue;
 
             /// Construct the initial contract state by calling the user
             /// constructor and encoding each ledger field as a
@@ -150,11 +150,11 @@ fn cell_aligned_value_expr(
         return quote! { *(#accessor).as_bytes() };
     }
     if s == "Field" {
-        return quote! { midnight::runtime::transient_crypto::curve::Fr::from((#accessor).value()) };
+        return quote! { nocturne::runtime::transient_crypto::curve::Fr::from((#accessor).value()) };
     }
     if s == "MerkleTreeDigest" {
         return quote! {
-            midnight::runtime::transient_crypto::curve::Fr::from_le_bytes(&(#accessor).as_le_bytes())
+            nocturne::runtime::transient_crypto::curve::Fr::from_le_bytes(&(#accessor).as_le_bytes())
                 .expect("MerkleTreeDigest bytes round-trip through Fr")
         };
     }

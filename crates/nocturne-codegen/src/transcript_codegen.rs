@@ -66,12 +66,12 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
         /// Generated transcript builders for contract circuits.
         pub mod transcript {
             use super::*;
-            use midnight::runtime::onchain_vm::result_mode::ResultModeVerify;
-            use midnight::runtime::onchain_vm::ops::{Op, Key};
-            use midnight::runtime::onchain_state::state::StateValue;
-            use midnight::runtime::transient_crypto::curve::Fr;
-            use midnight::runtime::base_crypto::fab::AlignedValue;
-            use midnight::runtime::storage::arena::Sp;
+            use nocturne::runtime::onchain_vm::result_mode::ResultModeVerify;
+            use nocturne::runtime::onchain_vm::ops::{Op, Key};
+            use nocturne::runtime::onchain_state::state::StateValue;
+            use nocturne::runtime::transient_crypto::curve::Fr;
+            use nocturne::runtime::base_crypto::fab::AlignedValue;
+            use nocturne::runtime::storage::arena::Sp;
 
             /// Type alias for verify-mode operations.
             pub type VmOp = Op<ResultModeVerify>;
@@ -525,7 +525,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
             if witness_ty.map(is_bytes_witness).unwrap_or(false) {
                 quote! {
                     {
-                        use midnight::runtime::transient_crypto::fab::AlignedValueExt;
+                        use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
                         let __av = AlignedValue::from(*witnesses.#field_ident.as_bytes());
                         __av.value_only_field_repr(&mut private_transcript);
                     }
@@ -545,7 +545,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
             } else if witness_ty.map(is_merkle_tree_path).unwrap_or(false) {
                 quote! {
                     {
-                        use midnight::runtime::transient_crypto::fab::AlignedValueExt;
+                        use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
                         // Leaf: same multi-Fr push as a Bytes<N> witness.
                         let __av = AlignedValue::from(
                             *witnesses.#field_ident.leaf.as_bytes()
@@ -660,7 +660,7 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         .first()
                         .map(arg_to_runtime_raw_expr)
                         .unwrap_or_else(|| quote! { () });
-                    quote! { midnight::types::merkle_tree_path_root(&#arg) }
+                    quote! { nocturne::types::merkle_tree_path_root(&#arg) }
                 }
                 _ => quote! { () },
             };
@@ -1324,7 +1324,7 @@ fn component_private_push(
     if ty_str.starts_with("Bytes<") {
         return quote! {
             {
-                use midnight::runtime::transient_crypto::fab::AlignedValueExt;
+                use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
                 let __av = AlignedValue::from(*(#accessor).as_bytes());
                 __av.value_only_field_repr(&mut private_transcript);
             }
@@ -2044,7 +2044,7 @@ fn generate_merkle_tree_insert(field_idx: u8, args: &[ExprIR]) -> TokenStream {
             // domain separator and persistent_hash. The HashOutput is
             // [u8; 32]; AlignedValue::from([u8; 32]) gives the Bytes<32>
             // alignment the IR's Push declares expect.
-            let __leaf_hash: [u8; 32] = midnight::runtime::transient_crypto::merkle_tree::leaf_hash(
+            let __leaf_hash: [u8; 32] = nocturne::runtime::transient_crypto::merkle_tree::leaf_hash(
                 __leaf.as_bytes().as_slice()
             ).0;
             ops.push(Op::Idx {
@@ -2238,8 +2238,8 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
                         .map(arg_to_runtime_raw_expr)
                         .unwrap_or_else(|| quote! { () });
                     // The off-chain helper lives in midnight-storage; the
-                    // umbrella crate re-exports it via `midnight::types`.
-                    quote! { midnight::types::merkle_tree_path_root(&#arg) }
+                    // umbrella crate re-exports it via `nocturne::types`.
+                    quote! { nocturne::types::merkle_tree_path_root(&#arg) }
                 }
                 _ => quote! { () },
             }

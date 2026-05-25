@@ -35,7 +35,7 @@ ops.push(Op::Ins  { cached: false, n: 1 });
 
 ### Verified by
 
-`crates/midnight/tests/ledger_integration_test.rs::flag_raise_proves_and_verifies` — a `Cell<bool>::set(true)` circuit that:
+`crates/nocturne/tests/ledger_integration_test.rs::flag_raise_proves_and_verifies` — a `Cell<bool>::set(true)` circuit that:
 1. constructs through `ContractCallExt::construct_proof`
 2. `ir.prove(...)` returns PIs matching `[binding_input, comm, ..field_repr(transcript)]`
 3. `vk.verify(...)` accepts those ledger-shape PIs.
@@ -130,6 +130,6 @@ lookup,remove}_proves_and_verifies` for `Map<Bytes<32>, Uint<64>>`.
 
 - IR emission: `crates/nocturne-codegen/src/zkir_emitter.rs::emit_ledger_write` + `emit_push_cell` + `aligned_value_encoding` table
 - Transcript emission: `crates/nocturne-codegen/src/transcript_codegen.rs`, `"set"` arm + `arg_to_runtime_expr`
-- E2E test: `crates/midnight/tests/ledger_integration_test.rs::flag_raise_proves_and_verifies`
+- E2E test: `crates/nocturne/tests/ledger_integration_test.rs::flag_raise_proves_and_verifies`
 - Empirical compactc reference: `/tmp/compact-voting/zkir/end_ballot.zkir` (build with `compactc /tmp/voting.compact /tmp/compact-voting`)
 - Related: `memories/map-ledger-field-encoding.md`

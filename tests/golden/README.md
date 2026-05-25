@@ -1,7 +1,7 @@
 # Golden files: equivalence with `compactc`
 
 This directory holds the artifacts compactc produces for a small contract.
-CI verifies that Nocturne's `cargo midnight build` + `keygen` pipeline
+CI verifies that Nocturne's `cargo nocturne build` + `keygen` pipeline
 produces the **same verifier key** (byte-for-byte) for the same contract.
 
 If they match, the two compilers emit mathematically identical Plonk

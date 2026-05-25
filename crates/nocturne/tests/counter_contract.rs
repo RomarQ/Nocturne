@@ -1,38 +1,38 @@
-//! Integration test: verify that the #[midnight::contract] macro
+//! Integration test: verify that the #[nocturne::contract] macro
 //! accepts and compiles a counter contract.
 
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn get_count(&self) -> u64 {
             self.count.value()
         }
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn test_counter_works() {
     let mut state = counter::CounterState::new();
     assert_eq!(state.get_count(), 0);

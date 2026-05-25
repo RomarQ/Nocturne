@@ -46,14 +46,14 @@ ContractCall transaction: address + entry_point + transcripts + proof
 ### 1.3 Artifacts
 
 nocturne produces:
-- `zkir/<circuit>.zkir` -- ZKIR v2 JSON per circuit (one file per `#[midnight(circuit)]` method, deserialised by `IrSource::load()` downstream).
+- `zkir/<circuit>.zkir` -- ZKIR v2 JSON per circuit (one file per `#[nocturne(circuit)]` method, deserialised by `IrSource::load()` downstream).
 - `compiler/contract-info.json` -- metadata describing the contract's external surface (circuit signatures, witness declarations, types).
 - In-source `pub mod transcript` and `pub mod deploy` submodules injected into the user's contract module -- typed Rust runtime code that builds the on-chain transcript and `ProofPreimage` at call time, and constructs the initial `StateValue` at deploy time.
-- After `cargo midnight keygen`: `keys/<circuit>.{prover,verifier}` -- Plonk keys derived from each `.zkir`.
+- After `cargo nocturne keygen`: `keys/<circuit>.{prover,verifier}` -- Plonk keys derived from each `.zkir`.
 
 ### 1.4 Design Principles
 
-1. **Privacy as a first-class concern.** The dual public/private state model is structural: `#[midnight(ledger)]` for public state, `#[midnight(witnesses)]` for private state.
+1. **Privacy as a first-class concern.** The dual public/private state model is structural: `#[nocturne(ledger)]` for public state, `#[nocturne(witnesses)]` for private state.
 
 2. **Rust-native.** Developers write valid Rust. Standard tooling works. No TypeScript, no Scheme, no external compiler.
 
@@ -84,27 +84,27 @@ nocturne produces:
 ### 2.1 Example: Counter Contract
 
 ```rust
-#[midnight::contract]
+#[nocturne::contract]
 mod counter {
-    use midnight::types::*;
+    use nocturne::types::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         count: Counter,
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self { count: Counter::zero() }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn get_count(&self) -> u64 {
             self.count.value()
         }
@@ -115,25 +115,25 @@ mod counter {
 ### 2.2 Example: Private Voting Contract
 
 ```rust
-#[midnight::contract]
+#[nocturne::contract]
 mod ballot {
-    use midnight::types::*;
+    use nocturne::types::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct Ballot {
         votes_for: Counter,
         votes_against: Counter,
         voters: MerkleTree<32>,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct BallotWitnesses {
         pub voter_secret: Field,
         pub vote_choice: Boolean,
     }
 
     impl Ballot {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 votes_for: Counter::zero(),
@@ -142,7 +142,7 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
             let commitment = persistent_hash(&witnesses.voter_secret);
             assert_member(&self.voters, &commitment);
@@ -153,12 +153,12 @@ mod ballot {
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn register_voter(&mut self, commitment: Bytes<32>) {
             self.voters.insert(&commitment);
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn get_tally(&self) -> (u64, u64) {
             (self.votes_for.value(), self.votes_against.value())
         }
@@ -174,21 +174,21 @@ mod ballot {
 
 | Attribute | Applies To | Description |
 |---|---|---|
-| `#[midnight::contract]` | `mod` | Marks a module as a contract |
-| `#[midnight(ledger)]` | `struct` | Public on-chain state |
-| `#[midnight(witnesses)]` | `struct` | Private off-chain state |
-| `#[midnight(circuit)]` | `fn` in impl | Transition function (generates proof) |
-| `#[midnight(constructor)]` | `fn` in impl | Contract deployment initializer |
-| `#[midnight(query)]` | `fn` in impl | Read-only view (no proof) |
-| `#[midnight(state_type)]` | `struct`/`enum` | Custom ADT for ledger/circuits |
+| `#[nocturne::contract]` | `mod` | Marks a module as a contract |
+| `#[nocturne(ledger)]` | `struct` | Public on-chain state |
+| `#[nocturne(witnesses)]` | `struct` | Private off-chain state |
+| `#[nocturne(circuit)]` | `fn` in impl | Transition function (generates proof) |
+| `#[nocturne(constructor)]` | `fn` in impl | Contract deployment initializer |
+| `#[nocturne(query)]` | `fn` in impl | Read-only view (no proof) |
+| `#[nocturne(state_type)]` | `struct`/`enum` | Custom ADT for ledger/circuits |
 
 ### 3.2 Validation Rules
 
-1. Exactly one `#[midnight(ledger)]` struct.
-2. At most one `#[midnight(witnesses)]` struct.
-3. At least one `#[midnight(circuit)]` or `#[midnight(constructor)]`.
+1. Exactly one `#[nocturne(ledger)]` struct.
+2. At most one `#[nocturne(witnesses)]` struct.
+3. At least one `#[nocturne(circuit)]` or `#[nocturne(constructor)]`.
 4. Witness parameters must use the declared witnesses struct.
-5. Ledger fields must use `midnight::types` types.
+5. Ledger fields must use `nocturne::types` types.
 6. Witness fields must be ZK-representable.
 7. Queries take `&self` only.
 8. Constructors return `Self`.
@@ -228,7 +228,7 @@ mod ballot {
 
 ### 5.1 Compile-Time (Proc Macro)
 
-The `#[midnight::contract]` macro:
+The `#[nocturne::contract]` macro:
 
 1. **Parses** the module into internal IR (`ContractIR`, `LedgerIR`, `WitnessIR`, `CircuitIR`, `ExprIR`).
 2. **Validates** against Section 3.2 rules.
@@ -240,14 +240,14 @@ The `#[midnight::contract]` macro:
 ### 5.2 Artifacts
 
 ```
-target/midnight/<contract>/
+target/nocturne/<contract>/
   zkir/
     <circuit>.zkir              # ZKIR v2 JSON (IrSource)
   compiler/
     contract-info.json          # Metadata (circuit signatures, witness types)
 ```
 
-After `cargo midnight keygen`:
+After `cargo nocturne keygen`:
 ```
   keys/
     <circuit>.prover            # Plonk prover key
@@ -256,7 +256,7 @@ After `cargo midnight keygen`:
 
 ### 5.3 ZKIR Generation
 
-Each `#[midnight(circuit)]` function compiles to an `IrSource`:
+Each `#[nocturne(circuit)]` function compiles to an `IrSource`:
 
 ```rust
 IrSource {
@@ -284,7 +284,7 @@ IrSource {
 | Public argument | `PublicInput { guard }` | 1 (public value) |
 | `persistent_hash(&x)` | `PersistentHash { alignment, inputs }` | 1 (hash) |
 | `transient_hash(&x)` | `TransientHash { inputs }` | 1 (hash) |
-| `midnight::disclose(v)` | `DeclarePubInput { var }` + `PiSkip` | 0 |
+| `nocturne::disclose(v)` | `DeclarePubInput { var }` + `PiSkip` | 0 |
 | `Uint<N>` constraint | `ConstrainBits { var, bits: N }` | 0 |
 | `Boolean` constraint | `ConstrainToBoolean { var }` | 0 |
 | Circuit output | `Output { var }` | 0 (adds to comm. commitment) |
@@ -352,8 +352,8 @@ Format:
 
 ### 6.1 Two Worlds
 
-- **Ledger** (`#[midnight(ledger)]`): on-chain, public, updated via verified transcripts.
-- **Witnesses** (`#[midnight(witnesses)]`): off-chain, private, consumed during proof generation via `PrivateInput` ZKIR instructions.
+- **Ledger** (`#[nocturne(ledger)]`): on-chain, public, updated via verified transcripts.
+- **Witnesses** (`#[nocturne(witnesses)]`): off-chain, private, consumed during proof generation via `PrivateInput` ZKIR instructions.
 
 ### 6.2 Proving Flow
 
@@ -364,7 +364,7 @@ Format:
 
 ### 6.3 Selective Disclosure
 
-`midnight::disclose(value)` emits `DeclarePubInput` + `PiSkip`, making a computed value part of the public inputs that validators can see.
+`nocturne::disclose(value)` emits `DeclarePubInput` + `PiSkip`, making a computed value part of the public inputs that validators can see.
 
 ### 6.4 Hashing
 
@@ -379,7 +379,7 @@ Format:
 nocturne/
   crates/
     midnight/              # Umbrella (re-exports)
-    nocturne-macro/        # #[midnight::contract], #[midnight::test]
+    nocturne-macro/        # #[nocturne::contract], #[nocturne::test]
     nocturne-ir/           # Internal IR (parse + validate)
     nocturne-codegen/      # ZKIR emitter, transcript builder codegen, metadata
     nocturne-types/        # Field, Boolean, Bytes<N>, Uint<N>
@@ -390,7 +390,7 @@ nocturne/
     nocturne-e2e/          # E2E tests against Midnight node
     nocturne-primitives/   # Field arithmetic, hashing (wraps transient-crypto)
   tools/
-    cargo-midnight/        # Build/keygen/deploy CLI
+    cargo-nocturne/        # Build/keygen/deploy CLI
 ```
 
 ### 7.1 Key Crate: nocturne-codegen
@@ -414,7 +414,7 @@ nocturne-primitives → midnight-transient-crypto (field arithmetic, hashing)
 
 ### 8.1 Test Mode
 
-`#[midnight::test]` provides a simulated environment. The macro strips midnight attributes and passes the module through so `cargo test` works with test-mode types (real Rust values, no proof generation).
+`#[nocturne::test]` provides a simulated environment. The macro strips midnight attributes and passes the module through so `cargo test` works with test-mode types (real Rust values, no proof generation).
 
 ### 8.2 Future: ZKIR Validation
 

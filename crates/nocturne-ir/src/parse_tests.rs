@@ -13,20 +13,20 @@ mod tests {
     fn parse_counter_contract() {
         let ir = parse(quote::quote! {
             mod counter {
-                use midnight::types::*;
+                use nocturne::types::*;
 
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct CounterState {
                     count: Counter,
                 }
 
                 impl CounterState {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { count: Counter::zero() }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn increment(&mut self) {
                         self.count.increment();
                     }
@@ -71,23 +71,23 @@ mod tests {
     fn parse_voting_contract_with_witnesses() {
         let ir = parse(quote::quote! {
             mod ballot {
-                use midnight::types::*;
+                use nocturne::types::*;
 
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct Ballot {
                     votes_for: Counter,
                     votes_against: Counter,
                     merkle_voters: MerkleTree,
                 }
 
-                #[midnight(witnesses)]
+                #[nocturne(witnesses)]
                 pub struct BallotWitnesses {
                     voter_secret: Field,
                     vote_choice: Boolean,
                 }
 
                 impl Ballot {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self {
                             votes_for: Counter::zero(),
@@ -96,7 +96,7 @@ mod tests {
                         }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
                         let commitment = persistent_hash(&witnesses.voter_secret);
                         if witnesses.vote_choice.into() {
@@ -106,7 +106,7 @@ mod tests {
                         }
                     }
 
-                    #[midnight(query)]
+                    #[nocturne(query)]
                     pub fn get_tally(&self) -> (u64, u64) {
                         (self.votes_for.value(), self.votes_against.value())
                     }
@@ -176,7 +176,7 @@ mod tests {
         let result = parse(quote::quote! {
             mod bad {
                 impl Foo {
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn do_thing(&mut self) {}
                 }
             }
@@ -191,18 +191,18 @@ mod tests {
     fn query_with_mut_self_is_error() {
         let result = parse(quote::quote! {
             mod bad {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     x: Counter,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { x: Counter::zero() }
                     }
 
-                    #[midnight(query)]
+                    #[nocturne(query)]
                     pub fn bad_query(&mut self) -> u64 {
                         0
                     }
@@ -219,18 +219,18 @@ mod tests {
     fn parse_assert_expressions() {
         let ir = parse(quote::quote! {
             mod asserting {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     x: Counter,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { x: Counter::zero() }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn check(&mut self) {
                         assert!(self.x.value() > 0);
                         assert_eq!(self.x.value(), 42);
@@ -264,20 +264,20 @@ mod tests {
     fn parse_disclose_expression() {
         let ir = parse(quote::quote! {
             mod disclosing {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     threshold: Cell,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self { threshold: Cell::new(0) }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn reveal(&mut self) {
-                        self.threshold.set(midnight::disclose(42));
+                        self.threshold.set(nocturne::disclose(42));
                     }
                 }
             }
@@ -285,7 +285,7 @@ mod tests {
         .expect("failed to parse");
 
         let circuit = &ir.circuits[0];
-        // self.threshold.set(midnight::disclose(42)) -> LedgerAccess with set method
+        // self.threshold.set(nocturne::disclose(42)) -> LedgerAccess with set method
         assert_eq!(circuit.body.len(), 1);
         match &circuit.body[0] {
             ExprIR::LedgerAccess {
@@ -310,7 +310,7 @@ mod tests {
     fn parse_multiple_ledger_types() {
         let ir = parse(quote::quote! {
             mod complex {
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     counter: Counter,
                     data: Cell,
@@ -321,7 +321,7 @@ mod tests {
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self {
                         Self {
                             counter: Counter::zero(),
@@ -333,7 +333,7 @@ mod tests {
                         }
                     }
 
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn noop(&mut self) {}
                 }
             }
@@ -360,15 +360,15 @@ mod tests {
                     Burn(u64),
                 }
 
-                #[midnight(ledger)]
+                #[nocturne(ledger)]
                 pub struct State {
                     seen: Counter,
                 }
 
                 impl State {
-                    #[midnight(constructor)]
+                    #[nocturne(constructor)]
                     pub fn new() -> Self { Self { seen: Counter::zero() } }
-                    #[midnight(circuit)]
+                    #[nocturne(circuit)]
                     pub fn noop(&mut self) {}
                 }
             }

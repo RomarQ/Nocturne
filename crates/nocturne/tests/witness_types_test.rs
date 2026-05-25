@@ -15,18 +15,18 @@
 //!
 //! See `memories/conditional-branch-cond-select-zeroing.md`.
 
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 mod multi_witness {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct State {
         pub counter: Counter,
     }
 
-    #[midnight(witnesses)]
+    #[nocturne(witnesses)]
     pub struct AllSupportedWitnesses {
         pub flag: Boolean,
         pub number: Uint<64>,
@@ -34,7 +34,7 @@ mod multi_witness {
     }
 
     impl State {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 counter: Counter::zero(),
@@ -45,7 +45,7 @@ mod multi_witness {
         /// touches state — the else-branch is empty — so this exercises the
         /// no-else path of the cond_select-zeroing fix without writing two
         /// identical bodies (which clippy flags as a code smell).
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn use_flag(&mut self, witnesses: &AllSupportedWitnesses) {
             if witnesses.flag.value() {
                 self.counter.increment();
@@ -54,14 +54,14 @@ mod multi_witness {
 
         /// Field witness read in the body — exercises Fr::from(u128) without
         /// the silent `as u64` truncation that used to lose the top 64 bits.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn use_field(&mut self, witnesses: &AllSupportedWitnesses) {
             let _v = witnesses.secret;
             self.counter.increment();
         }
 
         /// Uint<64> witness read in the body.
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn use_uint(&mut self, witnesses: &AllSupportedWitnesses) {
             let _v = witnesses.number;
             self.counter.increment();
@@ -69,7 +69,7 @@ mod multi_witness {
     }
 }
 
-#[midnight::test]
+#[nocturne::test]
 fn multi_witness_struct_constructs() {
     let _w = multi_witness::AllSupportedWitnesses {
         flag: Boolean::from(true),
@@ -81,7 +81,7 @@ fn multi_witness_struct_constructs() {
 /// All three supported witness types produce a valid transcript without
 /// the macro panicking. The transcript's `private_transcript` is the
 /// `Vec<Fr>` that gets fed to the prover.
-#[midnight::test]
+#[nocturne::test]
 fn each_witness_type_builds_transcript() {
     let w = multi_witness::AllSupportedWitnesses {
         flag: Boolean::from(true),
@@ -106,7 +106,7 @@ fn each_witness_type_builds_transcript() {
     );
     assert_eq!(
         t.private_transcript[0],
-        midnight::runtime::transient_crypto::curve::Fr::from(u128::MAX),
+        nocturne::runtime::transient_crypto::curve::Fr::from(u128::MAX),
         "Field witness must serialize as Fr::from(u128) without truncation"
     );
 
@@ -115,7 +115,7 @@ fn each_witness_type_builds_transcript() {
     assert_eq!(t.private_transcript.len(), 1, "one Fr for the Uint witness");
     assert_eq!(
         t.private_transcript[0],
-        midnight::runtime::transient_crypto::curve::Fr::from(0xdead_beef_cafe_babeu128),
+        nocturne::runtime::transient_crypto::curve::Fr::from(0xdead_beef_cafe_babeu128),
         "Uint<64> witness must serialize as Fr::from(value)"
     );
 }
@@ -130,14 +130,14 @@ fn bytes_witness_is_accepted() {
 
     let module: syn::ItemMod = syn::parse_quote! {
         mod c {
-            #[midnight(ledger)]
+            #[nocturne(ledger)]
             pub struct State { count: Counter }
-            #[midnight(witnesses)]
+            #[nocturne(witnesses)]
             pub struct Witnesses { pub digest: Bytes<32> }
             impl State {
-                #[midnight(constructor)]
+                #[nocturne(constructor)]
                 pub fn new() -> Self { Self { count: Counter::zero() } }
-                #[midnight(circuit)]
+                #[nocturne(circuit)]
                 pub fn use_it(&mut self, _w: &Witnesses) {
                     self.count.increment();
                 }

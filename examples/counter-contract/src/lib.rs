@@ -1,10 +1,10 @@
-use midnight::types::*;
+use nocturne::types::*;
 
-#[midnight::contract]
+#[nocturne::contract]
 pub mod counter {
     use super::*;
 
-    #[midnight(ledger)]
+    #[nocturne(ledger)]
     pub struct CounterState {
         pub count: Counter,
     }
@@ -16,19 +16,19 @@ pub mod counter {
     }
 
     impl CounterState {
-        #[midnight(constructor)]
+        #[nocturne(constructor)]
         pub fn new() -> Self {
             Self {
                 count: Counter::zero(),
             }
         }
 
-        #[midnight(circuit)]
+        #[nocturne(circuit)]
         pub fn increment(&mut self) {
             self.count.increment();
         }
 
-        #[midnight(query)]
+        #[nocturne(query)]
         pub fn get_count(&self) -> u64 {
             self.count.value()
         }
@@ -39,7 +39,7 @@ pub mod counter {
 mod tests {
     use super::counter::*;
 
-    #[midnight::test]
+    #[nocturne::test]
     fn test_counter() {
         let mut state = CounterState::new();
         assert_eq!(state.get_count(), 0);
@@ -48,18 +48,18 @@ mod tests {
         assert_eq!(state.get_count(), 2);
     }
 
-    #[midnight::test]
+    #[nocturne::test]
     fn test_transcript() {
         let t = super::counter::transcript::build_increment_transcript();
         assert_eq!(t.ops.len(), 3); // Idx + Addi + Ins
     }
 
-    #[midnight::test]
+    #[nocturne::test]
     fn test_deploy() {
         let state = super::counter::deploy::initial_state();
         assert!(matches!(
             state,
-            midnight::runtime::onchain_state::state::StateValue::Array(_)
+            nocturne::runtime::onchain_state::state::StateValue::Array(_)
         ));
     }
 }

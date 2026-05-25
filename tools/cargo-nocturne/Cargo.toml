@@ -1,12 +1,12 @@
 [package]
-name = "cargo-midnight"
+name = "cargo-nocturne"
 description = "Cargo subcommand for building, testing, and deploying nocturne contracts."
 edition.workspace = true
 license.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "cargo-midnight"
+name = "cargo-nocturne"
 path = "src/main.rs"
 
 [dependencies]

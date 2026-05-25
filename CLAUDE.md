@@ -1,6 +1,6 @@
 # Project guide for Claude Code agents
 
-This is **Nocturne**, a Rust eDSL for **writing** Midnight smart contracts. It compiles `#[midnight::contract]` modules to ZKIR + transcript builders, generates Plonk proving/verifier keys, and emits a `contract-info.json` describing the contract's surface. The only hard constraint on output is that it stays compliant with `midnight-ledger`; surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better.
+This is **Nocturne**, a Rust eDSL for **writing** Midnight smart contracts. It compiles `#[nocturne::contract]` modules to ZKIR + transcript builders, generates Plonk proving/verifier keys, and emits a `contract-info.json` describing the contract's surface. The only hard constraint on output is that it stays compliant with `midnight-ledger`; surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better.
 
 **Scope**: Nocturne stops at producing artifacts. Deploying, building transactions, wallets, indexer/node RPC are explicitly **not** Nocturne's responsibility — they belong in downstream tools like [`midnight-rs`](https://github.com/RomarQ/midnight-rs). See `memories/project-scope.md`.
 
@@ -52,11 +52,7 @@ Write a new memory (or update an existing one) when you discover any of:
 
 Do not stop at "needs investigation," "TODO," "unclear," or "worth a deeper look" when the relevant source is available. Read it and find the answer. A finding is not a result — investigate to a definitive answer (root cause + fix path) before reporting, unless it requires a destructive action or external decision that needs approval.
 
-## Pending rename: umbrella crate
-
-Internal crates are now `nocturne-*`. The umbrella crate is still `midnight` (so contracts say `use midnight::types::*` and `#[midnight::contract]`), as is the CLI subcommand (`cargo midnight build`) and the artifact directory (`target/midnight/`). Renaming those is Commit B of the rename plan, sequenced separately. When touching the umbrella crate's manifest or any user-facing surface, leave the `midnight` name as-is until that commit lands.
-
 ## Common gotchas
 
-- The proc macro writes `target/midnight/<contract>/{zkir,compiler}/` from the workspace target dir (walks up 4 levels from `OUT_DIR`). To regenerate artifacts after a code change, you may need `cargo clean -p <contract_crate>` first — incremental builds don't re-run the macro.
-- `cargo-midnight build` looks for `./target/midnight/` relative to CWD. Run it from the workspace root, not from an example crate's directory.
+- The proc macro writes `target/nocturne/<contract>/{zkir,compiler}/` from the workspace target dir (walks up 4 levels from `OUT_DIR`). To regenerate artifacts after a code change, you may need `cargo clean -p <contract_crate>` first — incremental builds don't re-run the macro.
+- `cargo-nocturne build` looks for `./target/nocturne/` relative to CWD. Run it from the workspace root, not from an example crate's directory.
