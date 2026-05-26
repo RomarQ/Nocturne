@@ -3,9 +3,13 @@ use syn::{BinOp, Lit, UnOp};
 
 /// Expression IR for circuit/constructor/query function bodies.
 ///
-/// This is the key divergence from ink!: we must deeply analyze function
-/// bodies to emit ZKIR instructions and VM bytecode. ink! passes bodies
-/// through verbatim to the Wasm compiler.
+/// Structured tree of the user's Rust circuit code. The ZKIR and
+/// transcript emitters both consume this — the ZKIR side lowers it to
+/// `midnight_zkir::Instruction` (flat constraint stream), and the
+/// transcript side lowers it to Rust code that builds `Vec<Op>` at
+/// call time. Keeping a typed AST between the parser and the emitters
+/// means each backend lowers the same structured representation
+/// instead of re-parsing `syn::Expr` twice.
 #[derive(Debug, Clone)]
 pub enum ExprIR {
     /// Access a ledger field's method: `self.field.method(args)`.

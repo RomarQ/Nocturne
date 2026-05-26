@@ -78,7 +78,7 @@ compiler/contract-info.json
 
 `zkir/*.zkir` is the circuit definition (one per `#[nocturne(circuit)]`). `keys/*.{prover,verifier}` are Plonk keys derived from the ZKIR. `contract-info.json` describes the contract's surface (circuit signatures, witness types) for indexers and code generators.
 
-See [`docs/compiling.md`](docs/compiling.md) for the full build flow and [`docs/artifacts.md`](docs/artifacts.md) for what each file is for and who consumes it.
+See [`docs/compiling.md`](docs/compiling.md) for the full build flow, [`docs/artifacts.md`](docs/artifacts.md) for what each file is for and who consumes it, and [`docs/compactc-vs-nocturne.md`](docs/compactc-vs-nocturne.md) if you're coming from Compact and want a reference of where the two diverge.
 
 ## Repo layout
 
@@ -100,7 +100,7 @@ tools/
 examples/
   counter-contract          minimal example
   kitchen-sink              exercises every supported primitive
-docs/                       compiling.md + artifacts.md
+docs/                       compiling.md, artifacts.md, compactc-vs-nocturne.md
 ```
 
 ## Truth source
