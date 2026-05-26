@@ -2367,6 +2367,22 @@ fn gather_n_vars(first: Index, n: usize) -> Vec<Index> {
 /// first after `.rev()`). Single-Fr types get `Some(bits)` matching
 /// `aligned_value_encoding`'s `atoms[1] * 8`.
 fn read_result_fr_layout(ty: &syn::Type) -> Vec<Option<u32>> {
+    // Fixed-size array `[T; N]`: concatenate N copies of T's layout so the
+    // Popeq's per-Fr ConstrainBits count matches the multi-Fr value the
+    // on-chain VM verifies. Mirrors the N-tuple shape used by
+    // `aligned_value_encoding` and `witness_fr_layout` for arrays.
+    if let syn::Type::Array(arr) = ty
+        && let syn::Expr::Lit(lit) = &arr.len
+        && let syn::Lit::Int(int) = &lit.lit
+        && let Ok(n) = int.base10_parse::<u32>()
+    {
+        let elem = read_result_fr_layout(&arr.elem);
+        let mut layout = Vec::with_capacity(elem.len() * n as usize);
+        for _ in 0..n {
+            layout.extend(elem.iter().copied());
+        }
+        return layout;
+    }
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
     if let Some(n) = ty_str
         .strip_prefix("Bytes<")

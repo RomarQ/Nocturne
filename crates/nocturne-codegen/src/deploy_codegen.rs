@@ -245,6 +245,34 @@ fn cell_aligned_value_expr(
         }
         return quote! { (#accessor) };
     }
+    // Fixed-size array `[U; N]`: same N-tuple shape the runtime side uses
+    // for Cell::set(_)/Cell::get(_). Lets `Cell::new([a, b, c])` round-trip
+    // through deploy time and stay byte-compatible with subsequent
+    // set/get operations.
+    if let syn::Type::Array(arr) = t
+        && let syn::Expr::Lit(lit) = &arr.len
+        && let syn::Lit::Int(int) = &lit.lit
+        && let Ok(n) = int.base10_parse::<u32>()
+    {
+        let elem_ty = (*arr.elem).clone();
+        let comps: Vec<TokenStream> = (0..n as usize)
+            .map(|i| {
+                let idx = syn::Index::from(i);
+                cell_aligned_value_expr(Some(&elem_ty), &quote! { __a[#idx] }, user_enums)
+            })
+            .collect();
+        let trailing = if n == 1 {
+            quote! { , }
+        } else {
+            quote! {}
+        };
+        return quote! {
+            {
+                let __a = #accessor;
+                (#(#comps),* #trailing)
+            }
+        };
+    }
     quote! { (#accessor) }
 }
 

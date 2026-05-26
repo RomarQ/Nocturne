@@ -8658,3 +8658,111 @@ async fn fncall_arg_position_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell::set(Uint::<64>::from(_))");
 }
+
+// ---------------------------------------------------------------------------
+// `Cell::get` on an array-typed Cell. Pairs with `Cell::set([T; N])` (which
+// already worked via `aligned_value_arg_expr`'s Array arm). Reads the
+// constructor-seeded value back through Dup + Idx + Popeq, where the Popeq
+// decodes a multi-Fr `(U, ..., U)` tuple matching the N elements.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod array_cell {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct ArrayCellState {
+        pub buckets: Cell<[Uint<64>; 3]>,
+    }
+
+    impl ArrayCellState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                buckets: Cell::new([
+                    Uint::<64>::from(11u64),
+                    Uint::<64>::from(22u64),
+                    Uint::<64>::from(33u64),
+                ]),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn peek(&self) {
+            let _arr = self.buckets.get();
+        }
+    }
+}
+
+fn build_array_cell_get_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod array_cell {
+            #[nocturne(ledger)]
+            pub struct ArrayCellState { buckets: Cell<[Uint<64>; 3]> }
+            impl ArrayCellState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self {
+                        buckets: Cell::new([
+                            Uint::<64>::from(11u64),
+                            Uint::<64>::from(22u64),
+                            Uint::<64>::from(33u64),
+                        ]),
+                    }
+                }
+                #[nocturne(circuit)]
+                pub fn peek(&self) {
+                    let _arr = self.buckets.get();
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "peek")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn cell_array_get_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_array_cell_get_ir();
+    let state = array_cell::ArrayCellState::new();
+    let nocturne_transcript = array_cell::transcript::build_peek_transcript(&state);
+
+    // No witnesses, no Popeq beyond the array read itself. The Popeq's
+    // value is the literal `[11, 22, 33]` from the constructor, embedded
+    // directly in the transcript op via `aligned_value_arg_expr`'s Array
+    // arm.
+    let preimage = canonical_preimage("peek", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Cell<[Uint<64>; 3]>::get must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<[Uint<64>; 3]>::get");
+}

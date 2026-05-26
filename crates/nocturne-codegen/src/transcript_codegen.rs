@@ -314,6 +314,30 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         {
                             quote! { *(#accessor).as_bytes() }
                         }
+                        // Fixed-size array `[U; N]`: build the same N-tuple
+                        // shape `aligned_value_arg_expr` produces for arrays,
+                        // so the Popeq's AlignedValue lines up with the
+                        // ZKIR Popeq's multi-Fr per-element layout.
+                        Some(t) if extract_array_type(t).is_some() => {
+                            let (elem_ty, n) = extract_array_type(t).unwrap();
+                            let comps: Vec<TokenStream> = (0..n as usize)
+                                .map(|i| {
+                                    let idx = syn::Index::from(i);
+                                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] })
+                                })
+                                .collect();
+                            let trailing = if n == 1 {
+                                quote! { , }
+                            } else {
+                                quote! {}
+                            };
+                            quote! {
+                                {
+                                    let __a = #accessor;
+                                    (#(#comps),* #trailing)
+                                }
+                            }
+                        }
                         Some(t) if quote!(#t).to_string().replace(' ', "") == "Field" => {
                             // `Cell<Field>::get()` returns Field; convert to
                             // Fr for AlignedValue::from (which picks the
