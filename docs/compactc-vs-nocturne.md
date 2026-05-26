@@ -9,10 +9,13 @@ Nocturne isn't bound to match compactc; both produce artifacts that midnight-led
 | Layer | Compactc | Nocturne |
 |---|---|---|
 | Source language | `.compact` DSL | Rust modules annotated with `#[nocturne::contract]` |
-| Mid-level IR | internal AST (not public) | `ExprIR` in [`crates/nocturne-ir`](../crates/nocturne-ir) |
-| Lowered output | `IrSource`/`Instruction` (ZKIR), `Vec<Op>` (transcript), `StateValue` (state) | Same — imported directly from `midnight-zkir`, `midnight-onchain-vm`, `midnight-onchain-state` |
+| Mid-level AST | internal to the compactc binary, not serialised to disk | `ExprIR` in [`crates/nocturne-ir`](../crates/nocturne-ir) — same role, also not user-facing |
+| Client runtime emit | generated TypeScript (`contract/index.js` + `.d.ts`) | injected Rust submodules (`contract::transcript`, `contract::deploy`) |
+| Wire-level emit | `IrSource`/`Instruction` (ZKIR), `Vec<Op>` (transcript), `StateValue` (state) | Same — imported directly from `midnight-zkir`, `midnight-onchain-vm`, `midnight-onchain-state` |
 
 Both compilers also emit `contract-info.json` with the same schema, so downstream tools (TypeScript bindings generators, indexers, deploy scripts) that consume compactc output also work with Nocturne.
+
+The "client runtime emit" row is where the two compilers visibly diverge in the artifact set: compactc ships a TypeScript module that builds transcripts and `ProofPreimage`s at call time, while Nocturne injects equivalent Rust functions into the user's contract module. Both are pure codegen targets — the source AST that drives them stays internal to the respective compiler. A third backend (e.g. TypeScript from Nocturne, or a different host language from compactc) would slot in alongside without changing the AST layer.
 
 ## Source surface (different by design)
 
