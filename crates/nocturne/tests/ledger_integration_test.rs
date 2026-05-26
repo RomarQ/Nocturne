@@ -8766,3 +8766,123 @@ async fn cell_array_get_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell<[Uint<64>; 3]>::get");
 }
+
+// ---------------------------------------------------------------------------
+// Let-bound array indexing. `let arr = witnesses.field;` lets the body
+// reference `arr[i]` exactly as if it had written `witnesses.field[i]`
+// directly. The ZKIR emitter chases the type through `variable_types` to
+// compute the right per-element wire offset, instead of falling through
+// to the unsupported-shape path.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod let_bound_array {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct LetBoundArrayLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct LetBoundArrayWitnesses {
+        pub buckets: [Uint<64>; 3],
+    }
+
+    impl LetBoundArrayLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn apply(&mut self, witnesses: &LetBoundArrayWitnesses) {
+            // The let binding is the point of the test: `arr` flows
+            // through `variable_types`, then `arr[1]` resolves the
+            // element type via the new Var arm of `array_element_type`.
+            let arr = witnesses.buckets;
+            self.stored.set(arr[1]);
+        }
+    }
+}
+
+fn build_let_bound_array_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod let_bound_array {
+            #[nocturne(ledger)]
+            pub struct LetBoundArrayLedger { stored: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct LetBoundArrayWitnesses { pub buckets: [Uint<64>; 3] }
+            impl LetBoundArrayLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn apply(&mut self, witnesses: &LetBoundArrayWitnesses) {
+                    let arr = witnesses.buckets;
+                    self.stored.set(arr[1]);
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "apply")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn let_bound_array_index_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_let_bound_array_ir();
+    let witnesses = let_bound_array::LetBoundArrayWitnesses {
+        buckets: [
+            Uint::<64>::from(11u64),
+            Uint::<64>::from(22u64),
+            Uint::<64>::from(33u64),
+        ],
+    };
+    let nocturne_transcript = let_bound_array::transcript::build_apply_transcript(&witnesses);
+
+    // Same PI shape as the direct-index `array_witness_index` test: all
+    // three array elements committed as private outputs, the on-chain
+    // op embeds `arr[1] = 22` as the Cell::set value.
+    let private_outputs: Vec<AlignedValue> = vec![
+        AlignedValue::from(11u64),
+        AlignedValue::from(22u64),
+        AlignedValue::from(33u64),
+    ];
+    let preimage = canonical_preimage("apply", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "let-bound array indexing must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for let-bound array indexing");
+}

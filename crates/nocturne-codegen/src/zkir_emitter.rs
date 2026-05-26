@@ -100,6 +100,12 @@ struct ZkirEmitter {
     instructions: Vec<Instruction>,
     next_index: Index,
     variables: HashMap<String, Index>,
+    /// Type tag for let-bound names whose RHS shape is known. Lets
+    /// `ExprIR::Index` look up the element width when its `array`
+    /// source is a `Var` (e.g. `let arr = self.cell.get(); arr[i]`).
+    /// Missing entries mean "type is not inferable from the IR" — the
+    /// indexing call falls back to the unsupported path.
+    variable_types: HashMap<String, syn::Type>,
     num_inputs: u32,
     guard: Index,
     /// True when emitting inside a conditional branch. `DeclarePubInput`
@@ -138,6 +144,7 @@ impl ZkirEmitter {
             instructions: Vec::new(),
             next_index: 0,
             variables: HashMap::new(),
+            variable_types: HashMap::new(),
             num_inputs: 0,
             guard: 0,
             in_conditional: false,
@@ -170,15 +177,44 @@ impl ZkirEmitter {
     }
 
     /// Resolve the element type `T` for an `ExprIR::Index`'s `array`
-    /// sub-expression. Today we only handle the witness case
-    /// (`witnesses.<f>[i]`) — let-bound arrays and ledger-stored
-    /// arrays would need separate machinery (the variables map doesn't
-    /// carry types, and ledger fields are wrapped in `Cell<...>` etc.).
+    /// sub-expression. Covers:
+    /// - `witnesses.<f>[i]` — witness_types lookup
+    /// - `let arr = ...; arr[i]` — variable_types lookup (populated by
+    ///   the `Let` arm when the RHS's type is inferable)
+    ///
+    /// Returns `None` for shapes the IR can't type-infer (which falls
+    /// through to the Index emit's `None` path, surfacing as a
+    /// compile-time error downstream rather than emitting a wrong
+    /// offset).
     fn array_element_type(&self, array: &ExprIR) -> Option<syn::Type> {
-        match array {
+        let ty = self.infer_expr_type(array)?;
+        array_inner_type_and_len(&ty).map(|(t, _)| t)
+    }
+
+    /// Type inference for the limited set of expressions whose source
+    /// type we can recover from the IR alone. Used by
+    /// `array_element_type` (for `Index`) and by the `Let` arm (to
+    /// populate `variable_types` for downstream `Var` lookups).
+    ///
+    /// This is intentionally conservative — when a shape isn't covered
+    /// here, callers get `None` and fall back to whatever default the
+    /// callsite has (usually an emit-time `None` that surfaces as a
+    /// downstream compile_error rather than silently miscompiling).
+    fn infer_expr_type(&self, expr: &ExprIR) -> Option<syn::Type> {
+        match expr {
             ExprIR::WitnessAccess { field, .. } => {
-                let ty = self.witness_types.get(&field.to_string())?;
-                array_inner_type_and_len(ty).map(|(t, _)| t)
+                self.witness_types.get(&field.to_string()).cloned()
+            }
+            ExprIR::Var { name, .. } => self.variable_types.get(&name.to_string()).cloned(),
+            ExprIR::LedgerAccess { field, method, .. } => {
+                let m = method.to_string();
+                if m == "get" || m == "value" || m == "__direct_access" {
+                    let idx = self.field_index(&field.to_string());
+                    let field_ty = self.field_types.get(idx as usize)?;
+                    extract_cell_inner_type(field_ty)
+                } else {
+                    None
+                }
             }
             _ => None,
         }
@@ -479,8 +515,18 @@ impl ZkirEmitter {
             }
 
             ExprIR::Let { name, value, .. } => {
+                // Infer the RHS's type BEFORE emitting (emit can mutate
+                // the variables map and the RHS may reference other
+                // bindings whose type tag we want to chain). For RHS
+                // shapes we can't type-infer (arithmetic, FnCall, …)
+                // the entry stays absent and downstream `Var` lookups
+                // gracefully fall back.
+                let ty = self.infer_expr_type(value);
                 let idx = self.emit_expr(value)?;
                 self.variables.insert(name.to_string(), idx);
+                if let Some(t) = ty {
+                    self.variable_types.insert(name.to_string(), t);
+                }
                 Some(idx)
             }
 
