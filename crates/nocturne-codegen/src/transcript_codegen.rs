@@ -1068,6 +1068,20 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             let parts: Vec<TokenStream> = elements.iter().map(arg_to_runtime_raw_expr).collect();
             quote! { [#(#parts),*] }
         }
+        // Struct literal — same shape as the raw form. The Cell<T>::set
+        // path eventually wraps this through `aligned_value_arg_expr`'s
+        // user-struct-fields arm which projects each field by name.
+        ExprIR::StructInit { name, fields, .. } => {
+            let inits: Vec<TokenStream> = fields
+                .iter()
+                .map(|(fname, expr)| {
+                    let f = fname.clone();
+                    let v = arg_to_runtime_raw_expr(expr);
+                    quote! { #f: #v }
+                })
+                .collect();
+            quote! { #name { #(#inits),* } }
+        }
         // Unary minus / not — compose the inner expression.
         ExprIR::UnaryOp {
             op, expr: inner, ..
@@ -2239,6 +2253,21 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
         ExprIR::ArrayLit { elements, .. } => {
             let parts: Vec<TokenStream> = elements.iter().map(arg_to_runtime_raw_expr).collect();
             quote! { [#(#parts),*] }
+        }
+        // Struct literal `MyStruct { a: …, b: … }` in argument position.
+        // Emit a Rust struct literal so `aligned_value_arg_expr`'s
+        // user-struct-fields arm has a real `MyStruct` value to project
+        // through `__t.a` / `__t.b`.
+        ExprIR::StructInit { name, fields, .. } => {
+            let inits: Vec<TokenStream> = fields
+                .iter()
+                .map(|(fname, expr)| {
+                    let f = fname.clone();
+                    let v = arg_to_runtime_raw_expr(expr);
+                    quote! { #f: #v }
+                })
+                .collect();
+            quote! { #name { #(#inits),* } }
         }
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());

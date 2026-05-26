@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use nocturne_ir::{ContractIR, LedgerTypeKind, UserEnumVariant};
+use nocturne_ir::{ContractIR, LedgerTypeKind, UserEnumVariant, UserStructField};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
@@ -41,6 +41,7 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
     let param_idents: Vec<TokenStream> = ctor_params.iter().map(|(n, _)| quote! { #n }).collect();
 
     let user_enums = &contract.user_enums;
+    let user_structs = &contract.user_structs;
 
     let field_pushes: Vec<TokenStream> = contract
         .ledger
@@ -55,7 +56,12 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                 LedgerTypeKind::Cell => {
                     let inner = extract_cell_inner_type(&field.ty);
                     let accessor = quote! { __state.#field_ident.get() };
-                    let aligned = cell_aligned_value_expr(inner.as_ref(), &accessor, user_enums);
+                    let aligned = cell_aligned_value_expr(
+                        inner.as_ref(),
+                        &accessor,
+                        user_enums,
+                        user_structs,
+                    );
                     quote! {
                         {
                             use nocturne::runtime::base_crypto::fab::AlignedValue;
@@ -143,6 +149,7 @@ fn cell_aligned_value_expr(
     inner: Option<&syn::Type>,
     accessor: &TokenStream,
     user_enums: &HashMap<String, Vec<UserEnumVariant>>,
+    user_structs: &HashMap<String, Vec<UserStructField>>,
 ) -> TokenStream {
     let Some(t) = inner else {
         return quote! { (#accessor) };
@@ -170,8 +177,12 @@ fn cell_aligned_value_expr(
     // enum. The None case synthesizes `<T as Default>::default()` so
     // the AlignedValue's payload slot is well-formed.
     if let Some(payload_ty) = option_payload_type(t) {
-        let payload_repr =
-            cell_aligned_value_expr(Some(&payload_ty), &quote! { __payload }, user_enums);
+        let payload_repr = cell_aligned_value_expr(
+            Some(&payload_ty),
+            &quote! { __payload },
+            user_enums,
+            user_structs,
+        );
         return quote! {
             {
                 let __e = #accessor;
@@ -216,8 +227,12 @@ fn cell_aligned_value_expr(
                 // (Uint<N> needs `.value() as u<N>`, Bytes<N> needs
                 // `*as_bytes()`, …) — same encoding the runtime side
                 // would produce for a `Cell<T>::set(payload)`.
-                let payload_repr =
-                    cell_aligned_value_expr(Some(&p), &quote! { __payload }, user_enums);
+                let payload_repr = cell_aligned_value_expr(
+                    Some(&p),
+                    &quote! { __payload },
+                    user_enums,
+                    user_structs,
+                );
                 quote! {
                     {
                         let __e = #accessor;
@@ -227,6 +242,39 @@ fn cell_aligned_value_expr(
                         (__e.discriminant(), #payload_repr)
                     }
                 }
+            }
+        };
+    }
+    // User-defined named struct: same tuple-of-fields shape upstream's
+    // `Aligned for (T1, ..., Tn)` impl produces. Each field is converted
+    // through the same `cell_aligned_value_expr` recursion so a struct
+    // of `Uint<N>`/`Bytes<M>`/nested structs all serialise consistently.
+    if let syn::Type::Path(tp) = t
+        && tp.qself.is_none()
+        && let Some(seg) = tp.path.segments.last()
+        && let Some(struct_fields) = user_structs.get(&seg.ident.to_string())
+    {
+        let comps: Vec<TokenStream> = struct_fields
+            .iter()
+            .map(|f| {
+                let fname = f.name.clone();
+                cell_aligned_value_expr(
+                    Some(&f.ty),
+                    &quote! { __s.#fname },
+                    user_enums,
+                    user_structs,
+                )
+            })
+            .collect();
+        let trailing = if struct_fields.len() == 1 {
+            quote! { , }
+        } else {
+            quote! {}
+        };
+        return quote! {
+            {
+                let __s = #accessor;
+                (#(#comps),* #trailing)
             }
         };
     }
@@ -258,7 +306,12 @@ fn cell_aligned_value_expr(
         let comps: Vec<TokenStream> = (0..n as usize)
             .map(|i| {
                 let idx = syn::Index::from(i);
-                cell_aligned_value_expr(Some(&elem_ty), &quote! { __a[#idx] }, user_enums)
+                cell_aligned_value_expr(
+                    Some(&elem_ty),
+                    &quote! { __a[#idx] },
+                    user_enums,
+                    user_structs,
+                )
             })
             .collect();
         let trailing = if n == 1 {

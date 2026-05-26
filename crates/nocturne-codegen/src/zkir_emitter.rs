@@ -748,7 +748,45 @@ impl ZkirEmitter {
                 Some(first + (*index) * stride)
             }
 
-            ExprIR::StructInit { .. } | ExprIR::Unsupported { .. } => None,
+            // Struct literal `MyStruct { a, b, c }` in a value-producing
+            // position (today: `Cell<MyStruct>::set(MyStruct { … })`).
+            // Emit the fields in their declared order (matching the
+            // user-struct fields list registered with the IR, not the
+            // textual order — same convention `aligned_value_encoding`
+            // uses to compose the tuple of fields). Return the first
+            // field's wire; `gather_value_vars` walks the remaining
+            // contiguous wires when the surrounding Cell::set lowers.
+            //
+            // Like `ArrayLit`, this relies on each field's emit
+            // producing a contiguous wire — true for first-use witness
+            // reads + literals, broken for cache-hit re-references.
+            ExprIR::StructInit { name, fields, .. } => {
+                let struct_fields = self.user_structs.get(&name.to_string()).cloned();
+                let ordered: Vec<&ExprIR> = match struct_fields {
+                    Some(decl) => decl
+                        .iter()
+                        .filter_map(|f| {
+                            fields
+                                .iter()
+                                .find(|(fname, _)| fname == &f.name)
+                                .map(|(_, expr)| expr)
+                        })
+                        .collect(),
+                    // No registered struct entry — fall back to textual
+                    // order so we still emit something coherent, even if
+                    // the wire alignment can't be trusted downstream.
+                    None => fields.iter().map(|(_, expr)| expr).collect(),
+                };
+                let mut first: Option<Index> = None;
+                for elem in ordered {
+                    let w = self.emit_expr(elem);
+                    if first.is_none() {
+                        first = w;
+                    }
+                }
+                first
+            }
+            ExprIR::Unsupported { .. } => None,
         }
     }
 

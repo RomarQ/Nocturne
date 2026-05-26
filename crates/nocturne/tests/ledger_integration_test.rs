@@ -9020,3 +9020,139 @@ async fn array_lit_set_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for array literal Cell::set");
 }
+
+// ---------------------------------------------------------------------------
+// Struct literals in Cell<UserStruct>::set argument position. Previously
+// the IR's StructInit had no codegen on either side, so a contract that
+// wrote `self.cell.set(MyStruct { a, b })` silently failed at compile
+// time. Wires the field-declaration-order emit on the ZKIR side and the
+// `MyStruct { a: …, b: … }` reconstruction on the transcript side.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod struct_lit_set {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub struct Pair {
+        pub left: Uint<64>,
+        pub right: Uint<64>,
+    }
+
+    #[nocturne(ledger)]
+    pub struct StructLitLedger {
+        pub stored: Cell<Pair>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct StructLitWitnesses {
+        pub a: Uint<64>,
+        pub b: Uint<64>,
+    }
+
+    impl StructLitLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Pair {
+                    left: Uint::<64>::from(0u64),
+                    right: Uint::<64>::from(0u64),
+                }),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn store_pair(&mut self, witnesses: &StructLitWitnesses) {
+            // Struct literal in Cell::set arg position. Before the fix
+            // this lowered to `Cell::set(())` and failed at compile time.
+            self.stored.set(Pair {
+                left: witnesses.a,
+                right: witnesses.b,
+            });
+        }
+    }
+}
+
+fn build_struct_lit_set_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod struct_lit_set {
+            pub struct Pair { pub left: Uint<64>, pub right: Uint<64> }
+            #[nocturne(ledger)]
+            pub struct StructLitLedger { stored: Cell<Pair> }
+            #[nocturne(witnesses)]
+            pub struct StructLitWitnesses { pub a: Uint<64>, pub b: Uint<64> }
+            impl StructLitLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self {
+                        stored: Cell::new(Pair {
+                            left: Uint::<64>::from(0u64),
+                            right: Uint::<64>::from(0u64),
+                        }),
+                    }
+                }
+                #[nocturne(circuit)]
+                pub fn store_pair(&mut self, witnesses: &StructLitWitnesses) {
+                    self.stored.set(Pair { left: witnesses.a, right: witnesses.b });
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store_pair")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn struct_lit_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_struct_lit_set_ir();
+    let witnesses = struct_lit_set::StructLitWitnesses {
+        a: Uint::<64>::from(7u64),
+        b: Uint::<64>::from(8u64),
+    };
+    let nocturne_transcript = struct_lit_set::transcript::build_store_pair_transcript(&witnesses);
+
+    // Two witness PrivateInputs → two private_outputs the prover
+    // commits to. The on-chain Op::Push embeds the pair as a literal
+    // `AlignedValue<(u64, u64)>` (the upstream tuple `Aligned` impl).
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(7u64), AlignedValue::from(8u64)];
+    let preimage = canonical_preimage(
+        "store_pair",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Cell<UserStruct>::set(MyStruct {{ .. }}) must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for struct literal Cell::set");
+}
