@@ -885,6 +885,18 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
             })
         }
 
+        Expr::Array(array) => {
+            let elements = array
+                .elems
+                .iter()
+                .map(parse_expr)
+                .collect::<MidnightResult<_>>()?;
+            Ok(ExprIR::ArrayLit {
+                span: Span::call_site(),
+                elements,
+            })
+        }
+
         Expr::Reference(r) => {
             let inner = parse_expr(&r.expr)?;
             Ok(ExprIR::Reference {

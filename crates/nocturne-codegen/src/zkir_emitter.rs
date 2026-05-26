@@ -706,6 +706,31 @@ impl ZkirEmitter {
                 last
             }
 
+            // Array literal `[a, b, c]`. Emit each element in order and
+            // return the first element's wire index — downstream
+            // `gather_value_vars` reads N contiguous wires starting
+            // there to build the multi-Fr ledger Push.
+            //
+            // This relies on the element emits producing contiguous wire
+            // allocations, which holds when each element is a first-use
+            // `WitnessAccess` or `Literal` (the common case for
+            // `Cell::set([w.a, w.b, w.c])`). If an element is a
+            // cache-hit Var or WitnessAccess re-reference, its wire
+            // won't be adjacent to its neighbours and the resulting
+            // Cell::set will read the wrong wires. The on-chain verifier
+            // catches that mismatch but the failure mode is at proof
+            // time, not at compile time.
+            ExprIR::ArrayLit { elements, .. } => {
+                let mut first: Option<Index> = None;
+                for elem in elements {
+                    let w = self.emit_expr(elem);
+                    if first.is_none() {
+                        first = w;
+                    }
+                }
+                first
+            }
+
             ExprIR::Reference { expr: inner, .. } => self.emit_expr(inner),
 
             // `arr[i]` — emit the array's first wire and shift by

@@ -106,6 +106,11 @@ pub enum ExprIR {
         enum_name: Ident,
     },
 
+    /// Array literal `[a, b, c]`. Lowers to the same N-tuple wire shape
+    /// as `[T; N]` everywhere else. Used as a `Cell<[T; N]>::set`
+    /// argument or anywhere else an array value is expected.
+    ArrayLit { span: Span, elements: Vec<ExprIR> },
+
     /// `arr[index]` where `arr` is a fixed-size `[T; N]` value and
     /// `index` is a compile-time constant (always literal after
     /// `parse_const_for_loop` substitution). At the ZKIR layer this

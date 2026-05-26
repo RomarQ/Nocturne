@@ -1060,6 +1060,14 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             };
             quote! { (#(#parts),* #trailing) }
         }
+        // Array literal — same shape as the raw form. The arms that
+        // wrap the result (`aligned_value_arg_expr` → Array arm) walk
+        // each element individually, so producing a Rust array literal
+        // here is the correct hand-off.
+        ExprIR::ArrayLit { elements, .. } => {
+            let parts: Vec<TokenStream> = elements.iter().map(arg_to_runtime_raw_expr).collect();
+            quote! { [#(#parts),*] }
+        }
         // Unary minus / not — compose the inner expression.
         ExprIR::UnaryOp {
             op, expr: inner, ..
@@ -2224,6 +2232,13 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
                 quote! {}
             };
             quote! { (#(#parts),* #trailing) }
+        }
+        // Array literal `[a, b, c]` in argument position. Reconstruct
+        // the Rust array literal so `aligned_value_arg_expr`'s Array
+        // arm has a real `[T; N]` value to project from.
+        ExprIR::ArrayLit { elements, .. } => {
+            let parts: Vec<TokenStream> = elements.iter().map(arg_to_runtime_raw_expr).collect();
+            quote! { [#(#parts),*] }
         }
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
