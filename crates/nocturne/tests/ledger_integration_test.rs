@@ -9156,3 +9156,131 @@ async fn struct_lit_set_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for struct literal Cell::set");
 }
+
+// ---------------------------------------------------------------------------
+// `LessThan` at the operand's real bit width. Before this fix the
+// emitter hardcoded `bits: 64`, so a `Uint<128>` comparison silently
+// truncated the operands to their low 64 bits — UB per upstream's
+// LessThan doc. The test below picks operand values whose 64-bit
+// truncation gives the *opposite* comparison answer:
+//
+//   a = 1u128 << 64   (low-64: 0, real: 2^64)
+//   b = 1u128         (low-64: 1, real: 1)
+//
+// Truncated: 0 > 1  →  false  →  the `assert!` fails at prove time.
+// Full 128b: 2^64 > 1 → true →  the proof succeeds.
+//
+// Pre-fix this contract was unprovable; post-fix it works.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod uint128_cmp {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct U128CmpLedger {
+        pub flag: Cell<Boolean>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct U128CmpWitnesses {
+        pub a: Uint<128>,
+        pub b: Uint<128>,
+    }
+
+    impl U128CmpLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                flag: Cell::new(Boolean::from(false)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn assert_gt(&mut self, witnesses: &U128CmpWitnesses) {
+            // Compares two `Uint<128>` operands; pre-fix this lowered to
+            // `LessThan { bits: 64 }` and silently miscompared the low halves.
+            assert!(witnesses.a > witnesses.b);
+            self.flag.set(Boolean::from(true));
+        }
+    }
+}
+
+fn build_uint128_cmp_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod uint128_cmp {
+            #[nocturne(ledger)]
+            pub struct U128CmpLedger { flag: Cell<Boolean> }
+            #[nocturne(witnesses)]
+            pub struct U128CmpWitnesses { pub a: Uint<128>, pub b: Uint<128> }
+            impl U128CmpLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { flag: Cell::new(Boolean::from(false)) } }
+                #[nocturne(circuit)]
+                pub fn assert_gt(&mut self, witnesses: &U128CmpWitnesses) {
+                    assert!(witnesses.a > witnesses.b);
+                    self.flag.set(Boolean::from(true));
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "assert_gt")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn uint128_cmp_high_half_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_uint128_cmp_ir();
+    let witnesses = uint128_cmp::U128CmpWitnesses {
+        // a's low 64 bits are zero; b's low 64 bits are 1. A 64-bit
+        // comparison says a < b. The proof can only construct on the
+        // real 128-bit comparison, where a > b.
+        a: Uint::<128>::from(1u128 << 64),
+        b: Uint::<128>::from(1u128),
+    };
+    let nocturne_transcript = uint128_cmp::transcript::build_assert_gt_transcript(&witnesses);
+
+    // Two Uint<128> witnesses → two private outputs (each lowers to a
+    // single Fr per upstream's `impl Aligned for u128`).
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(1u128 << 64), AlignedValue::from(1u128)];
+    let preimage = canonical_preimage(
+        "assert_gt",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "Uint<128> comparison must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Uint<128> > Uint<128>");
+}

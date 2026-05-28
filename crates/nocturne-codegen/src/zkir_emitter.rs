@@ -216,7 +216,43 @@ impl ZkirEmitter {
                     None
                 }
             }
+            // `arr[i]` has the array's element type, recovered by
+            // chasing `array`'s type and extracting `T` from `[T; N]`.
+            ExprIR::Index { array, .. } => {
+                let arr_ty = self.infer_expr_type(array)?;
+                array_inner_type_and_len(&arr_ty).map(|(t, _)| t)
+            }
             _ => None,
+        }
+    }
+
+    /// Pick the bit width to constrain `LessThan` to. Tries the
+    /// operands' inferred types (lhs first, then rhs); falls back to
+    /// 64 when neither operand carries a recoverable type. Upstream's
+    /// `LessThan` documents "UB if a or b exceed bits", so getting
+    /// this right is a correctness requirement, not just an
+    /// optimisation — a `Uint<128>` operand compared at `bits: 64`
+    /// silently misverifies whenever its high half is non-zero.
+    fn comparison_bits(&self, lhs: &ExprIR, rhs: &ExprIR) -> u32 {
+        const DEFAULT_BITS: u32 = 64;
+        let ty = self
+            .infer_expr_type(lhs)
+            .or_else(|| self.infer_expr_type(rhs));
+        let Some(t) = ty else {
+            return DEFAULT_BITS;
+        };
+        let s = quote::quote!(#t).to_string().replace(' ', "");
+        if let Some(bits) = parse_uint_type(&s) {
+            return bits;
+        }
+        match s.as_str() {
+            "u8" => 8,
+            "u16" => 16,
+            "u32" => 32,
+            "u64" => 64,
+            "u128" => 128,
+            "Boolean" | "bool" => 1,
+            _ => DEFAULT_BITS,
         }
     }
 
@@ -453,6 +489,11 @@ impl ZkirEmitter {
             }
 
             ExprIR::BinaryOp { op, lhs, rhs, .. } => {
+                // Resolve the comparison bit width BEFORE emitting the
+                // operands, so a cache-hit re-read doesn't reshape what
+                // `infer_expr_type` sees. The width is a property of the
+                // operand types, not the wires.
+                let cmp_bits = self.comparison_bits(lhs, rhs);
                 let a = self.emit_expr(lhs)?;
                 let b = self.emit_expr(rhs)?;
                 use syn::BinOp;
@@ -472,24 +513,30 @@ impl ZkirEmitter {
                         let eq = self.emit_instruction(Instruction::TestEq { a, b });
                         Some(self.emit_instruction(Instruction::Not { a: eq }))
                     }
-                    BinOp::Lt(_) => {
-                        Some(self.emit_instruction(Instruction::LessThan { a, b, bits: 64 }))
-                    }
+                    BinOp::Lt(_) => Some(self.emit_instruction(Instruction::LessThan {
+                        a,
+                        b,
+                        bits: cmp_bits,
+                    })),
                     BinOp::Gt(_) => Some(self.emit_instruction(Instruction::LessThan {
                         a: b,
                         b: a,
-                        bits: 64,
+                        bits: cmp_bits,
                     })),
                     BinOp::Le(_) => {
                         let gt = self.emit_instruction(Instruction::LessThan {
                             a: b,
                             b: a,
-                            bits: 64,
+                            bits: cmp_bits,
                         });
                         Some(self.emit_instruction(Instruction::Not { a: gt }))
                     }
                     BinOp::Ge(_) => {
-                        let lt = self.emit_instruction(Instruction::LessThan { a, b, bits: 64 });
+                        let lt = self.emit_instruction(Instruction::LessThan {
+                            a,
+                            b,
+                            bits: cmp_bits,
+                        });
                         Some(self.emit_instruction(Instruction::Not { a: lt }))
                     }
                     BinOp::And(_) => Some(self.emit_instruction(Instruction::Mul { a, b })),
