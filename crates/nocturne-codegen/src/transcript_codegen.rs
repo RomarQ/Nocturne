@@ -785,6 +785,13 @@ fn let_binding_runtime_value(value: &ExprIR, ctx: &TranscriptCtx<'_>) -> Option<
             let f = format_ident!("{}", field.to_string());
             Some(quote! { witnesses.#f.clone() })
         }
+        // Parametric witness call as a let RHS: `let v = witnesses.foo(args);`
+        // becomes `let v = witnesses.foo(arg1, ...)` at runtime.
+        ExprIR::WitnessCall { name, args, .. } => {
+            let m = format_ident!("{}", name.to_string());
+            let arg_exprs: Vec<TokenStream> = args.iter().map(arg_to_runtime_raw_expr).collect();
+            Some(quote! { witnesses.#m(#(#arg_exprs),*) })
+        }
         // Match-arm payload binding: `let amount = EnumPayload(scrutinee, EnumName)`
         // lowers to an inline Rust `match` over the scrutinee, binding the
         // homogeneous payload from whichever variant carries it. No synthetic
@@ -998,6 +1005,14 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
         ExprIR::WitnessAccess { field, .. } => {
             let field_ident = format_ident!("{}", field.to_string());
             quote! { witnesses.#field_ident.value() }
+        }
+        // Parametric witness call. Evaluate args at runtime and invoke
+        // the user's method on `witnesses`, then unwrap to the
+        // primitive via `.value()` for the surrounding cast.
+        ExprIR::WitnessCall { name, args, .. } => {
+            let m = format_ident!("{}", name.to_string());
+            let arg_exprs: Vec<TokenStream> = args.iter().map(arg_to_runtime_raw_expr).collect();
+            quote! { witnesses.#m(#(#arg_exprs),*).value() }
         }
         ExprIR::Var { name, .. } => {
             let ident = format_ident!("{}", name.to_string());
@@ -2274,6 +2289,13 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
             // `Clone` is fine for the small types we currently support
             // (Boolean, Uint<N>, Bytes<N>) — they're all `Clone`.
             quote! { witnesses.#field_ident.clone() }
+        }
+        // Parametric witness call in raw arg position. Same shape as
+        // a field read but invokes the user's method.
+        ExprIR::WitnessCall { name, args, .. } => {
+            let m = format_ident!("{}", name.to_string());
+            let arg_exprs: Vec<TokenStream> = args.iter().map(arg_to_runtime_raw_expr).collect();
+            quote! { witnesses.#m(#(#arg_exprs),*) }
         }
         // `arr[i]` in argument position: lift to a Rust index expr
         // over the cloned array. Element types in scope today are all

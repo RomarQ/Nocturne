@@ -23,6 +23,22 @@ pub enum ExprIR {
     /// Read a witness field: `witnesses.field`.
     WitnessAccess { span: Span, field: Ident },
 
+    /// Invoke a parametric witness method: `witnesses.method(args)`.
+    /// The method's body lives in the user's contract module (in an
+    /// `impl <WitnessesStructName>` block); the macro records only the
+    /// signature on `WitnessIR::methods`. At runtime the transcript
+    /// builder evaluates the args, calls the method, and pushes the
+    /// returned value through the standard private-transcript path.
+    /// At circuit-build time the call allocates a fresh `PrivateInput`
+    /// block sized by the method's return type — there is no caching,
+    /// so two calls with the same args produce independent witness
+    /// values (use a `let` binding to share).
+    WitnessCall {
+        span: Span,
+        name: Ident,
+        args: Vec<ExprIR>,
+    },
+
     /// Binary operation: `a + b`, `a * b`, `a == b`, etc.
     BinaryOp {
         span: Span,

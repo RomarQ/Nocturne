@@ -9284,3 +9284,126 @@ async fn uint128_cmp_high_half_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Uint<128> > Uint<128>");
 }
+
+// ---------------------------------------------------------------------------
+// Parametric witnesses (first cut: zero-arg). `witnesses.foo()` allocates a
+// fresh `PrivateInput` block sized by `foo()`'s return type, then the
+// user-supplied method body produces the value at transcript-build time.
+// Compactc has this as `witness ownPublicKey(): PublicKey;`; we recognise
+// it as an `impl <WitnessName>` block in the user's contract module.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod parametric_witness {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct ParamLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct ParamWitnesses;
+
+    // The user's `impl ParamWitnesses` block carries the witness method
+    // bodies. The proc macro records the signature; the runtime calls
+    // straight into this code from the generated transcript builder.
+    impl ParamWitnesses {
+        pub fn derive(&self) -> Uint<64> {
+            Uint::<64>::from(42u64)
+        }
+    }
+
+    impl ParamLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn store_derived(&mut self, witnesses: &ParamWitnesses) {
+            // Parametric witness call. Before this commit the parser
+            // rejected `witnesses.method()` and the contract failed
+            // at parse time.
+            self.stored.set(witnesses.derive());
+        }
+    }
+}
+
+fn build_parametric_witness_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod parametric_witness {
+            #[nocturne(ledger)]
+            pub struct ParamLedger { stored: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct ParamWitnesses;
+            impl ParamWitnesses {
+                pub fn derive(&self) -> Uint<64> { Uint::<64>::from(42u64) }
+            }
+            impl ParamLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn store_derived(&mut self, witnesses: &ParamWitnesses) {
+                    self.stored.set(witnesses.derive());
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store_derived")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn parametric_witness_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_parametric_witness_ir();
+    let witnesses = parametric_witness::ParamWitnesses;
+    let nocturne_transcript =
+        parametric_witness::transcript::build_store_derived_transcript(&witnesses);
+
+    // One witness call → one PrivateInput → one private output Fr.
+    // The on-chain Op::Push embeds the same value (42u64) via the
+    // transcript builder's invocation of `witnesses.derive()`.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(42u64)];
+    let preimage = canonical_preimage(
+        "store_derived",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "parametric witness call must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for parametric witness call");
+}

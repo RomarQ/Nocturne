@@ -148,7 +148,12 @@ pub fn generate_contract_info(contract: &ContractIR) -> ContractInfo {
         .collect();
 
     let witnesses = if let Some(w) = &contract.witnesses {
-        w.fields
+        // Static witness fields come first (no arguments, type is the
+        // field's type). Parametric witness methods follow, carrying
+        // their declared parameter list. Compactc's schema treats both
+        // shapes uniformly under `witnesses[]`.
+        let mut out: Vec<WitnessInfo> = w
+            .fields
             .iter()
             .map(|f| {
                 let type_name = type_to_string(&f.ty);
@@ -158,7 +163,23 @@ pub fn generate_contract_info(contract: &ContractIR) -> ContractInfo {
                     result_type: TypeDescriptor::from_type_str(&type_name),
                 }
             })
-            .collect()
+            .collect();
+        for m in &w.methods {
+            let arguments = m
+                .params
+                .iter()
+                .map(|p| ArgumentInfo {
+                    name: p.name.to_string(),
+                    ty: TypeDescriptor::from_type_str(&type_to_string(&p.ty)),
+                })
+                .collect();
+            out.push(WitnessInfo {
+                name: format!("private${}", m.name),
+                arguments,
+                result_type: TypeDescriptor::from_type_str(&type_to_string(&m.return_type)),
+            });
+        }
+        out
     } else {
         vec![]
     };

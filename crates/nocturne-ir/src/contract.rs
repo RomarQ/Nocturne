@@ -113,6 +113,14 @@ pub struct WitnessIR {
     pub span: Span,
     pub name: Ident,
     pub fields: Vec<WitnessFieldIR>,
+    /// Parametric witness methods declared in an `impl <WitnessName>`
+    /// block in the user's contract module. Each method becomes a
+    /// `WitnessCall` site at the IR layer — at runtime the transcript
+    /// builder invokes the user-supplied method to compute the witness
+    /// value (vs `WitnessFieldIR` which reads a pre-supplied field).
+    /// The method's body stays in user code; the proc macro only
+    /// records its signature.
+    pub methods: Vec<WitnessMethodIR>,
 }
 
 /// A single field in the witnesses struct.
@@ -121,6 +129,19 @@ pub struct WitnessFieldIR {
     pub span: Span,
     pub name: Ident,
     pub ty: Type,
+}
+
+/// A parametric witness method (e.g. `fn salted_hash(&self, salt:
+/// Bytes<32>) -> Bytes<32>`). The method's body stays in the user's
+/// `impl` block; the IR carries only the signature so codegen knows
+/// how many PrivateInputs to allocate (return type's wire layout) and
+/// how to invoke the method at transcript-build time.
+#[derive(Debug)]
+pub struct WitnessMethodIR {
+    pub span: Span,
+    pub name: Ident,
+    pub params: Vec<ParamIR>,
+    pub return_type: Type,
 }
 
 /// IR for a `#[nocturne(constructor)]` function.

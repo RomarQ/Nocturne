@@ -79,6 +79,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                     &mut constructors,
                     &mut circuits,
                     &mut queries,
+                    witnesses.as_mut(),
                     &mut other_items,
                     &mut diagnostics,
                 )?;
@@ -245,30 +246,38 @@ fn parse_ledger_struct(s: &ItemStruct) -> MidnightResult<LedgerIR> {
 fn parse_witnesses_struct(s: &ItemStruct) -> MidnightResult<WitnessIR> {
     let mut fields = Vec::new();
 
-    let named_fields = match &s.fields {
-        syn::Fields::Named(named) => &named.named,
-        _ => {
+    // Three shapes accepted:
+    //   - Named struct with field list (the original shape; field
+    //     witnesses).
+    //   - Empty named struct `pub struct W {}` (parametric witnesses
+    //     only, declared in an `impl W` block).
+    //   - Unit struct `pub struct W;` (same).
+    match &s.fields {
+        syn::Fields::Named(named) => {
+            for field in &named.named {
+                let field_name = field.ident.clone().unwrap();
+                fields.push(WitnessFieldIR {
+                    span: field_name.span(),
+                    name: field_name,
+                    ty: field.ty.clone(),
+                });
+            }
+        }
+        syn::Fields::Unit => {}
+        syn::Fields::Unnamed(_) => {
             return Err(MidnightError::new(
                 s.ident.span(),
                 ErrorCode::InvalidType,
-                "witnesses struct must have named fields",
+                "witnesses struct must use named fields or be a unit struct",
             ));
         }
-    };
-
-    for field in named_fields {
-        let field_name = field.ident.clone().unwrap();
-        fields.push(WitnessFieldIR {
-            span: field_name.span(),
-            name: field_name,
-            ty: field.ty.clone(),
-        });
     }
 
     Ok(WitnessIR {
         span: s.ident.span(),
         name: s.ident.clone(),
         fields,
+        methods: Vec::new(),
     })
 }
 
@@ -291,10 +300,35 @@ fn parse_impl_block(
     constructors: &mut Vec<ConstructorIR>,
     circuits: &mut Vec<CircuitIR>,
     queries: &mut Vec<QueryIR>,
+    witnesses: Option<&mut WitnessIR>,
     other_items: &mut Vec<Item>,
     diagnostics: &mut Diagnostics,
 ) -> MidnightResult<()> {
     let mut has_midnight_methods = false;
+
+    // If the impl targets the witnesses struct (by last-segment ident
+    // match against `witnesses.name`), every `pub fn` becomes a
+    // parametric witness method declaration. The body stays in the
+    // user's impl block.
+    let witnesses_target_match = witnesses
+        .as_ref()
+        .map(|w| impl_targets_ident(impl_block, &w.name))
+        .unwrap_or(false);
+    if witnesses_target_match && let Some(w) = witnesses {
+        for item in &impl_block.items {
+            if let ImplItem::Fn(method) = item {
+                match parse_witness_method(method) {
+                    Ok(m) => w.methods.push(m),
+                    Err(e) => diagnostics.push(e),
+                }
+            }
+        }
+        // Keep the impl block in the user's output so the method
+        // bodies are actually compiled — the user's code is what
+        // provides the runtime implementation.
+        other_items.push(Item::Impl(impl_block.clone()));
+        return Ok(());
+    }
 
     for item in &impl_block.items {
         if let ImplItem::Fn(method) = item {
@@ -330,6 +364,43 @@ fn parse_impl_block(
     }
 
     Ok(())
+}
+
+fn impl_targets_ident(impl_block: &ItemImpl, ident: &syn::Ident) -> bool {
+    // `impl Witnesses { ... }` parses as `ItemImpl` with `self_ty`
+    // being `Type::Path(...)`. We match by the last segment's ident,
+    // which is what compactc-style witness declarations expect (one
+    // impl block per witnesses struct, no generics).
+    if impl_block.trait_.is_some() {
+        return false;
+    }
+    if let syn::Type::Path(tp) = &*impl_block.self_ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return &seg.ident == ident;
+    }
+    false
+}
+
+fn parse_witness_method(method: &ImplItemFn) -> MidnightResult<WitnessMethodIR> {
+    let name = method.sig.ident.clone();
+    let params = parse_fn_params(&method.sig)?;
+    let return_type = match &method.sig.output {
+        ReturnType::Default => {
+            return Err(MidnightError::new(
+                name.span(),
+                ErrorCode::InvalidType,
+                "parametric witness method must declare a return type",
+            ));
+        }
+        ReturnType::Type(_, ty) => (**ty).clone(),
+    };
+    Ok(WitnessMethodIR {
+        span: name.span(),
+        name,
+        params,
+        return_type,
+    })
 }
 
 fn parse_constructor(method: &ImplItemFn) -> MidnightResult<ConstructorIR> {
@@ -610,6 +681,27 @@ fn parse_expr(expr: &Expr) -> MidnightResult<ExprIR> {
                     method: method.clone(),
                     args: parsed_args,
                 });
+            }
+
+            // Detect `witnesses.method(args)` — a parametric witness
+            // call. The receiver is a bare `witnesses` identifier (same
+            // shape `WitnessAccess` recognises for field reads). Routes
+            // to `WitnessCall` so the codegen treats it as a witness
+            // value source (PrivateInput allocation, transcript push),
+            // not a regular method call on a Rust value.
+            if let Expr::Path(ExprPath {
+                path: recv_path, ..
+            }) = &**receiver
+                && let Some(recv_ident) = recv_path.get_ident()
+            {
+                let recv_name = recv_ident.to_string();
+                if recv_name == "witnesses" || recv_name.ends_with("witnesses") {
+                    return Ok(ExprIR::WitnessCall {
+                        span: method.span(),
+                        name: method.clone(),
+                        args: parsed_args,
+                    });
+                }
             }
 
             let parsed_receiver = parse_expr(receiver)?;

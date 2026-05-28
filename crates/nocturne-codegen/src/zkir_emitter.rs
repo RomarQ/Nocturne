@@ -77,6 +77,18 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
                 .collect()
         })
         .unwrap_or_default();
+    // Parametric witness methods: name → return type. Each `WitnessCall`
+    // emit allocates PrivateInputs sized by this return type's layout.
+    let witness_methods: HashMap<String, syn::Type> = contract
+        .witnesses
+        .as_ref()
+        .map(|w| {
+            w.methods
+                .iter()
+                .map(|m| (m.name.to_string(), m.return_type.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let circuits = contract
         .circuits
@@ -86,6 +98,7 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
                 &field_names,
                 &field_types,
                 &witness_types,
+                &witness_methods,
                 &contract.user_structs,
                 &contract.user_enums,
             );
@@ -123,6 +136,9 @@ struct ZkirEmitter {
     field_types: Vec<syn::Type>,
     /// Witness field name → type, for emitting type constraints on PrivateInput.
     witness_types: HashMap<String, syn::Type>,
+    /// Parametric witness method name → return type. Each `WitnessCall`
+    /// allocates fresh `PrivateInput`s sized by this type's wire layout.
+    witness_methods: HashMap<String, syn::Type>,
     /// User-defined struct definitions (name → fields in declaration
     /// order). Lets `Map<MyStruct, _>` / `Set<MyStruct>` etc. layout the
     /// struct as a tuple-of-fields for alignment + witness expansion.
@@ -137,6 +153,7 @@ impl ZkirEmitter {
         field_names: &[String],
         field_types: &[syn::Type],
         witness_types: &HashMap<String, syn::Type>,
+        witness_methods: &HashMap<String, syn::Type>,
         user_structs: &HashMap<String, Vec<nocturne_ir::UserStructField>>,
         user_enums: &HashMap<String, Vec<nocturne_ir::UserEnumVariant>>,
     ) -> Self {
@@ -152,6 +169,7 @@ impl ZkirEmitter {
             field_names: field_names.to_vec(),
             field_types: field_types.to_vec(),
             witness_types: witness_types.clone(),
+            witness_methods: witness_methods.clone(),
             user_structs: user_structs.clone(),
             user_enums: user_enums.clone(),
         }
@@ -455,6 +473,42 @@ impl ZkirEmitter {
                 let first = first_idx.expect("at least one PrivateInput per witness");
                 self.variables.insert(key, first);
                 Some(first)
+            }
+
+            // Parametric witness call `witnesses.method(args)`. Args
+            // are emitted first so any witness reads they contain
+            // allocate their own PrivateInputs; the call itself then
+            // allocates a fresh block of PrivateInputs sized by the
+            // method's return type. No cache key — each call site is
+            // a distinct witness value.
+            ExprIR::WitnessCall { name, args, .. } => {
+                for arg in args {
+                    let _ = self.emit_expr(arg);
+                }
+                let ret_ty = self.witness_methods.get(&name.to_string()).cloned();
+                let layout = ret_ty
+                    .as_ref()
+                    .map(|t| witness_fr_layout(t, &self.user_structs, &self.user_enums))
+                    .unwrap_or_else(|| vec![FrLayout::Field]);
+                let mut first_idx = None;
+                for entry in layout {
+                    let var = self.emit_instruction(Instruction::PrivateInput {
+                        guard: self.current_io_guard(),
+                    });
+                    if first_idx.is_none() {
+                        first_idx = Some(var);
+                    }
+                    match entry {
+                        FrLayout::Bits(b) => self
+                            .instructions
+                            .push(Instruction::ConstrainBits { var, bits: b }),
+                        FrLayout::Boolean => self
+                            .instructions
+                            .push(Instruction::ConstrainToBoolean { var }),
+                        FrLayout::Field => {}
+                    }
+                }
+                first_idx
             }
 
             ExprIR::Literal { value, .. } => {
