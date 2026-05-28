@@ -14,8 +14,30 @@ pub struct ContractInfo {
     pub runtime_version: String,
     pub circuits: Vec<CircuitInfo>,
     pub witnesses: Vec<WitnessInfo>,
+    /// One entry per `#[nocturne(ledger)]` struct field, in declaration
+    /// order. Mirrors compactc's `ledger[]` so downstream tooling
+    /// (indexers, off-chain readers, type-binding generators) can
+    /// discover which state slots are queryable and where they live.
+    #[serde(default)]
+    pub ledger: Vec<LedgerFieldInfo>,
     #[serde(default)]
     pub contracts: Vec<String>,
+}
+
+/// One entry in `contract-info.json`'s `ledger[]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LedgerFieldInfo {
+    pub name: String,
+    /// Declaration-order index of the field in the ledger struct.
+    /// Same as the implicit slot index the on-chain VM uses.
+    pub index: u32,
+    /// Whether downstream tools should advertise this field as
+    /// queryable. Defaults to `true`; opt out per field with
+    /// `#[nocturne(private)]`.
+    pub exported: bool,
+    #[serde(rename = "type")]
+    pub ty: TypeDescriptor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,12 +163,26 @@ pub fn generate_contract_info(contract: &ContractIR) -> ContractInfo {
         vec![]
     };
 
+    let ledger = contract
+        .ledger
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, f)| LedgerFieldInfo {
+            name: f.name.to_string(),
+            index: i as u32,
+            exported: f.exported,
+            ty: TypeDescriptor::from_type_str(&type_to_string(&f.ty)),
+        })
+        .collect();
+
     ContractInfo {
         compiler_version: format!("nocturne {}", env!("CARGO_PKG_VERSION")),
         language_version: "1.0".to_string(),
         runtime_version: "1.0".to_string(),
         circuits,
         witnesses,
+        ledger,
         contracts: vec![],
     }
 }

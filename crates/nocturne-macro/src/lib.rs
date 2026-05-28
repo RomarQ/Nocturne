@@ -104,6 +104,15 @@ fn strip_item_attrs(item: syn::Item) -> syn::Item {
     match item {
         syn::Item::Struct(mut s) => {
             s.attrs.retain(|a| !is_midnight_attr(a));
+            // Also strip field-level `#[nocturne(...)]` attributes
+            // (e.g. `#[nocturne(private)]` on a ledger field). Without
+            // this they'd leak into the user-visible struct and Rust
+            // would reject the unknown `nocturne` tool path.
+            if let syn::Fields::Named(ref mut named) = s.fields {
+                for field in named.named.iter_mut() {
+                    field.attrs.retain(|a| !is_midnight_attr(a));
+                }
+            }
             syn::Item::Struct(s)
         }
         syn::Item::Impl(mut imp) => {

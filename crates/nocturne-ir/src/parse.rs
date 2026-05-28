@@ -221,12 +221,17 @@ fn parse_ledger_struct(s: &ItemStruct) -> MidnightResult<LedgerIR> {
     for field in named_fields {
         let field_name = field.ident.clone().unwrap();
         let type_kind = extract_type_kind(&field.ty);
+        let exported = !matches!(
+            find_midnight_attr(&field.attrs),
+            Some((MidnightAttr::Private, _))
+        );
 
         fields.push(LedgerFieldIR {
             span: field_name.span(),
             name: field_name,
             ty: field.ty.clone(),
             type_kind,
+            exported,
         });
     }
 

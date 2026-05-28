@@ -11,6 +11,10 @@ pub enum MidnightAttr {
     Query,
     Event,
     StateType,
+    /// Field-level marker: this ledger field is internal and should
+    /// not be advertised in `contract-info.json` as queryable.
+    /// Default for a ledger field is `exported = true`.
+    Private,
 }
 
 impl MidnightAttr {
@@ -38,6 +42,7 @@ impl MidnightAttr {
             "query" => Some(Self::Query),
             "event" => Some(Self::Event),
             "state_type" => Some(Self::StateType),
+            "private" => Some(Self::Private),
             _ => None,
         }
     }

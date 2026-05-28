@@ -72,6 +72,12 @@ pub struct LedgerFieldIR {
     pub ty: Type,
     /// The outer type name (e.g., "Counter", "Cell", "Map", "MerkleTree").
     pub type_kind: LedgerTypeKind,
+    /// Whether the field is advertised as queryable in
+    /// `contract-info.json`. Defaults to `true`; opt out by tagging the
+    /// field with `#[nocturne(private)]`. Mirrors compactc's per-field
+    /// `exported: bool` so indexers / off-chain readers can discover
+    /// which fields are publicly readable.
+    pub exported: bool,
 }
 
 /// Classification of ledger field types.
