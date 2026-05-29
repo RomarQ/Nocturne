@@ -9407,3 +9407,133 @@ async fn parametric_witness_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for parametric witness call");
 }
+
+// ---------------------------------------------------------------------------
+// Multi-arg parametric witnesses. The ExprIR variant already carries
+// `args: Vec<ExprIR>`; this test exercises the arg-emit + arg-passing path
+// end-to-end. The witness method takes one `Uint<64>` and returns
+// `2 * arg`; the circuit calls it with a witness field as the argument.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod parametric_witness_multi_arg {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct MultiArgLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct MultiArgWitnesses {
+        pub w: Uint<64>,
+    }
+
+    // User-supplied method body. The proc macro only records the
+    // signature; this code is what runs at transcript-build time when
+    // the circuit invokes `witnesses.double(...)`.
+    impl MultiArgWitnesses {
+        pub fn double(&self, x: Uint<64>) -> Uint<64> {
+            Uint::<64>::from(x.value().wrapping_mul(2))
+        }
+    }
+
+    impl MultiArgLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn store_doubled(&mut self, witnesses: &MultiArgWitnesses) {
+            // The witness arg flows through `arg_to_runtime_raw_expr`
+            // → `witnesses.w.clone()`. At the ZKIR layer the WitnessCall
+            // arm emits the arg first (which allocates a PrivateInput
+            // for `w`), then allocates the call's return PrivateInput.
+            self.stored.set(witnesses.double(witnesses.w));
+        }
+    }
+}
+
+fn build_parametric_witness_multi_arg_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod parametric_witness_multi_arg {
+            #[nocturne(ledger)]
+            pub struct MultiArgLedger { stored: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct MultiArgWitnesses { pub w: Uint<64> }
+            impl MultiArgWitnesses {
+                pub fn double(&self, x: Uint<64>) -> Uint<64> {
+                    Uint::<64>::from(x.value().wrapping_mul(2))
+                }
+            }
+            impl MultiArgLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn store_doubled(&mut self, witnesses: &MultiArgWitnesses) {
+                    self.stored.set(witnesses.double(witnesses.w));
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store_doubled")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn parametric_witness_multi_arg_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_parametric_witness_multi_arg_ir();
+    let witnesses = parametric_witness_multi_arg::MultiArgWitnesses {
+        w: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript =
+        parametric_witness_multi_arg::transcript::build_store_doubled_transcript(&witnesses);
+
+    // Two PrivateInputs in declaration order:
+    //   - witnesses.w  → 7
+    //   - witnesses.double(w) → 14
+    let private_outputs: Vec<AlignedValue> =
+        vec![AlignedValue::from(7u64), AlignedValue::from(14u64)];
+    let preimage = canonical_preimage(
+        "store_doubled",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "multi-arg parametric witness call must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for multi-arg parametric witness call");
+}
