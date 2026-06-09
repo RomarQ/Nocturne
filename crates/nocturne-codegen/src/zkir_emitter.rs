@@ -89,6 +89,15 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
                 .collect()
         })
         .unwrap_or_default();
+    // Inlinable helpers: name → full HelperIR (params, return type,
+    // body). When the FnCall emit arm sees a name in this table it
+    // splices the body into the call site rather than returning a
+    // wrong wire.
+    let helpers: HashMap<String, nocturne_ir::HelperIR> = contract
+        .helpers
+        .iter()
+        .map(|h| (h.name.to_string(), h.clone()))
+        .collect();
 
     let circuits = contract
         .circuits
@@ -99,6 +108,7 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
                 &field_types,
                 &witness_types,
                 &witness_methods,
+                &helpers,
                 &contract.user_structs,
                 &contract.user_enums,
             );
@@ -139,6 +149,16 @@ struct ZkirEmitter {
     /// Parametric witness method name → return type. Each `WitnessCall`
     /// allocates fresh `PrivateInput`s sized by this type's wire layout.
     witness_methods: HashMap<String, syn::Type>,
+    /// Helper functions inlinable at each call site (compactc's model
+    /// per `LFDT-Minokawa/compact:compiler/circuit-passes.ss`). Lookup
+    /// by the call's last-segment name; on a hit the body is
+    /// alpha-renamed and emitted in place. Acyclicity is the parser's
+    /// responsibility (`validate_helpers_acyclic` in nocturne-ir).
+    helpers: HashMap<String, nocturne_ir::HelperIR>,
+    /// Per-circuit counter used to generate fresh names for helper
+    /// param + let bindings during inlining. Increments on every
+    /// helper call so nested and repeated inlines never collide.
+    helper_counter: u32,
     /// User-defined struct definitions (name → fields in declaration
     /// order). Lets `Map<MyStruct, _>` / `Set<MyStruct>` etc. layout the
     /// struct as a tuple-of-fields for alignment + witness expansion.
@@ -154,6 +174,7 @@ impl ZkirEmitter {
         field_types: &[syn::Type],
         witness_types: &HashMap<String, syn::Type>,
         witness_methods: &HashMap<String, syn::Type>,
+        helpers: &HashMap<String, nocturne_ir::HelperIR>,
         user_structs: &HashMap<String, Vec<nocturne_ir::UserStructField>>,
         user_enums: &HashMap<String, Vec<nocturne_ir::UserEnumVariant>>,
     ) -> Self {
@@ -170,6 +191,8 @@ impl ZkirEmitter {
             field_types: field_types.to_vec(),
             witness_types: witness_types.clone(),
             witness_methods: witness_methods.clone(),
+            helpers: helpers.clone(),
+            helper_counter: 0,
             user_structs: user_structs.clone(),
             user_enums: user_enums.clone(),
         }
@@ -347,6 +370,43 @@ impl ZkirEmitter {
             circuit_name: circuit.name.to_string(),
             ir_source,
         }
+    }
+
+    /// Inline a helper at the call site. Implements compactc's
+    /// `let* args; rename(body)` pattern (`circuit-passes.ss:358-376`):
+    /// each parameter is bound to its arg expression's resulting wire
+    /// under a fresh name, then the body is alpha-renamed against the
+    /// resulting substitution map and emitted statement-by-statement.
+    /// The last statement's wire is the helper's return value.
+    fn emit_inlined_helper(
+        &mut self,
+        helper: &nocturne_ir::HelperIR,
+        args: &[ExprIR],
+    ) -> Option<Index> {
+        if helper.params.len() != args.len() {
+            return None;
+        }
+        let counter = self.helper_counter;
+        self.helper_counter += 1;
+        let mut subst: HashMap<String, String> = HashMap::new();
+        let mut seq: u32 = 0;
+        for (param, arg) in helper.params.iter().zip(args) {
+            let fresh = format!("__h{counter}_{seq}_{}", param.name);
+            seq += 1;
+            subst.insert(param.name.to_string(), fresh.clone());
+            let arg_ty = self.infer_expr_type(arg);
+            let wire = self.emit_expr(arg)?;
+            self.variables.insert(fresh.clone(), wire);
+            if let Some(t) = arg_ty {
+                self.variable_types.insert(fresh, t);
+            }
+        }
+        let mut last: Option<Index> = None;
+        for stmt in &helper.body {
+            let renamed = alpha_rename(stmt.clone(), &mut subst, counter, &mut seq);
+            last = self.emit_expr(&renamed);
+        }
+        last
     }
 
     /// Emit instructions for an expression, returning the memory index of the result (if any).
@@ -739,6 +799,17 @@ impl ZkirEmitter {
                 // it doesn't carry the type.
                 if name_str == "merkle_tree_path_root" {
                     return self.emit_merkle_tree_path_root(args);
+                }
+
+                // Inlinable helper. The call site is replaced with the
+                // helper's body after alpha-renaming and per-arg
+                // let-binding (compactc's `let* args; rename(body)`
+                // pattern at `circuit-passes.ss:358-376`). Recursive
+                // helper calls inside the body lower through this
+                // same arm; acyclicity (rejected at parse time) keeps
+                // it terminating.
+                if let Some(helper) = self.helpers.get(&name_str).cloned() {
+                    return self.emit_inlined_helper(&helper, args);
                 }
 
                 let arg_indices: Vec<Index> =
@@ -2813,5 +2884,222 @@ fn instruction_output_count(instruction: &Instruction) -> u32 {
         | Instruction::PersistentHash { .. } => 2,
 
         _ => 1,
+    }
+}
+
+/// Recursive alpha-renamer over `ExprIR` used by the helper inliner.
+/// Walks the tree replacing `Var { name }` references via `subst` and
+/// generating fresh names for each `Let { name, ... }` binding. The
+/// fresh-name convention `__h{counter}_{seq}_{name}` ensures every
+/// inlined binding is unique across nested + repeated helper calls.
+///
+/// Scoping: `subst` snapshots are saved/restored around If branches
+/// and Block statement lists so let bindings local to one branch /
+/// inner block don't leak into the sibling branch / outer body. The
+/// top-level helper body's lets DO persist through the body — the
+/// caller iterates the body Vec without save/restore.
+fn alpha_rename(
+    expr: ExprIR,
+    subst: &mut std::collections::HashMap<String, String>,
+    counter: u32,
+    seq: &mut u32,
+) -> ExprIR {
+    use proc_macro2::Ident;
+    match expr {
+        ExprIR::Var { span, name } => {
+            let new_name = subst
+                .get(&name.to_string())
+                .map(|s| Ident::new(s, name.span()))
+                .unwrap_or(name);
+            ExprIR::Var {
+                span,
+                name: new_name,
+            }
+        }
+        ExprIR::Let { span, name, value } => {
+            // Rename RHS in the OLD subst (let RHS can't see its own
+            // binding), then add the fresh mapping for the body of
+            // any following statements.
+            let new_value = Box::new(alpha_rename(*value, subst, counter, seq));
+            let fresh = format!("__h{counter}_{seq}_{}", name);
+            *seq += 1;
+            subst.insert(name.to_string(), fresh.clone());
+            let new_name = Ident::new(&fresh, name.span());
+            ExprIR::Let {
+                span,
+                name: new_name,
+                value: new_value,
+            }
+        }
+        ExprIR::BinaryOp { span, op, lhs, rhs } => ExprIR::BinaryOp {
+            span,
+            op,
+            lhs: Box::new(alpha_rename(*lhs, subst, counter, seq)),
+            rhs: Box::new(alpha_rename(*rhs, subst, counter, seq)),
+        },
+        ExprIR::UnaryOp { span, op, expr } => ExprIR::UnaryOp {
+            span,
+            op,
+            expr: Box::new(alpha_rename(*expr, subst, counter, seq)),
+        },
+        ExprIR::FnCall {
+            span,
+            name,
+            path,
+            args,
+        } => ExprIR::FnCall {
+            span,
+            name,
+            path,
+            args: args
+                .into_iter()
+                .map(|a| alpha_rename(a, subst, counter, seq))
+                .collect(),
+        },
+        ExprIR::MethodCall {
+            span,
+            receiver,
+            method,
+            args,
+        } => ExprIR::MethodCall {
+            span,
+            receiver: Box::new(alpha_rename(*receiver, subst, counter, seq)),
+            method,
+            args: args
+                .into_iter()
+                .map(|a| alpha_rename(a, subst, counter, seq))
+                .collect(),
+        },
+        ExprIR::If {
+            span,
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            // Cond is evaluated in the surrounding scope; rename in
+            // the live subst. Branches scope their own lets — snapshot
+            // subst before each, restore after.
+            let cond = Box::new(alpha_rename(*cond, subst, counter, seq));
+            let snapshot = subst.clone();
+            let then_branch: Vec<ExprIR> = then_branch
+                .into_iter()
+                .map(|s| alpha_rename(s, subst, counter, seq))
+                .collect();
+            *subst = snapshot.clone();
+            let else_branch = else_branch.map(|b| {
+                let renamed: Vec<ExprIR> = b
+                    .into_iter()
+                    .map(|s| alpha_rename(s, subst, counter, seq))
+                    .collect();
+                *subst = snapshot;
+                renamed
+            });
+            ExprIR::If {
+                span,
+                cond,
+                then_branch,
+                else_branch,
+            }
+        }
+        ExprIR::Assert { span, kind } => {
+            use nocturne_ir::expr::AssertKind;
+            let new_kind = match kind {
+                AssertKind::Assert(e) => {
+                    AssertKind::Assert(Box::new(alpha_rename(*e, subst, counter, seq)))
+                }
+                AssertKind::AssertEq(a, b) => AssertKind::AssertEq(
+                    Box::new(alpha_rename(*a, subst, counter, seq)),
+                    Box::new(alpha_rename(*b, subst, counter, seq)),
+                ),
+            };
+            ExprIR::Assert {
+                span,
+                kind: new_kind,
+            }
+        }
+        ExprIR::Disclose { span, value } => ExprIR::Disclose {
+            span,
+            value: Box::new(alpha_rename(*value, subst, counter, seq)),
+        },
+        ExprIR::EnumPayload {
+            span,
+            scrutinee,
+            enum_name,
+        } => ExprIR::EnumPayload {
+            span,
+            scrutinee: Box::new(alpha_rename(*scrutinee, subst, counter, seq)),
+            enum_name,
+        },
+        ExprIR::ArrayLit { span, elements } => ExprIR::ArrayLit {
+            span,
+            elements: elements
+                .into_iter()
+                .map(|e| alpha_rename(e, subst, counter, seq))
+                .collect(),
+        },
+        ExprIR::Index { span, array, index } => ExprIR::Index {
+            span,
+            array: Box::new(alpha_rename(*array, subst, counter, seq)),
+            index,
+        },
+        ExprIR::Block { span, stmts } => {
+            let snapshot = subst.clone();
+            let stmts: Vec<ExprIR> = stmts
+                .into_iter()
+                .map(|s| alpha_rename(s, subst, counter, seq))
+                .collect();
+            *subst = snapshot;
+            ExprIR::Block { span, stmts }
+        }
+        ExprIR::StructInit { span, name, fields } => ExprIR::StructInit {
+            span,
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(f, e)| (f, alpha_rename(e, subst, counter, seq)))
+                .collect(),
+        },
+        ExprIR::Return { span, value } => ExprIR::Return {
+            span,
+            value: value.map(|v| Box::new(alpha_rename(*v, subst, counter, seq))),
+        },
+        ExprIR::Tuple { span, elements } => ExprIR::Tuple {
+            span,
+            elements: elements
+                .into_iter()
+                .map(|e| alpha_rename(e, subst, counter, seq))
+                .collect(),
+        },
+        ExprIR::Reference { span, expr } => ExprIR::Reference {
+            span,
+            expr: Box::new(alpha_rename(*expr, subst, counter, seq)),
+        },
+        ExprIR::LedgerAccess {
+            span,
+            field,
+            method,
+            args,
+        } => ExprIR::LedgerAccess {
+            span,
+            field,
+            method,
+            args: args
+                .into_iter()
+                .map(|a| alpha_rename(a, subst, counter, seq))
+                .collect(),
+        },
+        ExprIR::WitnessCall { span, name, args } => ExprIR::WitnessCall {
+            span,
+            name,
+            args: args
+                .into_iter()
+                .map(|a| alpha_rename(a, subst, counter, seq))
+                .collect(),
+        },
+        // Leaves — nothing to rename.
+        ExprIR::Literal { .. }
+        | ExprIR::Path { .. }
+        | ExprIR::WitnessAccess { .. }
+        | ExprIR::Unsupported { .. } => expr,
     }
 }

@@ -162,7 +162,7 @@ pub struct WitnessMethodIR {
 /// transcript codegen does NOT consume this — it keeps calling the
 /// user's Rust `fn` directly via the path-preserving FnCall arm, and
 /// the two views agree because both execute the same body.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct HelperIR {
     pub span: Span,
     pub name: Ident,
@@ -210,7 +210,7 @@ pub struct QueryIR {
 }
 
 /// A function parameter.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ParamIR {
     pub span: Span,
     pub name: Ident,
