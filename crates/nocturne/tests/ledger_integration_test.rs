@@ -9657,3 +9657,248 @@ async fn helper_inline_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for inlined helper");
 }
+
+// ---------------------------------------------------------------------------
+// Helper inlining (Commit C): multi-statement body with internal `let`
+// bindings. The alpha-renamer generates fresh names for the helper's
+// internal lets so they don't collide with the caller's variables.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod helper_inline_let {
+    use super::*;
+
+    // Two-let body, deliberately returning the last let. clippy's
+    // `let_and_return` would simplify this in production code; we
+    // need the explicit lets so the test exercises the inliner's
+    // alpha-renaming of internal bindings.
+    #[allow(clippy::let_and_return)]
+    pub fn quad(x: Uint<64>) -> Uint<64> {
+        let y = x + x;
+        let z = y + y;
+        z
+    }
+
+    #[nocturne(ledger)]
+    pub struct LetLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct LetWitnesses {
+        pub w: Uint<64>,
+    }
+
+    impl LetLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn store_quad(&mut self, witnesses: &LetWitnesses) {
+            self.stored.set(quad(witnesses.w));
+        }
+    }
+}
+
+fn build_helper_inline_let_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod helper_inline_let {
+            pub fn quad(x: Uint<64>) -> Uint<64> {
+                let y = x + x;
+                let z = y + y;
+                z
+            }
+            #[nocturne(ledger)]
+            pub struct LetLedger { stored: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct LetWitnesses { pub w: Uint<64> }
+            impl LetLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn store_quad(&mut self, witnesses: &LetWitnesses) {
+                    self.stored.set(quad(witnesses.w));
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store_quad")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn helper_inline_let_body_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_helper_inline_let_ir();
+    let witnesses = helper_inline_let::LetWitnesses {
+        w: Uint::<64>::from(5u64),
+    };
+    let nocturne_transcript =
+        helper_inline_let::transcript::build_store_quad_transcript(&witnesses);
+
+    // One witness w → one private output. Stored value is
+    // quad(5) = (5+5)+(5+5) = 20.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(5u64)];
+    let preimage = canonical_preimage(
+        "store_quad",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "helper with let bindings must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for helper with let bindings");
+}
+
+// ---------------------------------------------------------------------------
+// Helper inlining (Commit C): chained call where helper A calls helper B.
+// The inlined body of A contains a FnCall to B; emitting that FnCall hits
+// `emit_inlined_helper` again and substitutes B's body in turn. Per-call
+// counter prevents name collisions between A's and B's fresh names.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod helper_inline_chain {
+    use super::*;
+
+    pub fn add_one(x: Uint<64>) -> Uint<64> {
+        x + Uint::<64>::from(1u64)
+    }
+
+    pub fn add_two(x: Uint<64>) -> Uint<64> {
+        add_one(add_one(x))
+    }
+
+    #[nocturne(ledger)]
+    pub struct ChainLedger {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct ChainWitnesses {
+        pub w: Uint<64>,
+    }
+
+    impl ChainLedger {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn store_chain(&mut self, witnesses: &ChainWitnesses) {
+            self.stored.set(add_two(witnesses.w));
+        }
+    }
+}
+
+fn build_helper_inline_chain_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod helper_inline_chain {
+            pub fn add_one(x: Uint<64>) -> Uint<64> { x + Uint::<64>::from(1u64) }
+            pub fn add_two(x: Uint<64>) -> Uint<64> { add_one(add_one(x)) }
+            #[nocturne(ledger)]
+            pub struct ChainLedger { stored: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct ChainWitnesses { pub w: Uint<64> }
+            impl ChainLedger {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn store_chain(&mut self, witnesses: &ChainWitnesses) {
+                    self.stored.set(add_two(witnesses.w));
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store_chain")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn helper_inline_chained_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_helper_inline_chain_ir();
+    let witnesses = helper_inline_chain::ChainWitnesses {
+        w: Uint::<64>::from(10u64),
+    };
+    let nocturne_transcript =
+        helper_inline_chain::transcript::build_store_chain_transcript(&witnesses);
+
+    // One witness w → one private output. Stored value is
+    // add_two(10) = add_one(add_one(10)) = 12.
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(10u64)];
+    let preimage = canonical_preimage(
+        "store_chain",
+        nocturne_transcript.ops.clone(),
+        private_outputs,
+    );
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "chained helper call must produce ledger-shape PIs that match prove PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for chained helper call");
+}
