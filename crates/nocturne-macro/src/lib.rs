@@ -21,8 +21,28 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     match nocturne_ir::parse_contract(module.clone()) {
         Ok(contract_ir) => {
-            // Generate all artifacts (ZKIR, VM, metadata).
-            let artifacts = nocturne_codegen::codegen::generate_artifacts(&contract_ir);
+            // Generate all artifacts (ZKIR, VM, metadata). Circuit
+            // emission errors are hard compile errors — NOT warnings:
+            // a silently incomplete circuit can verify proofs that
+            // enforce less than the contract source says.
+            let artifacts = match nocturne_codegen::codegen::generate_artifacts(&contract_ir) {
+                Ok(artifacts) => artifacts,
+                Err(errors) => {
+                    let error_tokens: Vec<proc_macro2::TokenStream> = errors
+                        .iter()
+                        .map(|msg| {
+                            let msg = format!("nocturne: {msg}");
+                            quote::quote! { compile_error!(#msg); }
+                        })
+                        .collect();
+                    let cleaned = strip_midnight_attrs_from_module(module);
+                    return quote::quote! {
+                        #cleaned
+                        #(#error_tokens)*
+                    }
+                    .into();
+                }
+            };
 
             // Write artifacts to the target/nocturne/ directory.
             let contract_name = contract_ir.name.to_string();

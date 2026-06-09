@@ -231,10 +231,19 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
         } => {
             let field_name = field.to_string();
             let method_name = method.to_string();
+            // Internal invariant: rustc rejects typos on the real ledger
+            // struct, so an unknown name here is a parser/codegen bug.
+            // Falling back to field 0 would emit a verified-but-wrong
+            // transcript write.
             let field_idx = field_names
                 .iter()
                 .position(|f| f == &field_name)
-                .unwrap_or(0) as u8;
+                .unwrap_or_else(|| {
+                    panic!(
+                        "nocturne internal error: ledger field `{field_name}` not \
+                         found among {field_names:?}"
+                    )
+                }) as u8;
             let field_ty = field_types.get(field_idx as usize);
 
             match method_name.as_str() {
@@ -869,10 +878,7 @@ fn let_binding_runtime_value(value: &ExprIR, ctx: &TranscriptCtx<'_>) -> Option<
             Some(tokens)
         }
         ExprIR::Literal { value, .. } => match value {
-            nocturne_ir::expr::LiteralIR::Int(n) => {
-                let n = *n as u64;
-                Some(quote! { #n })
-            }
+            nocturne_ir::expr::LiteralIR::Int(n) => Some(int_literal_tokens(*n)),
             nocturne_ir::expr::LiteralIR::Bool(b) => Some(quote! { #b }),
             nocturne_ir::expr::LiteralIR::Str(_) => None,
         },
@@ -981,6 +987,19 @@ fn collect_witness_private_inputs(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> Tok
     }
 }
 
+/// Tokens for an integer literal carried in the IR as `u128`. Values
+/// fitting `u64` keep the `u64`-suffixed form (existing inference
+/// behavior); larger values emit a `u128`-suffixed literal so the
+/// runtime transcript carries the full value the circuit's `LoadImm`
+/// declares — truncating through `as u64` here would make prove fail
+/// (or worse, silently disagree) for any literal above `u64::MAX`.
+fn int_literal_tokens(n: u128) -> TokenStream {
+    match u64::try_from(n) {
+        Ok(v) => quote! { #v },
+        Err(_) => quote! { #n },
+    }
+}
+
 /// Generate a runtime Rust expression that evaluates to the value of an
 /// argument expression, suitable for wrapping in `AlignedValue::from(...)`.
 ///
@@ -991,14 +1010,7 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
     match expr {
         ExprIR::Literal { value, .. } => match value {
             nocturne_ir::expr::LiteralIR::Bool(b) => quote! { #b },
-            nocturne_ir::expr::LiteralIR::Int(n) => {
-                // u128 → u64 is safe for everything we currently support
-                // (Boolean, Uint<N> with N ≤ 64). Larger Uint values are
-                // a future-work concern tracked alongside multi-Fr value
-                // encoding.
-                let n = *n as u64;
-                quote! { #n }
-            }
+            nocturne_ir::expr::LiteralIR::Int(n) => int_literal_tokens(*n),
             nocturne_ir::expr::LiteralIR::Str(s) => quote! { #s },
         },
         ExprIR::Disclose { value, .. } => arg_to_runtime_expr(value),
@@ -2497,10 +2509,17 @@ fn generate_runtime_cond(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream 
             let field_name = field.to_string();
             let method_name = method.to_string();
             if matches!(method_name.as_str(), "contains" | "member") {
+                // Same internal invariant as `generate_op_stmt`: never
+                // silently fall back to field 0.
                 let field_idx = field_names
                     .iter()
                     .position(|f| f == &field_name)
-                    .unwrap_or(0) as u8;
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "nocturne internal error: ledger field `{field_name}` not \
+                             found among {field_names:?}"
+                        )
+                    }) as u8;
                 let field_ty = field_types.get(field_idx as usize);
                 return generate_map_contains_block(field_idx, &field_name, args, field_ty, ctx);
             }

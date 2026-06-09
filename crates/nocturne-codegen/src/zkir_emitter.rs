@@ -35,7 +35,7 @@ use midnight_transient_crypto::curve::Fr;
 use midnight_zkir::{Instruction, IrSource};
 use nocturne_ir::expr::{AssertKind, LiteralIR};
 use nocturne_ir::{CircuitIR, ContractIR, ExprIR};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 type Index = u32;
@@ -49,6 +49,13 @@ pub struct ZkirOutput {
 /// Result of full contract emission.
 pub struct ContractZkirOutput {
     pub circuits: Vec<ZkirOutput>,
+    /// Emission errors collected across all circuits. Non-empty means
+    /// at least one circuit's ZKIR is incomplete or wrong — callers
+    /// (`generate_artifacts` → the proc macro) MUST fail compilation
+    /// instead of using the circuits. Emitting a circuit that silently
+    /// drops a construct (worst case: an `assert!`) produces a proof
+    /// that verifies while enforcing less than the contract source.
+    pub errors: Vec<String>,
 }
 
 /// Emit ZKIR for all circuits in a contract.
@@ -99,24 +106,29 @@ pub fn emit_contract(contract: &ContractIR) -> ContractZkirOutput {
         .map(|h| (h.name.to_string(), h.clone()))
         .collect();
 
-    let circuits = contract
-        .circuits
-        .iter()
-        .map(|circuit| {
-            let mut emitter = ZkirEmitter::new(
-                &field_names,
-                &field_types,
-                &witness_types,
-                &witness_methods,
-                &helpers,
-                &contract.user_structs,
-                &contract.user_enums,
-            );
-            emitter.emit_circuit(circuit)
-        })
-        .collect();
+    let mut circuits = Vec::with_capacity(contract.circuits.len());
+    let mut errors = Vec::new();
+    for circuit in &contract.circuits {
+        let mut emitter = ZkirEmitter::new(
+            &field_names,
+            &field_types,
+            &witness_types,
+            &witness_methods,
+            &helpers,
+            &contract.user_structs,
+            &contract.user_enums,
+        );
+        let output = emitter.emit_circuit(circuit);
+        errors.extend(
+            emitter
+                .errors
+                .drain(..)
+                .map(|e| format!("circuit `{}`: {e}", circuit.name)),
+        );
+        circuits.push(output);
+    }
 
-    ContractZkirOutput { circuits }
+    ContractZkirOutput { circuits, errors }
 }
 
 struct ZkirEmitter {
@@ -166,6 +178,23 @@ struct ZkirEmitter {
     /// User-defined unit-variant enums (name → variants). Encoded
     /// on-chain as `Bytes<1>` carrying the variant discriminant.
     user_enums: HashMap<String, Vec<nocturne_ir::UserEnumVariant>>,
+    /// Emission errors. Every construct the emitter cannot lower
+    /// soundly records a message here instead of silently returning
+    /// `None` from `emit_expr`. `None` is reserved for statements that
+    /// legitimately produce no wire.
+    errors: Vec<String>,
+    /// Witness fields whose FIRST read happened inside a conditional
+    /// branch. Such reads allocate a guarded `PrivateInput` and are
+    /// deliberately NOT cached (the cache would leak a guarded wire
+    /// into unguarded contexts, desynchronizing the circuit from the
+    /// runtime builder's branch-local `private_transcript` push). Any
+    /// second touch of the field anywhere in the circuit is an error;
+    /// the user must hoist the read to a `let` before the `if`.
+    guarded_witness_fields: HashSet<String>,
+    /// Depth of helper inlining currently in progress. `return` inside
+    /// an inlined helper body is rejected (the inliner splices the body
+    /// into the caller, so `return` would not mean what it says).
+    helper_inline_depth: u32,
 }
 
 impl ZkirEmitter {
@@ -195,7 +224,18 @@ impl ZkirEmitter {
             helper_counter: 0,
             user_structs: user_structs.clone(),
             user_enums: user_enums.clone(),
+            errors: Vec::new(),
+            guarded_witness_fields: HashSet::new(),
+            helper_inline_depth: 0,
         }
+    }
+
+    /// Record an emission error and return `None`. Route every "can't
+    /// lower this" site through here so unsupported constructs fail
+    /// compilation instead of being silently dropped from the circuit.
+    fn unsupported(&mut self, what: impl Into<String>) -> Option<Index> {
+        self.errors.push(what.into());
+        None
     }
 
     /// Guard for `PrivateInput`/`PublicInput` when inside a conditional
@@ -215,21 +255,6 @@ impl ZkirEmitter {
         } else {
             None
         }
-    }
-
-    /// Resolve the element type `T` for an `ExprIR::Index`'s `array`
-    /// sub-expression. Covers:
-    /// - `witnesses.<f>[i]` — witness_types lookup
-    /// - `let arr = ...; arr[i]` — variable_types lookup (populated by
-    ///   the `Let` arm when the RHS's type is inferable)
-    ///
-    /// Returns `None` for shapes the IR can't type-infer (which falls
-    /// through to the Index emit's `None` path, surfacing as a
-    /// compile-time error downstream rather than emitting a wrong
-    /// offset).
-    fn array_element_type(&self, array: &ExprIR) -> Option<syn::Type> {
-        let ty = self.infer_expr_type(array)?;
-        array_inner_type_and_len(&ty).map(|(t, _)| t)
     }
 
     /// Type inference for the limited set of expressions whose source
@@ -267,33 +292,48 @@ impl ZkirEmitter {
         }
     }
 
-    /// Pick the bit width to constrain `LessThan` to. Tries the
-    /// operands' inferred types (lhs first, then rhs); falls back to
-    /// 64 when neither operand carries a recoverable type. Upstream's
-    /// `LessThan` documents "UB if a or b exceed bits", so getting
-    /// this right is a correctness requirement, not just an
-    /// optimisation — a `Uint<128>` operand compared at `bits: 64`
-    /// silently misverifies whenever its high half is non-zero.
-    fn comparison_bits(&self, lhs: &ExprIR, rhs: &ExprIR) -> u32 {
-        const DEFAULT_BITS: u32 = 64;
-        let ty = self
-            .infer_expr_type(lhs)
-            .or_else(|| self.infer_expr_type(rhs));
-        let Some(t) = ty else {
-            return DEFAULT_BITS;
-        };
-        let s = quote::quote!(#t).to_string().replace(' ', "");
-        if let Some(bits) = parse_uint_type(&s) {
-            return bits;
-        }
-        match s.as_str() {
-            "u8" => 8,
-            "u16" => 16,
-            "u32" => 32,
-            "u64" => 64,
-            "u128" => 128,
-            "Boolean" | "bool" => 1,
-            _ => DEFAULT_BITS,
+    /// Pick the bit width to constrain `LessThan` to: the MAX of both
+    /// operands' inferred widths. Upstream's `LessThan` documents "UB
+    /// if a or b exceed bits", so getting this right is a correctness
+    /// requirement, not just an optimisation — a `Uint<128>` operand
+    /// compared at `bits: 64` silently misverifies whenever its high
+    /// half is non-zero.
+    ///
+    /// Returns `None` when either operand is `Field`-typed or its
+    /// width cannot be inferred; callers must record an error rather
+    /// than guess a default width.
+    fn comparison_bits(&self, lhs: &ExprIR, rhs: &ExprIR) -> Option<u32> {
+        let l = self.expr_comparison_width(lhs)?;
+        let r = self.expr_comparison_width(rhs)?;
+        Some(l.max(r))
+    }
+
+    /// Bit width of one comparison operand. Integer literals are bound
+    /// by their value (a literal `300` needs 9 bits); typed expressions
+    /// use the declared `Uint<N>`/`uN`/`Boolean` width. `Field` and
+    /// uninferable shapes yield `None` — there is no sound `bits`
+    /// argument for them.
+    fn expr_comparison_width(&self, expr: &ExprIR) -> Option<u32> {
+        match expr {
+            ExprIR::Literal { value, .. } => match value {
+                LiteralIR::Int(n) => Some((128 - n.leading_zeros()).max(1)),
+                LiteralIR::Bool(_) => Some(1),
+                LiteralIR::Str(_) => None,
+            },
+            // `.value()` / `.into()` are transparent wrappers around
+            // the receiver's declared type.
+            ExprIR::MethodCall {
+                receiver, method, ..
+            } if method == "value" || method == "into" => self.expr_comparison_width(receiver),
+            ExprIR::Reference { expr: inner, .. } => self.expr_comparison_width(inner),
+            _ => {
+                let t = self.infer_expr_type(expr)?;
+                let s = quote::quote!(#t).to_string().replace(' ', "");
+                if s == "Boolean" || s == "bool" {
+                    return Some(1);
+                }
+                parse_uint_type(&s)
+            }
         }
     }
 
@@ -343,19 +383,38 @@ impl ZkirEmitter {
             self.emit_type_constraint(idx, &param.ty);
         }
 
-        // Process circuit body.
-        for expr in &circuit.body {
-            self.emit_expr(expr);
+        // `return` is only supported in tail position (the final
+        // statement, or the tail of the final statement's branches).
+        // The `Return` emit arm yields the value's wire WITHOUT
+        // emitting `Output` — the single `Output` below comes from the
+        // last statement's wire, so a trailing `return x;` and a
+        // trailing `x` expression produce identical circuits.
+        let body_len = circuit.body.len();
+        for (i, expr) in circuit.body.iter().enumerate() {
+            check_return_positions(expr, i + 1 == body_len, &mut self.errors);
         }
 
-        // If the circuit has a return type, emit Output for the last computed value.
-        // This enables communications commitment.
+        // Process circuit body, capturing the LAST statement's wire.
+        // Using `next_index - 1` here would be wrong: a trailing
+        // cache-hit expression (e.g. a let-bound witness re-reference)
+        // returns an earlier wire, not the most recently allocated one.
+        let mut last_wire: Option<Index> = None;
+        for expr in &circuit.body {
+            last_wire = self.emit_expr(expr);
+        }
+
+        // If the circuit has a return type, emit exactly one Output for
+        // the value of the last statement.
         if circuit.return_type.is_some() {
-            // The last value in memory is the return value.
-            if self.next_index > 0 {
-                let last_idx = self.next_index - 1;
-                self.instructions
-                    .push(Instruction::Output { var: last_idx });
+            match last_wire {
+                Some(var) => self.instructions.push(Instruction::Output { var }),
+                None => {
+                    self.errors.push(
+                        "circuit declares a return type but its final statement \
+                         produces no value"
+                            .to_string(),
+                    );
+                }
             }
         }
 
@@ -384,7 +443,12 @@ impl ZkirEmitter {
         args: &[ExprIR],
     ) -> Option<Index> {
         if helper.params.len() != args.len() {
-            return None;
+            return self.unsupported(format!(
+                "helper `{}` called with {} argument(s) but declares {} parameter(s)",
+                helper.name,
+                args.len(),
+                helper.params.len()
+            ));
         }
         let counter = self.helper_counter;
         self.helper_counter += 1;
@@ -402,10 +466,12 @@ impl ZkirEmitter {
             }
         }
         let mut last: Option<Index> = None;
+        self.helper_inline_depth += 1;
         for stmt in &helper.body {
             let renamed = alpha_rename(stmt.clone(), &mut subst, counter, &mut seq);
             last = self.emit_expr(&renamed);
         }
+        self.helper_inline_depth -= 1;
         last
     }
 
@@ -458,7 +524,12 @@ impl ZkirEmitter {
                                 value: LiteralIR::Int(v),
                                 ..
                             }) if *v <= u32::MAX as u128 => *v as u32,
-                            Some(_) => return None,
+                            Some(_) => {
+                                return self.unsupported(format!(
+                                    "`{field}.increment_by(n)` requires a const integer \
+                                     literal `n` fitting u32"
+                                ));
+                            }
                         };
                         self.emit_counter_increment(field_idx, n)
                     }
@@ -486,12 +557,9 @@ impl ZkirEmitter {
                         let value_vars = self.gather_value_vars(field_idx, val_first);
                         self.emit_ledger_write(field_idx, &value_vars)
                     }
-                    _ => {
-                        for arg in args {
-                            self.emit_expr(arg);
-                        }
-                        None
-                    }
+                    other => self.unsupported(format!(
+                        "unsupported ledger method `{other}` on field `{field}`"
+                    )),
                 }
             }
 
@@ -500,7 +568,22 @@ impl ZkirEmitter {
                 if let Some(&idx) = self.variables.get(&key) {
                     return Some(idx);
                 }
-                let ty = self.witness_types.get(&field.to_string()).cloned();
+                let field_str = field.to_string();
+                // A field whose FIRST read happened inside a branch was
+                // allocated guarded and deliberately not cached. A second
+                // touch would allocate ANOTHER PrivateInput block while
+                // the runtime builder pushes per-branch — the circuit and
+                // the private transcript desynchronize. Reject loudly;
+                // the sound shapes are "hoist before the if" or
+                // "touch exactly once inside one branch".
+                if self.guarded_witness_fields.contains(&field_str) {
+                    return self.unsupported(format!(
+                        "witness field `{field}` is first read inside a conditional \
+                         branch and used again elsewhere; hoist it to a `let` before \
+                         the `if`"
+                    ));
+                }
+                let ty = self.witness_types.get(&field_str).cloned();
 
                 // Each Fr of the witness gets its own PrivateInput plus a
                 // per-Fr constraint. Mixed-shape witnesses (e.g.
@@ -508,10 +591,20 @@ impl ZkirEmitter {
                 // Fr — bits for the leaf chunks, none for sibling fields,
                 // boolean for goes_left flags — so the layout describes
                 // each Fr's constraint type rather than a uniform width.
-                let layout = ty
-                    .as_ref()
-                    .map(|t| witness_fr_layout(t, &self.user_structs, &self.user_enums))
-                    .unwrap_or_else(|| vec![FrLayout::Field]);
+                //
+                // Parse-time validation guarantees the field exists on
+                // the registered witnesses struct, so a missing type here
+                // is an internal inconsistency: guessing a single-Field
+                // layout would silently change the circuit's PI count.
+                let layout = match ty.as_ref() {
+                    Some(t) => witness_fr_layout(t, &self.user_structs, &self.user_enums),
+                    None => {
+                        return self.unsupported(format!(
+                            "witness field `{field}` has no registered type at ZKIR \
+                             emit time; its wire layout cannot be determined"
+                        ));
+                    }
+                };
                 let mut first_idx = None;
                 for entry in layout {
                     let var = self.emit_instruction(Instruction::PrivateInput {
@@ -531,7 +624,16 @@ impl ZkirEmitter {
                     }
                 }
                 let first = first_idx.expect("at least one PrivateInput per witness");
-                self.variables.insert(key, first);
+                if self.in_conditional {
+                    // First touch inside a branch: guarded wire, no cache.
+                    // The runtime builder pushes this field's value inside
+                    // the same runtime branch; the guard makes the zkir VM
+                    // skip the transcript read on the inactive path. See
+                    // `memories/conditional-io-guards.md`.
+                    self.guarded_witness_fields.insert(field_str);
+                } else {
+                    self.variables.insert(key, first);
+                }
                 Some(first)
             }
 
@@ -552,14 +654,13 @@ impl ZkirEmitter {
                     // to unregistered witness methods, so macro-built IR
                     // never reaches this arm unresolved. Guessing a
                     // single-Field layout here would silently change the
-                    // circuit's PI count, so fail loudly instead. Interim
-                    // until the emitter grows a recorded-error channel
-                    // (chunk 2 of the review-fixes plan); convert to a
-                    // recorded error then.
-                    None => panic!(
-                        "nocturne: witness method `{name}` has no registered return type at \
-                         ZKIR emit time; its wire layout cannot be determined"
-                    ),
+                    // circuit's PI count, so fail loudly instead.
+                    None => {
+                        return self.unsupported(format!(
+                            "witness method `{name}` has no registered return type at \
+                             ZKIR emit time; its wire layout cannot be determined"
+                        ));
+                    }
                 };
                 let mut first_idx = None;
                 for entry in layout {
@@ -584,24 +685,40 @@ impl ZkirEmitter {
 
             ExprIR::Literal { value, .. } => {
                 let fr = match value {
-                    LiteralIR::Int(n) => Fr::from(*n as u64),
+                    // Full u128 range: `impl From<u128> for Fr` exists
+                    // upstream (transient-crypto/src/curve.rs:285).
+                    // Truncating through u64 would silently halve large
+                    // literals' width in the circuit.
+                    LiteralIR::Int(n) => Fr::from(*n),
                     LiteralIR::Bool(b) => Fr::from(*b),
-                    LiteralIR::Str(_) => Fr::from(0u64),
+                    LiteralIR::Str(_) => {
+                        return self.unsupported("string literals have no circuit representation");
+                    }
                 };
                 Some(self.emit_load_imm(fr))
             }
 
-            ExprIR::Var { name, .. } => self.variables.get(&name.to_string()).copied(),
+            ExprIR::Var { name, .. } => match self.variables.get(&name.to_string()).copied() {
+                Some(idx) => Some(idx),
+                None => self.unsupported(format!(
+                    "variable `{name}` has no circuit wire (binding shape not supported \
+                     by the ZKIR emitter)"
+                )),
+            },
 
             // A `Path` like `Status::Open` is a compile-time constant.
             // When it names a known user enum variant, lower to a
             // LoadImm of the variant's discriminant so `BinaryOp::Eq`
             // can compare it directly against an enum wire. For other
             // paths (assoc constants, etc.) there's no wire backing —
-            // return None and let callers handle the absence.
-            ExprIR::Path { path, .. } => self
-                .resolve_enum_variant_discriminant(path)
-                .map(|d| self.emit_load_imm(Fr::from(d as u64))),
+            // record an error so they don't vanish from the circuit.
+            ExprIR::Path { path, .. } => match self.resolve_enum_variant_discriminant(path) {
+                Some(d) => Some(self.emit_load_imm(Fr::from(d as u64))),
+                None => self.unsupported(format!(
+                    "path expression `{}` does not name a known enum variant",
+                    quote::quote!(#path)
+                )),
+            },
 
             // Payload projection from a homogeneous-payload enum value.
             // The enum's `WitnessAccess` / `LedgerAccess` allocates the
@@ -622,6 +739,23 @@ impl ZkirEmitter {
                 let a = self.emit_expr(lhs)?;
                 let b = self.emit_expr(rhs)?;
                 use syn::BinOp;
+                // Ordered comparisons need a sound bit width for
+                // `LessThan` (UB above `bits` per upstream docs); the
+                // other operators don't.
+                let require_bits = |emitter: &mut Self| -> Option<u32> {
+                    match cmp_bits {
+                        Some(bits) => Some(bits),
+                        None => {
+                            emitter.errors.push(format!(
+                                "cannot infer a bit width for the comparison `{}` — \
+                                 Field-typed or untyped operands have no sound \
+                                 `LessThan` width; compare typed `Uint`s instead",
+                                quote::quote!(#op)
+                            ));
+                            None
+                        }
+                    }
+                };
                 match op {
                     BinOp::Add(_) | BinOp::AddAssign(_) => {
                         Some(self.emit_instruction(Instruction::Add { a, b }))
@@ -638,30 +772,22 @@ impl ZkirEmitter {
                         let eq = self.emit_instruction(Instruction::TestEq { a, b });
                         Some(self.emit_instruction(Instruction::Not { a: eq }))
                     }
-                    BinOp::Lt(_) => Some(self.emit_instruction(Instruction::LessThan {
-                        a,
-                        b,
-                        bits: cmp_bits,
-                    })),
-                    BinOp::Gt(_) => Some(self.emit_instruction(Instruction::LessThan {
-                        a: b,
-                        b: a,
-                        bits: cmp_bits,
-                    })),
+                    BinOp::Lt(_) => {
+                        let bits = require_bits(self)?;
+                        Some(self.emit_instruction(Instruction::LessThan { a, b, bits }))
+                    }
+                    BinOp::Gt(_) => {
+                        let bits = require_bits(self)?;
+                        Some(self.emit_instruction(Instruction::LessThan { a: b, b: a, bits }))
+                    }
                     BinOp::Le(_) => {
-                        let gt = self.emit_instruction(Instruction::LessThan {
-                            a: b,
-                            b: a,
-                            bits: cmp_bits,
-                        });
+                        let bits = require_bits(self)?;
+                        let gt = self.emit_instruction(Instruction::LessThan { a: b, b: a, bits });
                         Some(self.emit_instruction(Instruction::Not { a: gt }))
                     }
                     BinOp::Ge(_) => {
-                        let lt = self.emit_instruction(Instruction::LessThan {
-                            a,
-                            b,
-                            bits: cmp_bits,
-                        });
+                        let bits = require_bits(self)?;
+                        let lt = self.emit_instruction(Instruction::LessThan { a, b, bits });
                         Some(self.emit_instruction(Instruction::Not { a: lt }))
                     }
                     BinOp::And(_) => Some(self.emit_instruction(Instruction::Mul { a, b })),
@@ -671,7 +797,10 @@ impl ZkirEmitter {
                         let neg_ab = self.emit_instruction(Instruction::Neg { a: ab });
                         Some(self.emit_instruction(Instruction::Add { a: sum, b: neg_ab }))
                     }
-                    _ => None,
+                    other => self.unsupported(format!(
+                        "unsupported binary operator `{}` in circuit",
+                        quote::quote!(#other)
+                    )),
                 }
             }
 
@@ -682,7 +811,10 @@ impl ZkirEmitter {
                 match op {
                     syn::UnOp::Neg(_) => Some(self.emit_instruction(Instruction::Neg { a })),
                     syn::UnOp::Not(_) => Some(self.emit_instruction(Instruction::Not { a })),
-                    _ => None,
+                    other => self.unsupported(format!(
+                        "unsupported unary operator `{}` in circuit",
+                        quote::quote!(#other)
+                    )),
                 }
             }
 
@@ -845,15 +977,15 @@ impl ZkirEmitter {
                 }
             }
 
-            ExprIR::Disclose { value, .. } => {
-                let idx = self.emit_expr(value)?;
-                self.push_declare_pub_input(idx);
-                self.instructions.push(Instruction::PiSkip {
-                    guard: Some(self.guard),
-                    count: 1,
-                });
-                Some(idx)
-            }
+            // `disclose(v)` is a marker, not an emission: the disclosed
+            // value reaches the public view through whatever ledger op
+            // consumes it (Cell::set, Map::insert, ...). Emitting a
+            // DeclarePubInput + PiSkip here would create a PI group that
+            // no transcript op backs — the ledger reconstructs verifier
+            // PIs exclusively from transcript ops (see
+            // `memories/ledger-pi-layout.md`), so any active-path
+            // disclose would fail at prove time.
+            ExprIR::Disclose { value, .. } => self.emit_expr(value),
 
             ExprIR::MethodCall { receiver, args, .. } => {
                 let recv = self.emit_expr(receiver);
@@ -871,48 +1003,44 @@ impl ZkirEmitter {
                 last
             }
 
+            // `return` does NOT emit `Output` itself — `emit_circuit`
+            // emits exactly one `Output` from the final statement's
+            // wire. Tail position is validated by
+            // `check_return_positions` before the body is emitted.
             ExprIR::Return { value, .. } => {
+                if self.helper_inline_depth > 0 {
+                    return self.unsupported(
+                        "`return` inside an inlined helper is not supported; make the \
+                         returned value the helper's final expression instead",
+                    );
+                }
                 if let Some(val) = value {
-                    let idx = self.emit_expr(val)?;
-                    self.instructions.push(Instruction::Output { var: idx });
-                    Some(idx)
+                    self.emit_expr(val)
                 } else {
                     None
                 }
             }
 
-            ExprIR::Tuple { elements, .. } => {
-                let mut last = None;
-                for elem in elements {
-                    last = self.emit_expr(elem);
-                }
-                last
-            }
+            // Tuple literal in value position (e.g. a tuple-typed Map
+            // key). Same contiguity contract as `ArrayLit`: each element
+            // must allocate fresh wires immediately after its
+            // predecessor, and the FIRST element's wire is returned so
+            // `gather_n_vars` can read the whole block.
+            ExprIR::Tuple { elements, .. } => self.emit_contiguous_elements(
+                elements.iter().collect::<Vec<_>>().as_slice(),
+                "tuple literal",
+            ),
 
             // Array literal `[a, b, c]`. Emit each element in order and
             // return the first element's wire index — downstream
             // `gather_value_vars` reads N contiguous wires starting
-            // there to build the multi-Fr ledger Push.
-            //
-            // This relies on the element emits producing contiguous wire
-            // allocations, which holds when each element is a first-use
-            // `WitnessAccess` or `Literal` (the common case for
-            // `Cell::set([w.a, w.b, w.c])`). If an element is a
-            // cache-hit Var or WitnessAccess re-reference, its wire
-            // won't be adjacent to its neighbours and the resulting
-            // Cell::set will read the wrong wires. The on-chain verifier
-            // catches that mismatch but the failure mode is at proof
-            // time, not at compile time.
-            ExprIR::ArrayLit { elements, .. } => {
-                let mut first: Option<Index> = None;
-                for elem in elements {
-                    let w = self.emit_expr(elem);
-                    if first.is_none() {
-                        first = w;
-                    }
-                }
-                first
-            }
+            // there to build the multi-Fr ledger Push. Contiguity is
+            // enforced: a cache-hit Var or witness re-reference would
+            // make the gathered range read the wrong wires.
+            ExprIR::ArrayLit { elements, .. } => self.emit_contiguous_elements(
+                elements.iter().collect::<Vec<_>>().as_slice(),
+                "array literal",
+            ),
 
             ExprIR::Reference { expr: inner, .. } => self.emit_expr(inner),
 
@@ -925,7 +1053,27 @@ impl ZkirEmitter {
             // tracking on local bindings.
             ExprIR::Index { array, index, .. } => {
                 let first = self.emit_expr(array)?;
-                let elem_ty = self.array_element_type(array)?;
+                let arr_ty = match self.infer_expr_type(array) {
+                    Some(t) => t,
+                    None => {
+                        return self.unsupported(
+                            "cannot infer the element type of an indexed expression; \
+                             only witness arrays and typed let-bound arrays support \
+                             indexing",
+                        );
+                    }
+                };
+                let Some((elem_ty, len)) = array_inner_type_and_len(&arr_ty) else {
+                    return self.unsupported(format!(
+                        "indexed expression has non-array type `{}`",
+                        quote::quote!(#arr_ty)
+                    ));
+                };
+                if *index >= len {
+                    return self.unsupported(format!(
+                        "array index {index} out of bounds for `[_; {len}]`"
+                    ));
+                }
                 let stride = witness_fr_layout(&elem_ty, &self.user_structs, &self.user_enums).len()
                     as Index;
                 Some(first + (*index) * stride)
@@ -940,9 +1088,8 @@ impl ZkirEmitter {
             // field's wire; `gather_value_vars` walks the remaining
             // contiguous wires when the surrounding Cell::set lowers.
             //
-            // Like `ArrayLit`, this relies on each field's emit
-            // producing a contiguous wire — true for first-use witness
-            // reads + literals, broken for cache-hit re-references.
+            // Like `ArrayLit`, field emission must produce contiguous
+            // wires — enforced by `emit_contiguous_elements`.
             ExprIR::StructInit { name, fields, .. } => {
                 let struct_fields = self.user_structs.get(&name.to_string()).cloned();
                 let ordered: Vec<&ExprIR> = match struct_fields {
@@ -960,17 +1107,40 @@ impl ZkirEmitter {
                     // the wire alignment can't be trusted downstream.
                     None => fields.iter().map(|(_, expr)| expr).collect(),
                 };
-                let mut first: Option<Index> = None;
-                for elem in ordered {
-                    let w = self.emit_expr(elem);
-                    if first.is_none() {
-                        first = w;
-                    }
-                }
-                first
+                self.emit_contiguous_elements(&ordered, "struct literal")
             }
-            ExprIR::Unsupported { .. } => None,
+            ExprIR::Unsupported { description, .. } => {
+                self.unsupported(format!("unsupported expression: {description}"))
+            }
         }
+    }
+
+    /// Emit the elements of an array/tuple/struct literal, enforcing
+    /// that each element allocates fresh wires starting exactly at the
+    /// current `next_index`. Downstream consumers (`gather_value_vars`,
+    /// `gather_n_vars`) read a contiguous wire range from the FIRST
+    /// element's wire, so a cache-hit Var, a witness re-reference, or
+    /// any element whose value wire isn't its first allocation would
+    /// make them read the wrong wires. Until `emit_expr` returns
+    /// multi-wire values, the only sound option is a loud error.
+    fn emit_contiguous_elements(&mut self, elements: &[&ExprIR], what: &str) -> Option<Index> {
+        let mut first: Option<Index> = None;
+        for elem in elements {
+            let before = self.next_index;
+            let w = self.emit_expr(elem)?;
+            if w != before {
+                return self.unsupported(format!(
+                    "{what} element does not allocate fresh contiguous wires (it is a \
+                     repeated witness read, an earlier binding, or a computed value); \
+                     the multi-Fr encoding would read the wrong wires — use each \
+                     witness element at most once per literal"
+                ));
+            }
+            if first.is_none() {
+                first = Some(w);
+            }
+        }
+        first
     }
 
     // -----------------------------------------------------------------------
@@ -1093,14 +1263,26 @@ impl ZkirEmitter {
 
         match result_enc {
             Some(enc) if enc.value_field_count >= 1 => {
+                let value_layout = result_ty
+                    .map(|t| read_result_fr_layout(t, &self.user_structs, &self.user_enums))
+                    .unwrap_or_else(|| vec![None; enc.value_field_count]);
+                // Defensive cross-check of the two type-recursion stacks:
+                // a Fr-count disagreement between the layout and the
+                // alignment encoding would emit fewer PublicInputs than
+                // PiSkip claims (the H4 bug class). Fail loudly.
+                if value_layout.len() != enc.value_field_count {
+                    return self.unsupported(format!(
+                        "ledger read result wire layout ({} Frs) disagrees with its \
+                         value encoding ({} Frs); this type cannot be read soundly",
+                        value_layout.len(),
+                        enc.value_field_count
+                    ));
+                }
                 for atom in &enc.alignment_atoms {
                     let v = self.emit_load_imm(Fr::from(*atom));
                     self.push_declare_pub_input(v);
                 }
                 let mut first_value: Option<Index> = None;
-                let value_layout = result_ty
-                    .map(read_result_fr_layout)
-                    .unwrap_or_else(|| vec![None; enc.value_field_count]);
                 for bits in value_layout.iter().take(enc.value_field_count) {
                     let pi = self.emit_instruction(Instruction::PublicInput {
                         guard: self.current_io_guard(),
@@ -1149,7 +1331,13 @@ impl ZkirEmitter {
         k_ty: &syn::Type,
         v_ty: &syn::Type,
     ) -> Option<Index> {
-        let key_enc = aligned_value_encoding(k_ty, &self.user_structs, &self.user_enums)?;
+        let Some(key_enc) = aligned_value_encoding(k_ty, &self.user_structs, &self.user_enums)
+        else {
+            return self.unsupported(format!(
+                "Map key type `{}` has no supported on-chain encoding",
+                quote::quote!(#k_ty)
+            ));
+        };
 
         match method_name {
             "contains" => {
@@ -1158,7 +1346,14 @@ impl ZkirEmitter {
                 self.emit_map_member(field_idx, &key_vars, &key_enc)
             }
             "insert" | "set" => {
-                let val_enc = aligned_value_encoding(v_ty, &self.user_structs, &self.user_enums)?;
+                let Some(val_enc) =
+                    aligned_value_encoding(v_ty, &self.user_structs, &self.user_enums)
+                else {
+                    return self.unsupported(format!(
+                        "Map value type `{}` has no supported on-chain encoding",
+                        quote::quote!(#v_ty)
+                    ));
+                };
                 let k_first = args.first().and_then(|a| self.emit_expr(a))?;
                 let v_first = args.get(1).and_then(|a| self.emit_expr(a))?;
                 let key_vars = gather_n_vars(k_first, key_enc.value_field_count);
@@ -1171,20 +1366,25 @@ impl ZkirEmitter {
                 self.emit_map_remove(field_idx, &key_vars, &key_enc)
             }
             "lookup" => {
-                let val_enc = aligned_value_encoding(v_ty, &self.user_structs, &self.user_enums)?;
+                let Some(val_enc) =
+                    aligned_value_encoding(v_ty, &self.user_structs, &self.user_enums)
+                else {
+                    return self.unsupported(format!(
+                        "Map value type `{}` has no supported on-chain encoding",
+                        quote::quote!(#v_ty)
+                    ));
+                };
                 let first = args.first().and_then(|a| self.emit_expr(a))?;
                 let key_vars = gather_n_vars(first, key_enc.value_field_count);
                 self.emit_map_lookup(field_idx, &key_vars, &key_enc, v_ty, &val_enc)
             }
-            // `get` returns Option<V> and would require Option alignment
-            // encoding plus higher-level expansion (contains + conditional
-            // lookup); leave it to fall through until that work lands.
-            _ => {
-                for arg in args {
-                    self.emit_expr(arg);
-                }
-                None
-            }
+            // `get` returns Option<V> outside the parser's
+            // `if let Some(v) = map.get(&k)` sugar — Popeq cannot
+            // represent Null, so a raw `get` has no on-chain lowering.
+            other => self.unsupported(format!(
+                "unsupported Map method `{other}` (use the `if let Some(v) = \
+                 map.get(&k)` form for optional reads)"
+            )),
         }
     }
 
@@ -1408,13 +1608,24 @@ impl ZkirEmitter {
         // happens here. For multi-Fr V (e.g. Bytes<32>), the value field is
         // itself multi-Fr: one PublicInput + DeclarePubInput per chunk,
         // matching `read_result_fr_layout`.
+        let value_layout = read_result_fr_layout(v_ty, &self.user_structs, &self.user_enums);
+        // Same defensive cross-check as `emit_ledger_read`: the layout's
+        // Fr count and the alignment encoding's Fr count must agree or
+        // the PI window misaligns.
+        if value_layout.len() != val_encoding.value_field_count {
+            return self.unsupported(format!(
+                "Map lookup value wire layout ({} Frs) disagrees with its value \
+                 encoding ({} Frs); this value type cannot be read soundly",
+                value_layout.len(),
+                val_encoding.value_field_count
+            ));
+        }
         let popeq_op = self.emit_load_imm(Fr::from(0x0cu64));
         self.push_declare_pub_input(popeq_op);
         for atom in &val_encoding.alignment_atoms {
             let v = self.emit_load_imm(Fr::from(*atom));
             self.push_declare_pub_input(v);
         }
-        let value_layout = read_result_fr_layout(v_ty);
         let mut first_value: Option<Index> = None;
         for bits in value_layout.iter().take(val_encoding.value_field_count) {
             let pi = self.emit_instruction(Instruction::PublicInput {
@@ -1507,7 +1718,13 @@ impl ZkirEmitter {
         args: &[nocturne_ir::ExprIR],
         t_ty: &syn::Type,
     ) -> Option<Index> {
-        let key_enc = aligned_value_encoding(t_ty, &self.user_structs, &self.user_enums)?;
+        let Some(key_enc) = aligned_value_encoding(t_ty, &self.user_structs, &self.user_enums)
+        else {
+            return self.unsupported(format!(
+                "Set element type `{}` has no supported on-chain encoding",
+                quote::quote!(#t_ty)
+            ));
+        };
         match method_name {
             "contains" | "member" => {
                 let first = args.first().and_then(|a| self.emit_expr(a))?;
@@ -1524,12 +1741,7 @@ impl ZkirEmitter {
                 let key_vars = gather_n_vars(first, key_enc.value_field_count);
                 self.emit_map_remove(field_idx, &key_vars, &key_enc)
             }
-            _ => {
-                for arg in args {
-                    self.emit_expr(arg);
-                }
-                None
-            }
+            other => self.unsupported(format!("unsupported Set method `{other}`")),
         }
     }
 
@@ -1611,16 +1823,28 @@ impl ZkirEmitter {
         use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment};
 
         // Drill through `Reference` to find the WitnessAccess.
-        let arg = args.first()?;
-        let path_witness_field = find_witness_field(arg)?;
-        let path_ty = self.witness_types.get(&path_witness_field).cloned()?;
-        let path_ty_str = quote::quote!(#path_ty).to_string().replace(' ', "");
-        let (height, leaf_ty_str) = parse_merkle_tree_path_type(&path_ty_str)?;
+        let resolved = args.first().and_then(|arg| {
+            let field = find_witness_field(arg)?;
+            let ty = self.witness_types.get(&field).cloned()?;
+            let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
+            let (height, leaf_ty_str) = parse_merkle_tree_path_type(&ty_str)?;
+            Some((height, leaf_ty_str))
+        });
+        let Some((height, leaf_ty_str)) = resolved else {
+            return self.unsupported(
+                "merkle_tree_path_root's argument must be a witness field of type \
+                 `MerkleTreePath<H, Bytes<N>>`",
+            );
+        };
         // Any `Bytes<N>` leaf is supported. The leaf is hashed with
         // `persistent_hash` under alignment `[Bytes{6}, Bytes{N}]`,
         // matching upstream's `leaf_hash` byte-stream concatenation. The
         // storage helper accepts any `MerkleLeaf` (broader than Bytes<N>).
-        let leaf_n = parse_bytes_n_type(&leaf_ty_str)?;
+        let Some(leaf_n) = parse_bytes_n_type(&leaf_ty_str) else {
+            return self
+                .unsupported("merkle_tree_path_root currently supports `Bytes<N>` leaves only");
+        };
+        let arg = args.first()?;
         let leaf_fr_count = leaf_n.div_ceil(FR_BYTES_STORED) as usize;
 
         // Emit the witness PrivateInputs by evaluating the arg.
@@ -1718,18 +1942,20 @@ impl ZkirEmitter {
                 let leaf_ty = self
                     .field_types
                     .get(field_idx as usize)
-                    .and_then(extract_merkle_tree_type)?;
-                let leaf_ty_str = quote::quote!(#leaf_ty).to_string().replace(' ', "");
-                let leaf_n = parse_bytes_n_type(&leaf_ty_str)?;
+                    .and_then(extract_merkle_tree_type);
+                let leaf_n = leaf_ty.as_ref().and_then(|t| {
+                    let s = quote::quote!(#t).to_string().replace(' ', "");
+                    parse_bytes_n_type(&s)
+                });
+                let Some(leaf_n) = leaf_n else {
+                    return self.unsupported(
+                        "MerkleTree::insert leaf type must be `Bytes<N>`".to_string(),
+                    );
+                };
                 let leaf_first = args.first().and_then(|a| self.emit_expr(a))?;
                 self.emit_merkle_tree_insert(field_idx, leaf_first, leaf_n)
             }
-            _ => {
-                for arg in args {
-                    self.emit_expr(arg);
-                }
-                None
-            }
+            other => self.unsupported(format!("unsupported MerkleTree method `{other}`")),
         }
     }
 
@@ -2172,53 +2398,70 @@ impl ZkirEmitter {
         idx
     }
 
-    /// Emit a type constraint for a variable based on its syn::Type.
+    /// Emit a type constraint for a public circuit parameter based on
+    /// its syn::Type. Each parameter is ONE wire, so multi-Fr types
+    /// (large `Bytes<N>`, tuples, user structs) cannot be public
+    /// parameters yet — record an error instead of constraining one
+    /// wire to a width the value doesn't fit.
     fn emit_type_constraint(&mut self, var: Index, ty: &syn::Type) {
         let type_str = quote::quote!(#ty).to_string().replace(' ', "");
+
+        if matches!(ty, syn::Type::Tuple(_)) {
+            let _ = self.unsupported(format!(
+                "tuple-typed public circuit parameters are not supported yet \
+                 (`{type_str}`)"
+            ));
+            return;
+        }
+        if let syn::Type::Path(tp) = ty
+            && tp.qself.is_none()
+            && let Some(seg) = tp.path.segments.last()
+            && self.user_structs.contains_key(&seg.ident.to_string())
+        {
+            let _ = self.unsupported(format!(
+                "struct-typed public circuit parameters are not supported yet \
+                 (`{type_str}`)"
+            ));
+            return;
+        }
 
         if type_str == "Boolean" || type_str == "bool" {
             self.instructions
                 .push(Instruction::ConstrainToBoolean { var });
-        } else if type_str.starts_with("Uint<")
-            || type_str == "u8"
-            || type_str == "u16"
-            || type_str == "u32"
-            || type_str == "u64"
-            || type_str == "u128"
-        {
-            // Extract bit count from Uint<N>.
-            let bits = if type_str == "u8" {
-                8
-            } else if type_str == "u16" {
-                16
-            } else if type_str == "u32" {
-                32
-            } else if type_str == "u64" {
-                64
-            } else if type_str == "u128" {
-                128
-            } else if let Some(n) = type_str
-                .strip_prefix("Uint<")
-                .and_then(|s| s.strip_suffix('>'))
-            {
-                n.parse::<u32>().unwrap_or(64)
-            } else {
-                64
+        } else if type_str.starts_with("Uint<") || parse_uint_type(&type_str).is_some() {
+            let Some(bits) = parse_uint_type(&type_str) else {
+                let _ = self.unsupported(format!(
+                    "cannot parse the bit width of public parameter type `{type_str}`"
+                ));
+                return;
             };
+            if bits == 0 || bits > 253 {
+                let _ = self.unsupported(format!(
+                    "public parameter type `{type_str}` does not fit one field \
+                     element (max 253 bits)"
+                ));
+                return;
+            }
             self.instructions
                 .push(Instruction::ConstrainBits { var, bits });
         } else if type_str.starts_with("Bytes<") {
-            // Bytes<N> → constrain to N*8 bits.
-            if let Some(n) = type_str
-                .strip_prefix("Bytes<")
-                .and_then(|s| s.strip_suffix('>'))
-            {
-                let bytes: u32 = n.parse().unwrap_or(32);
-                self.instructions.push(Instruction::ConstrainBits {
-                    var,
-                    bits: bytes * 8,
-                });
+            // Bytes<N> → constrain to N*8 bits; one wire holds at most
+            // 31 bytes.
+            let Some(n) = parse_bytes_n_type(&type_str) else {
+                let _ = self.unsupported(format!(
+                    "cannot parse the byte length of public parameter type `{type_str}`"
+                ));
+                return;
+            };
+            if n > FR_BYTES_STORED {
+                let _ = self.unsupported(format!(
+                    "multi-Fr public parameter type `{type_str}` is not supported \
+                     yet (Bytes<N> parameters require N ≤ {FR_BYTES_STORED})"
+                ));
+                return;
             }
+            self.instructions
+                .push(Instruction::ConstrainBits { var, bits: n * 8 });
         }
         // Field type: no constraint needed (native field element).
     }
@@ -2227,7 +2470,17 @@ impl ZkirEmitter {
         self.field_names
             .iter()
             .position(|f| f == field_name)
-            .unwrap_or(0) as u8
+            .unwrap_or_else(|| {
+                // Internal invariant: rustc rejects typos on the real
+                // struct in the stripped module, so an unknown name here
+                // is an emitter/parser bug. Falling back to field 0
+                // would turn that bug into a verified-but-wrong write.
+                panic!(
+                    "nocturne internal error: ledger field `{field_name}` not found \
+                     among {:?}",
+                    self.field_names
+                )
+            }) as u8
     }
 }
 
@@ -2656,46 +2909,29 @@ fn gather_n_vars(first: Index, n: usize) -> Vec<Index> {
 /// Like `witness_fr_layout` but for Popeq read-result types. Returns
 /// per-Fr `ConstrainBits` widths in the order
 /// `AlignedValueExt::value_only_field_repr` emits them (high-bytes chunk
-/// first after `.rev()`). Single-Fr types get `Some(bits)` matching
-/// `aligned_value_encoding`'s `atoms[1] * 8`.
-fn read_result_fr_layout(ty: &syn::Type) -> Vec<Option<u32>> {
-    // Fixed-size array `[T; N]`: concatenate N copies of T's layout so the
-    // Popeq's per-Fr ConstrainBits count matches the multi-Fr value the
-    // on-chain VM verifies. Mirrors the N-tuple shape used by
-    // `aligned_value_encoding` and `witness_fr_layout` for arrays.
-    if let syn::Type::Array(arr) = ty
-        && let syn::Expr::Lit(lit) = &arr.len
-        && let syn::Lit::Int(int) = &lit.lit
-        && let Ok(n) = int.base10_parse::<u32>()
-    {
-        let elem = read_result_fr_layout(&arr.elem);
-        let mut layout = Vec::with_capacity(elem.len() * n as usize);
-        for _ in 0..n {
-            layout.extend(elem.iter().copied());
-        }
-        return layout;
-    }
-    let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
-    if let Some(n) = ty_str
-        .strip_prefix("Bytes<")
-        .and_then(|s| s.strip_suffix('>'))
-        .and_then(|s| s.parse::<u32>().ok())
-        && n > 0
-    {
-        let chunks = n.div_ceil(FR_BYTES_STORED);
-        let mut layout = Vec::with_capacity(chunks as usize);
-        let first_bytes = if n % FR_BYTES_STORED == 0 {
-            FR_BYTES_STORED
-        } else {
-            n % FR_BYTES_STORED
-        };
-        layout.push(Some(first_bytes * 8));
-        for _ in 1..chunks {
-            layout.push(Some(FR_BYTES_STORED * 8));
-        }
-        return layout;
-    }
-    vec![None]
+/// first after `.rev()`).
+///
+/// Derives directly from `witness_fr_layout`'s recursion (the single
+/// source of truth for per-type Fr counts) so tuples, user structs,
+/// `Option`, payload enums, and arrays all yield the SAME Fr count the
+/// runtime-side `AlignedValue` produces. A divergent count here is
+/// exactly the H4 bug class: the PI loop emits fewer `PublicInput`s
+/// than `PiSkip` claims and the verifier's comparison window shifts.
+fn read_result_fr_layout(
+    ty: &syn::Type,
+    user_structs: &HashMap<String, Vec<nocturne_ir::UserStructField>>,
+    user_enums: &HashMap<String, Vec<nocturne_ir::UserEnumVariant>>,
+) -> Vec<Option<u32>> {
+    witness_fr_layout(ty, user_structs, user_enums)
+        .into_iter()
+        .map(|entry| match entry {
+            FrLayout::Bits(b) => Some(b),
+            // ConstrainBits(1) is the bits-shaped equivalent of a
+            // boolean constraint for a transcript-read value.
+            FrLayout::Boolean => Some(1),
+            FrLayout::Field => None,
+        })
+        .collect()
 }
 
 /// Return the value type read by `self.<field>.get()` / `.value()` for a
@@ -2895,6 +3131,107 @@ fn instruction_output_count(instruction: &Instruction) -> u32 {
         | Instruction::PersistentHash { .. } => 2,
 
         _ => 1,
+    }
+}
+
+/// Validate that `return` only appears in tail position: the final
+/// statement of the circuit body, or the tail of the final statement's
+/// `if`/block branches (where the branch results multiplex into one
+/// output wire). A non-tail `return` would NOT short-circuit the rest
+/// of the body — both "paths" execute in a circuit — so the emitted
+/// semantics would silently diverge from Rust's.
+fn check_return_positions(expr: &ExprIR, tail: bool, errors: &mut Vec<String>) {
+    const MSG: &str = "`return` is only supported as the final statement of a circuit \
+                       body (or the tail of the final statement's branches)";
+    match expr {
+        ExprIR::Return { value, .. } => {
+            if !tail {
+                errors.push(MSG.to_string());
+            }
+            if let Some(v) = value
+                && contains_return(v)
+            {
+                errors.push(MSG.to_string());
+            }
+        }
+        ExprIR::Block { stmts, .. } => {
+            let n = stmts.len();
+            for (i, s) in stmts.iter().enumerate() {
+                check_return_positions(s, tail && i + 1 == n, errors);
+            }
+        }
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            if contains_return(cond) {
+                errors.push(MSG.to_string());
+            }
+            let n = then_branch.len();
+            for (i, s) in then_branch.iter().enumerate() {
+                check_return_positions(s, tail && i + 1 == n, errors);
+            }
+            if let Some(eb) = else_branch {
+                let n = eb.len();
+                for (i, s) in eb.iter().enumerate() {
+                    check_return_positions(s, tail && i + 1 == n, errors);
+                }
+            }
+        }
+        other => {
+            if contains_return(other) {
+                errors.push(MSG.to_string());
+            }
+        }
+    }
+}
+
+/// True if any node in the expression tree is `ExprIR::Return`.
+fn contains_return(expr: &ExprIR) -> bool {
+    match expr {
+        ExprIR::Return { .. } => true,
+        ExprIR::Let { value, .. } => contains_return(value),
+        ExprIR::BinaryOp { lhs, rhs, .. } => contains_return(lhs) || contains_return(rhs),
+        ExprIR::UnaryOp { expr: inner, .. }
+        | ExprIR::Reference { expr: inner, .. }
+        | ExprIR::Disclose { value: inner, .. } => contains_return(inner),
+        ExprIR::Assert { kind, .. } => match kind {
+            AssertKind::Assert(c) => contains_return(c),
+            AssertKind::AssertEq(a, b) => contains_return(a) || contains_return(b),
+        },
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            contains_return(cond)
+                || then_branch.iter().any(contains_return)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(contains_return))
+        }
+        ExprIR::Block { stmts, .. } => stmts.iter().any(contains_return),
+        ExprIR::FnCall { args, .. } | ExprIR::WitnessCall { args, .. } => {
+            args.iter().any(contains_return)
+        }
+        ExprIR::MethodCall { receiver, args, .. } => {
+            contains_return(receiver) || args.iter().any(contains_return)
+        }
+        ExprIR::LedgerAccess { args, .. } => args.iter().any(contains_return),
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            elements.iter().any(contains_return)
+        }
+        ExprIR::StructInit { fields, .. } => fields.iter().any(|(_, e)| contains_return(e)),
+        ExprIR::Index { array, .. } => contains_return(array),
+        ExprIR::EnumPayload { scrutinee, .. } => contains_return(scrutinee),
+        ExprIR::Literal { .. }
+        | ExprIR::Var { .. }
+        | ExprIR::Path { .. }
+        | ExprIR::WitnessAccess { .. }
+        | ExprIR::Unsupported { .. } => false,
     }
 }
 

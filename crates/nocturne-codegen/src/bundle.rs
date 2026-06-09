@@ -30,8 +30,12 @@ pub struct ContractBundle {
 }
 
 /// Build a ContractBundle from a ContractIR.
+///
+/// Panics when circuit emission fails — bundles are only built for
+/// contracts that already compiled through the macro pipeline.
 pub fn build_bundle(contract: &ContractIR) -> ContractBundle {
-    let codegen = crate::codegen::generate_artifacts(contract);
+    let codegen = crate::codegen::generate_artifacts(contract)
+        .unwrap_or_else(|errors| panic!("nocturne: circuit emission failed: {errors:?}"));
 
     let circuits: HashMap<String, IrSource> = codegen
         .zkir
