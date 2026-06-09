@@ -1,4 +1,5 @@
 use proc_macro2::Span;
+use syn::spanned::Spanned;
 use syn::{
     Expr, ExprCall, ExprField, ExprMethodCall, ExprPath, FnArg, ImplItem, ImplItemFn, Item, ItemFn,
     ItemImpl, ItemMod, ItemStruct, Pat, ReturnType, Stmt, parse::Parser,
@@ -51,9 +52,13 @@ impl BodyCtx<'_> {
 }
 
 /// Parse a `#[nocturne::contract]` module into a `ContractIR`.
-pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
+///
+/// On failure, returns ALL collected diagnostics — the macro entry
+/// emits one `compile_error!` per error so the user sees every problem
+/// in a single build.
+pub fn parse_contract(module: ItemMod) -> Result<ContractIR, Diagnostics> {
     let name = module.ident.clone();
-    let span = Span::call_site();
+    let span = name.span();
 
     let items = module.content.map(|(_, items)| items).unwrap_or_default();
 
@@ -85,7 +90,8 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
     for (i, item) in items.iter().enumerate() {
         match item {
             Item::Struct(s) => match find_midnight_attr(&s.attrs) {
-                Some((MidnightAttr::Ledger, _attr_span)) => {
+                Err(e) => diagnostics.push(e),
+                Ok(Some((MidnightAttr::Ledger, _attr_span))) => {
                     declaration_indices.insert(i);
                     if ledger_seen {
                         diagnostics.push(MidnightError::new(
@@ -101,7 +107,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                         }
                     }
                 }
-                Some((MidnightAttr::Witnesses, _attr_span)) => {
+                Ok(Some((MidnightAttr::Witnesses, _attr_span))) => {
                     declaration_indices.insert(i);
                     if witnesses_seen {
                         diagnostics.push(MidnightError::new(
@@ -117,7 +123,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                         }
                     }
                 }
-                _ => {
+                Ok(_) => {
                     // Plain user struct — record its named fields if any
                     // so codegen can treat it as a Map/Set key. Tuple
                     // structs and unit structs are left as opaque.
@@ -270,7 +276,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                         &mut queries,
                         &mut other_items,
                         &mut diagnostics,
-                    )?;
+                    );
                 }
             }
             Item::Fn(item_fn) => {
@@ -329,7 +335,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                     "contract must contain exactly one #[nocturne(ledger)] struct",
                 ));
             }
-            return Err(diagnostics.into_first_error());
+            return Err(diagnostics);
         }
     };
 
@@ -342,8 +348,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
     }
 
     if diagnostics.has_errors() {
-        // Return the first specific error for better diagnostics.
-        return Err(diagnostics.into_first_error());
+        return Err(diagnostics);
     }
 
     Ok(ContractIR {
@@ -379,7 +384,7 @@ fn parse_ledger_struct(s: &ItemStruct) -> MidnightResult<LedgerIR> {
         let field_name = field.ident.clone().unwrap();
         let type_kind = extract_type_kind(&field.ty);
         let exported = !matches!(
-            find_midnight_attr(&field.attrs),
+            find_midnight_attr(&field.attrs)?,
             Some((MidnightAttr::Private, _))
         );
 
@@ -459,34 +464,35 @@ fn parse_impl_block(
     queries: &mut Vec<QueryIR>,
     other_items: &mut Vec<Item>,
     diagnostics: &mut Diagnostics,
-) -> MidnightResult<()> {
+) {
     let mut has_midnight_methods = false;
 
     for item in &impl_block.items {
         if let ImplItem::Fn(method) = item {
             match find_midnight_attr(&method.attrs) {
-                Some((MidnightAttr::Constructor, _)) => {
+                Ok(Some((MidnightAttr::Constructor, _))) => {
                     has_midnight_methods = true;
                     match parse_constructor(method, ctx) {
                         Ok(c) => constructors.push(c),
                         Err(e) => diagnostics.push(e),
                     }
                 }
-                Some((MidnightAttr::Circuit, _)) => {
+                Ok(Some((MidnightAttr::Circuit, _))) => {
                     has_midnight_methods = true;
                     match parse_circuit(method, ctx) {
                         Ok(c) => circuits.push(c),
                         Err(e) => diagnostics.push(e),
                     }
                 }
-                Some((MidnightAttr::Query, _)) => {
+                Ok(Some((MidnightAttr::Query, _))) => {
                     has_midnight_methods = true;
                     match parse_query(method, ctx) {
                         Ok(q) => queries.push(q),
                         Err(e) => diagnostics.push(e),
                     }
                 }
-                _ => {}
+                Ok(_) => {}
+                Err(e) => diagnostics.push(e),
             }
         }
     }
@@ -494,8 +500,6 @@ fn parse_impl_block(
     if !has_midnight_methods {
         other_items.push(Item::Impl(impl_block.clone()));
     }
-
-    Ok(())
 }
 
 fn impl_targets_ident(impl_block: &ItemImpl, ident: &syn::Ident) -> bool {
@@ -1134,14 +1138,14 @@ fn parse_stmt(stmt: &Stmt, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                         pat_ident.ident.clone()
                     } else {
                         return Ok(ExprIR::Unsupported {
-                            span: Span::call_site(),
+                            span: pat_type.pat.span(),
                             description: "complex pattern in let binding".to_string(),
                         });
                     }
                 }
                 _ => {
                     return Ok(ExprIR::Unsupported {
-                        span: Span::call_site(),
+                        span: local.pat.span(),
                         description: "complex pattern in let binding".to_string(),
                     });
                 }
@@ -1163,8 +1167,8 @@ fn parse_stmt(stmt: &Stmt, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
             })
         }
         Stmt::Expr(expr, _semi) => parse_expr(expr, ctx),
-        Stmt::Item(_) => Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+        Stmt::Item(item) => Ok(ExprIR::Unsupported {
+            span: item.span(),
             description: "item inside function body".to_string(),
         }),
         Stmt::Macro(macro_stmt) => parse_macro_expr(&macro_stmt.mac, ctx),
@@ -1176,12 +1180,12 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
         Expr::Lit(lit) => {
             if let Some(value) = LiteralIR::from_lit(&lit.lit) {
                 Ok(ExprIR::Literal {
-                    span: Span::call_site(),
+                    span: lit.span(),
                     value,
                 })
             } else {
                 Ok(ExprIR::Unsupported {
-                    span: Span::call_site(),
+                    span: lit.span(),
                     description: "unsupported literal type".to_string(),
                 })
             }
@@ -1198,7 +1202,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 // `nocturne::disclose`. Stash the `syn::Path` itself so codegen
                 // can emit it verbatim — flattening to an `Ident` panics.
                 Ok(ExprIR::Path {
-                    span: Span::call_site(),
+                    span: path.span(),
                     path: path.clone(),
                 })
             }
@@ -1208,7 +1212,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
             let lhs = parse_expr(&bin.left, ctx)?;
             let rhs = parse_expr(&bin.right, ctx)?;
             Ok(ExprIR::BinaryOp {
-                span: Span::call_site(),
+                span: bin.op.span(),
                 op: bin.op,
                 lhs: Box::new(lhs),
                 rhs: Box::new(rhs),
@@ -1218,7 +1222,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
         Expr::Unary(un) => {
             let inner = parse_expr(&un.expr, ctx)?;
             Ok(ExprIR::UnaryOp {
-                span: Span::call_site(),
+                span: un.span(),
                 op: un.op,
                 expr: Box::new(inner),
             })
@@ -1355,7 +1359,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
             }
 
             Ok(ExprIR::Unsupported {
-                span: Span::call_site(),
+                span: expr.span(),
                 description: "complex function call expression".to_string(),
             })
         }
@@ -1371,24 +1375,23 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
             // `conditional-branch-cond-select-zeroing` and
             // `conditional-io-guards` keep its inactive-branch reads zeroed.
             if let Some((var_name, map_field, key_expr)) = match_if_let_some_get(&expr_if.cond) {
-                // Parse the key twice so both the contains and the lookup
-                // get their own owned ExprIR (no Clone on ExprIR today).
-                // The two parses produce equivalent trees because the
-                // source expr is the same.
+                // The key is parsed once and cloned so the contains and
+                // the lookup share an identical tree.
+                let key = parse_expr(key_expr, ctx)?;
                 let contains = ExprIR::LedgerAccess {
-                    span: Span::call_site(),
+                    span: expr_if.cond.span(),
                     field: map_field.clone(),
                     method: syn::Ident::new("contains", Span::call_site()),
-                    args: vec![parse_expr(key_expr, ctx)?],
+                    args: vec![key.clone()],
                 };
                 let lookup = ExprIR::LedgerAccess {
-                    span: Span::call_site(),
+                    span: expr_if.cond.span(),
                     field: map_field,
                     method: syn::Ident::new("lookup", Span::call_site()),
-                    args: vec![parse_expr(key_expr, ctx)?],
+                    args: vec![key],
                 };
                 let let_stmt = ExprIR::Let {
-                    span: Span::call_site(),
+                    span: var_name.span(),
                     name: var_name,
                     value: Box::new(lookup),
                 };
@@ -1403,7 +1406,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                     None
                 };
                 return Ok(ExprIR::If {
-                    span: Span::call_site(),
+                    span: expr_if.if_token.span(),
                     cond: Box::new(contains),
                     then_branch,
                     else_branch,
@@ -1422,7 +1425,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
             };
 
             Ok(ExprIR::If {
-                span: Span::call_site(),
+                span: expr_if.if_token.span(),
                 cond: Box::new(cond),
                 then_branch,
                 else_branch,
@@ -1432,7 +1435,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
         Expr::Block(block) => {
             let stmts = parse_block_stmts(&block.block, ctx)?;
             Ok(ExprIR::Block {
-                span: Span::call_site(),
+                span: block.span(),
                 stmts,
             })
         }
@@ -1450,20 +1453,21 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
             if let Some((var_name, map_field, key_expr, some_body, none_body)) =
                 match_match_on_get(expr_match)
             {
+                let key = parse_expr(key_expr, ctx)?;
                 let contains = ExprIR::LedgerAccess {
-                    span: Span::call_site(),
+                    span: expr_match.expr.span(),
                     field: map_field.clone(),
                     method: syn::Ident::new("contains", Span::call_site()),
-                    args: vec![parse_expr(key_expr, ctx)?],
+                    args: vec![key.clone()],
                 };
                 let lookup = ExprIR::LedgerAccess {
-                    span: Span::call_site(),
+                    span: expr_match.expr.span(),
                     field: map_field,
                     method: syn::Ident::new("lookup", Span::call_site()),
-                    args: vec![parse_expr(key_expr, ctx)?],
+                    args: vec![key],
                 };
                 let let_stmt = ExprIR::Let {
-                    span: Span::call_site(),
+                    span: var_name.span(),
                     name: var_name,
                     value: Box::new(lookup),
                 };
@@ -1472,7 +1476,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 let else_branch = Some(parse_arm_body(none_body, ctx)?);
 
                 return Ok(ExprIR::If {
-                    span: Span::call_site(),
+                    span: expr_match.match_token.span(),
                     cond: Box::new(contains),
                     then_branch,
                     else_branch,
@@ -1485,7 +1489,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 return Ok(chain);
             }
             Ok(ExprIR::Unsupported {
-                span: Span::call_site(),
+                span: expr_match.match_token.span(),
                 description: "unsupported match shape (only `match self.<map>.get(&k) { Some(v) => ..., None => ... }`, \
                               unit-variant enums, and homogeneous-payload enums / Option<T> are supported)"
                     .to_string(),
@@ -1516,7 +1520,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 .collect::<MidnightResult<Vec<_>>>()?;
 
             Ok(ExprIR::StructInit {
-                span: Span::call_site(),
+                span: s.span(),
                 name,
                 fields,
             })
@@ -1529,7 +1533,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 None
             };
             Ok(ExprIR::Return {
-                span: Span::call_site(),
+                span: ret.span(),
                 value,
             })
         }
@@ -1541,7 +1545,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 .map(|e| parse_expr(e, ctx))
                 .collect::<MidnightResult<_>>()?;
             Ok(ExprIR::Tuple {
-                span: Span::call_site(),
+                span: tuple.span(),
                 elements,
             })
         }
@@ -1553,7 +1557,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 .map(|e| parse_expr(e, ctx))
                 .collect::<MidnightResult<_>>()?;
             Ok(ExprIR::ArrayLit {
-                span: Span::call_site(),
+                span: array.span(),
                 elements,
             })
         }
@@ -1561,7 +1565,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
         Expr::Reference(r) => {
             let inner = parse_expr(&r.expr, ctx)?;
             Ok(ExprIR::Reference {
-                span: Span::call_site(),
+                span: r.span(),
                 expr: Box::new(inner),
             })
         }
@@ -1571,7 +1575,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
         Expr::Macro(m) => parse_macro_expr(&m.mac, ctx),
 
         Expr::While(_) | Expr::Loop(_) => Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+            span: expr.span(),
             description: "while/loop not supported in circuits (use for with const bounds)"
                 .to_string(),
         }),
@@ -1600,13 +1604,13 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                 && let Ok(n) = int.base10_parse::<u32>()
             {
                 Ok(ExprIR::Index {
-                    span: Span::call_site(),
+                    span: idx.span(),
                     array: Box::new(array),
                     index: n,
                 })
             } else {
                 Ok(ExprIR::Unsupported {
-                    span: Span::call_site(),
+                    span: index_expr.span(),
                     description: format!(
                         "array index must be a compile-time integer literal (got `{}`); \
                          use a `for i in 0..N` loop so the index unrolls to a literal",
@@ -1617,7 +1621,7 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
         }
 
         _ => Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+            span: expr.span(),
             description: format!("unsupported expression: {}", quote::quote!(#expr)),
         }),
     }
@@ -1628,6 +1632,7 @@ fn parse_macro_expr(mac: &syn::Macro, ctx: &BodyCtx<'_>) -> MidnightResult<ExprI
     let path_str = quote::quote!(#path).to_string().replace(' ', "");
     let tokens = &mac.tokens;
 
+    let mac_span = mac.path.span();
     if path_str == "assert" || path_str.ends_with("::assert") {
         // `assert!(cond)` or `assert!(cond, "msg", ...)`. The message
         // is informational only — we only enforce the condition. Drop
@@ -1637,20 +1642,20 @@ fn parse_macro_expr(mac: &syn::Macro, ctx: &BodyCtx<'_>) -> MidnightResult<ExprI
                 .parse2(tokens.clone())
                 .map_err(|e| {
                     MidnightError::new(
-                        Span::call_site(),
+                        mac_span,
                         ErrorCode::UnsupportedExpression,
                         format!("failed to parse assert arguments: {e}"),
                     )
                 })?;
         let cond = args.into_iter().next().ok_or_else(|| {
             MidnightError::new(
-                Span::call_site(),
+                mac_span,
                 ErrorCode::UnsupportedExpression,
                 "assert! requires a condition argument",
             )
         })?;
         Ok(ExprIR::Assert {
-            span: Span::call_site(),
+            span: mac_span,
             kind: AssertKind::Assert(Box::new(parse_expr(&cond, ctx)?)),
         })
     } else if path_str == "assert_eq" || path_str.ends_with("::assert_eq") {
@@ -1662,7 +1667,7 @@ fn parse_macro_expr(mac: &syn::Macro, ctx: &BodyCtx<'_>) -> MidnightResult<ExprI
                 .parse2(tokens.clone())
                 .map_err(|e| {
                     MidnightError::new(
-                        Span::call_site(),
+                        mac_span,
                         ErrorCode::UnsupportedExpression,
                         format!("failed to parse assert_eq arguments: {e}"),
                     )
@@ -1671,21 +1676,21 @@ fn parse_macro_expr(mac: &syn::Macro, ctx: &BodyCtx<'_>) -> MidnightResult<ExprI
         let mut iter = args.into_iter();
         let a = iter.next().ok_or_else(|| {
             MidnightError::new(
-                Span::call_site(),
+                mac_span,
                 ErrorCode::UnsupportedExpression,
                 "assert_eq! requires two arguments",
             )
         })?;
         let b = iter.next().ok_or_else(|| {
             MidnightError::new(
-                Span::call_site(),
+                mac_span,
                 ErrorCode::UnsupportedExpression,
                 "assert_eq! requires two arguments",
             )
         })?;
 
         Ok(ExprIR::Assert {
-            span: Span::call_site(),
+            span: mac_span,
             kind: AssertKind::AssertEq(
                 Box::new(parse_expr(&a, ctx)?),
                 Box::new(parse_expr(&b, ctx)?),
@@ -1693,14 +1698,9 @@ fn parse_macro_expr(mac: &syn::Macro, ctx: &BodyCtx<'_>) -> MidnightResult<ExprI
         })
     } else {
         // Carry the macro's own span so the diagnostic points at the
-        // call site instead of `Span::call_site()`.
+        // call site.
         Ok(ExprIR::Unsupported {
-            span: mac
-                .path
-                .segments
-                .last()
-                .map(|s| s.ident.span())
-                .unwrap_or_else(Span::call_site),
+            span: mac_span,
             description: format!("unsupported macro: {path_str}"),
         })
     }
@@ -1848,10 +1848,10 @@ fn lower_enum_match(
                 syn::Ident::new("Option", Span::call_site())
             };
             then_branch.push(ExprIR::Let {
-                span: Span::call_site(),
+                span: binding.span(),
                 name: binding.clone(),
                 value: Box::new(ExprIR::EnumPayload {
-                    span: Span::call_site(),
+                    span: binding.span(),
                     scrutinee: Box::new(scrutinee.clone()),
                     enum_name,
                 }),
@@ -1859,16 +1859,16 @@ fn lower_enum_match(
         }
         then_branch.extend(parse_arm_body(body, ctx)?);
         let cond = ExprIR::BinaryOp {
-            span: Span::call_site(),
+            span: path.span(),
             op: syn::BinOp::Eq(syn::token::EqEq(Span::call_site())),
             lhs: Box::new(scrutinee.clone()),
             rhs: Box::new(ExprIR::Path {
-                span: Span::call_site(),
+                span: path.span(),
                 path: (*path).clone(),
             }),
         };
         let if_expr = ExprIR::If {
-            span: Span::call_site(),
+            span: expr_match.match_token.span(),
             cond: Box::new(cond),
             then_branch,
             else_branch: else_branch.take(),
@@ -2007,7 +2007,7 @@ fn match_if_let_some_get(cond: &Expr) -> Option<(syn::Ident, syn::Ident, &Expr)>
 fn parse_const_for_loop(for_expr: &syn::ExprForLoop, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
     let Pat::Ident(pat) = &*for_expr.pat else {
         return Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+            span: for_expr.pat.span(),
             description: "for-loop pattern must be a single identifier".to_string(),
         });
     };
@@ -2015,32 +2015,32 @@ fn parse_const_for_loop(for_expr: &syn::ExprForLoop, ctx: &BodyCtx<'_>) -> Midni
 
     let Expr::Range(range) = &*for_expr.expr else {
         return Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+            span: for_expr.expr.span(),
             description: "for-loop iterator must be a literal `<lit>..<lit>` range".to_string(),
         });
     };
     let Some(start_expr) = &range.start else {
         return Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+            span: range.span(),
             description: "for-loop range must have an explicit lower bound".to_string(),
         });
     };
     let Some(end_expr) = &range.end else {
         return Ok(ExprIR::Unsupported {
-            span: Span::call_site(),
+            span: range.span(),
             description: "for-loop range must have an explicit upper bound".to_string(),
         });
     };
     let start = parse_int_literal(start_expr).ok_or_else(|| {
         MidnightError::new(
-            Span::call_site(),
+            start_expr.span(),
             ErrorCode::UnsupportedExpression,
             "for-loop lower bound must be an integer literal",
         )
     })?;
     let end = parse_int_literal(end_expr).ok_or_else(|| {
         MidnightError::new(
-            Span::call_site(),
+            end_expr.span(),
             ErrorCode::UnsupportedExpression,
             "for-loop upper bound must be an integer literal",
         )
@@ -2054,7 +2054,7 @@ fn parse_const_for_loop(for_expr: &syn::ExprForLoop, ctx: &BodyCtx<'_>) -> Midni
     };
     if (inclusive && end < start) || (!inclusive && end <= start) {
         return Ok(ExprIR::Block {
-            span: Span::call_site(),
+            span: for_expr.for_token.span(),
             stmts: Vec::new(),
         });
     }
@@ -2066,7 +2066,7 @@ fn parse_const_for_loop(for_expr: &syn::ExprForLoop, ctx: &BodyCtx<'_>) -> Midni
         substitute_ident_with_int(&mut body, &loop_var, i);
         let stmts = parse_block_stmts(&body, ctx)?;
         iterations.push(ExprIR::Block {
-            span: Span::call_site(),
+            span: for_expr.for_token.span(),
             stmts,
         });
         if i == last {
@@ -2076,7 +2076,7 @@ fn parse_const_for_loop(for_expr: &syn::ExprForLoop, ctx: &BodyCtx<'_>) -> Midni
     }
 
     Ok(ExprIR::Block {
-        span: Span::call_site(),
+        span: for_expr.for_token.span(),
         stmts: iterations,
     })
 }

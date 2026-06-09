@@ -66,12 +66,15 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             .into()
         }
-        Err(e) => {
-            let error = e.to_compile_error();
+        Err(diagnostics) => {
+            // Emit EVERY collected diagnostic, not just the first —
+            // the user fixes all of them in one build instead of
+            // playing whack-a-mole.
+            let errors = diagnostics.to_compile_errors();
             let cleaned = strip_midnight_attrs_from_module(module);
             let output = quote::quote! {
                 #cleaned
-                #error
+                #errors
             };
             output.into()
         }

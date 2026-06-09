@@ -41,6 +41,8 @@ pub enum ErrorCode {
     MissingCircuit,
     InvalidConstructorReturn,
     QueryMustBeImmutable,
+    InvalidAttribute,
+    EmptyContractModule,
 
     // MIDNIGHT-2xx: Privacy model violations
     WitnessTypeMismatch,
@@ -62,6 +64,8 @@ impl ErrorCode {
             Self::MissingCircuit => "MIDNIGHT-103",
             Self::InvalidConstructorReturn => "MIDNIGHT-104",
             Self::QueryMustBeImmutable => "MIDNIGHT-105",
+            Self::InvalidAttribute => "MIDNIGHT-106",
+            Self::EmptyContractModule => "MIDNIGHT-107",
             Self::WitnessTypeMismatch => "MIDNIGHT-200",
             Self::UnsupportedExpression => "MIDNIGHT-300",
             Self::UnsupportedLoop => "MIDNIGHT-301",
@@ -71,6 +75,7 @@ impl ErrorCode {
 }
 
 /// Collect multiple errors and emit them all as a combined compile_error.
+#[derive(Debug, Default)]
 pub struct Diagnostics {
     errors: Vec<MidnightError>,
 }
@@ -88,12 +93,20 @@ impl Diagnostics {
         !self.errors.is_empty()
     }
 
-    #[allow(dead_code)]
+    /// All collected errors, in discovery order.
+    pub fn errors(&self) -> &[MidnightError] {
+        &self.errors
+    }
+
+    /// One `compile_error!` per collected error, so the user sees every
+    /// diagnostic in a single build instead of fixing them one at a time.
     pub fn to_compile_errors(&self) -> proc_macro2::TokenStream {
         let errors = self.errors.iter().map(|e| e.to_compile_error());
         quote::quote! { #(#errors)* }
     }
 
+    /// The first collected error. Panics when empty — callers must
+    /// check `has_errors` first.
     pub fn into_first_error(mut self) -> MidnightError {
         self.errors.remove(0)
     }

@@ -4,7 +4,7 @@ mod tests {
     use crate::expr::*;
     use crate::parse::parse_contract;
 
-    fn parse(input: proc_macro2::TokenStream) -> crate::MidnightResult<ContractIR> {
+    fn parse(input: proc_macro2::TokenStream) -> Result<ContractIR, crate::Diagnostics> {
         let module: syn::ItemMod = syn::parse2(input).expect("failed to parse module");
         parse_contract(module)
     }
@@ -183,7 +183,7 @@ mod tests {
         });
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().into_first_error();
         assert_eq!(err.code, crate::error::ErrorCode::MissingLedger);
     }
 
@@ -211,7 +211,7 @@ mod tests {
         });
 
         assert!(result.is_err());
-        let err = result.unwrap_err();
+        let err = result.unwrap_err().into_first_error();
         assert_eq!(err.code, crate::error::ErrorCode::QueryMustBeImmutable);
     }
 
@@ -714,6 +714,149 @@ mod tests {
             msg.contains("clone"),
             "diagnostic must name the method; got: {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Attribute parsing diagnostics (M2, L4)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn misspelled_nocturne_attr_is_rejected() {
+        let err = parse(quote::quote! {
+            mod typo_attr {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circut)]
+                    pub fn bump(&mut self) {
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect_err("#[nocturne(circut)] must be a spanned error, not silently ignored");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("circut") && msg.contains("circuit"),
+            "diagnostic must name the typo and list valid attrs; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn bare_nocturne_attr_is_rejected() {
+        let err = parse(quote::quote! {
+            mod bare_attr {
+                #[nocturne]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+            }
+        })
+        .expect_err("#[nocturne] without arguments must error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("nocturne"),
+            "diagnostic must mention the attribute; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn duplicate_nocturne_attrs_on_one_item_are_rejected() {
+        let err = parse(quote::quote! {
+            mod dup_attr {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    #[nocturne(query)]
+                    pub fn confused(&mut self) {
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect_err("two #[nocturne(...)] attrs on one item must error, not first-wins");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("duplicate"),
+            "diagnostic must say duplicate; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn trailing_comma_in_nocturne_attr_is_tolerated() {
+        let ir = parse(quote::quote! {
+            mod trailing_comma {
+                #[nocturne(ledger,)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit,)]
+                    pub fn bump(&mut self) {
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect("trailing comma in attr args must parse");
+        assert_eq!(ir.circuits.len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Multi-error emission (M6)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn multiple_errors_are_all_collected() {
+        let err = parse(quote::quote! {
+            mod two_bad {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { secret: Field }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn a(&mut self, witnesses: &W) {
+                        let x = witnesses.sekret;
+                        self.count.increment();
+                    }
+
+                    #[nocturne(circuit)]
+                    pub fn b(&mut self, witnesses: &W) {
+                        let y = witnesses.also_wrong;
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect_err("both bad circuits must error");
+        assert_eq!(
+            err.errors().len(),
+            2,
+            "both errors must be collected, not just the first; got: {err:?}"
+        );
+        let msg = format!("{err:?}");
+        assert!(msg.contains("sekret") && msg.contains("also_wrong"));
     }
 
     #[test]
