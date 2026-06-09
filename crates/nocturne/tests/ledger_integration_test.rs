@@ -9902,3 +9902,220 @@ async fn helper_inline_chained_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for chained helper call");
 }
+
+// ---------------------------------------------------------------------------
+// Disclose pass-through (review H3 / plan Task 2.3): `disclose(_)` is a
+// marker, not an emission. Before the fix the emitter created a
+// DeclarePubInput + PiSkip group with no backing transcript op, so any
+// active-path disclose failed at prove with a PI-shape mismatch. This is
+// the smallest disclose shape: disclose a witness and store it.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod discloser {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct DiscloserState {
+        pub revealed: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct DiscloserWitnesses {
+        pub secret: Uint<64>,
+    }
+
+    impl DiscloserState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                revealed: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn reveal(&mut self, witnesses: &DiscloserWitnesses) {
+            self.revealed.set(nocturne::disclose(witnesses.secret));
+        }
+    }
+}
+
+fn build_reveal_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod discloser {
+            #[nocturne(ledger)]
+            pub struct DiscloserState { pub revealed: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct DiscloserWitnesses { pub secret: Uint<64> }
+            impl DiscloserState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { revealed: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn reveal(&mut self, witnesses: &DiscloserWitnesses) {
+                    self.revealed.set(nocturne::disclose(witnesses.secret));
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    assert!(
+        output.errors.is_empty(),
+        "emission errors: {:?}",
+        output.errors
+    );
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "reveal")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn disclose_witness_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_reveal_ir();
+    let witnesses = discloser::DiscloserWitnesses {
+        secret: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript = discloser::transcript::build_reveal_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage("reveal", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "disclose must add no PI group of its own — the Cell::set ops are the \
+         only transcript-backed PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for disclose(witness) → Cell::set");
+}
+
+// ---------------------------------------------------------------------------
+// u128 literals end-to-end (review M3/M6 / plan Task 2.5): a literal above
+// u64::MAX must LoadImm its full 128-bit value in the circuit AND reach the
+// runtime transcript untruncated (the builder previously cast `as u64`).
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod big_cell {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct BigCellState {
+        pub big: Cell<Uint<128>>,
+    }
+
+    impl BigCellState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                big: Cell::new(Uint::<128>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn set_big(&mut self) {
+            // 2^64 + 1: truncation through u64 would store 1.
+            self.big.set(18446744073709551617u128.into());
+        }
+    }
+}
+
+fn build_set_big_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod big_cell {
+            #[nocturne(ledger)]
+            pub struct BigCellState { pub big: Cell<Uint<128>> }
+            impl BigCellState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { big: Cell::new(Uint::<128>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn set_big(&mut self) {
+                    self.big.set(18446744073709551617u128.into());
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    assert!(
+        output.errors.is_empty(),
+        "emission errors: {:?}",
+        output.errors
+    );
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "set_big")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn cell_u128_literal_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_set_big_ir();
+    let nocturne_transcript = big_cell::transcript::build_set_big_transcript();
+
+    // No witnesses: the literal lives in both the circuit (LoadImm) and
+    // the transcript (Push Cell(AlignedValue::from(u128))).
+    let preimage = canonical_preimage("set_big", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    // The full 2^64 + 1 value must appear in the PI stream — if either
+    // side truncated to u64, prove/verify would disagree.
+    let big = Fr::from(18446744073709551617u128);
+    assert!(
+        ledger_pis.contains(&big),
+        "transcript PIs must carry the untruncated 128-bit literal"
+    );
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for a u128 literal \
+         Cell::set"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<Uint<128>>::set(u128 literal)");
+}
