@@ -546,10 +546,21 @@ impl ZkirEmitter {
                     let _ = self.emit_expr(arg);
                 }
                 let ret_ty = self.witness_methods.get(&name.to_string()).cloned();
-                let layout = ret_ty
-                    .as_ref()
-                    .map(|t| witness_fr_layout(t, &self.user_structs, &self.user_enums))
-                    .unwrap_or_else(|| vec![FrLayout::Field]);
+                let layout = match ret_ty.as_ref() {
+                    Some(t) => witness_fr_layout(t, &self.user_structs, &self.user_enums),
+                    // Parse-time validation in nocturne-ir rejects calls
+                    // to unregistered witness methods, so macro-built IR
+                    // never reaches this arm unresolved. Guessing a
+                    // single-Field layout here would silently change the
+                    // circuit's PI count, so fail loudly instead. Interim
+                    // until the emitter grows a recorded-error channel
+                    // (chunk 2 of the review-fixes plan); convert to a
+                    // recorded error then.
+                    None => panic!(
+                        "nocturne: witness method `{name}` has no registered return type at \
+                         ZKIR emit time; its wire layout cannot be determined"
+                    ),
+                };
                 let mut first_idx = None;
                 for entry in layout {
                     let var = self.emit_instruction(Instruction::PrivateInput {

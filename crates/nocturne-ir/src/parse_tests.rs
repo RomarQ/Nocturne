@@ -450,6 +450,272 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // Witness identification by resolved type (review H1, M7)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn witness_param_with_custom_name_is_detected_by_type() {
+        let ir = parse(quote::quote! {
+            mod custom_name {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct BallotWitnesses {
+                    voter_secret: Field,
+                }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn cast(&mut self, w: &BallotWitnesses) {
+                        let commitment = persistent_hash(&w.voter_secret);
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect("param `w: &BallotWitnesses` must parse");
+
+        let circuit = &ir.circuits[0];
+        assert!(circuit.takes_witnesses, "must detect witnesses by type");
+        assert_eq!(
+            circuit.witnesses_param_name.as_ref().unwrap().to_string(),
+            "w"
+        );
+        assert!(
+            circuit.params.is_empty(),
+            "witness param must not be public"
+        );
+        // `w.voter_secret` must parse as a WitnessAccess, not a plain
+        // method/field chain on a regular variable.
+        match &circuit.body[0] {
+            ExprIR::Let { value, .. } => match &**value {
+                ExprIR::FnCall { args, .. } => match &args[0] {
+                    ExprIR::Reference { expr, .. } => match &**expr {
+                        ExprIR::WitnessAccess { field, .. } => {
+                            assert_eq!(field.to_string(), "voter_secret");
+                        }
+                        other => panic!("expected WitnessAccess, got: {other:?}"),
+                    },
+                    other => panic!("expected Reference, got: {other:?}"),
+                },
+                other => panic!("expected FnCall, got: {other:?}"),
+            },
+            other => panic!("expected Let, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn param_named_num_witnesses_is_a_public_param() {
+        let ir = parse(quote::quote! {
+            mod misleading_name {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn bump(&mut self, num_witnesses: u64) {
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect("u64 param named num_witnesses must parse");
+
+        let circuit = &ir.circuits[0];
+        assert!(!circuit.takes_witnesses);
+        assert_eq!(circuit.params.len(), 1, "num_witnesses must stay public");
+        assert_eq!(circuit.params[0].name.to_string(), "num_witnesses");
+    }
+
+    #[test]
+    fn local_var_named_eyewitnesses_is_not_a_witness_receiver() {
+        let ir = parse(quote::quote! {
+            mod local_name {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { secret: Field }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) {
+                        let eyewitnesses = 1u64;
+                        let y = eyewitnesses.wrapping_add(2);
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect("local named eyewitnesses must parse");
+
+        let circuit = &ir.circuits[0];
+        match &circuit.body[1] {
+            ExprIR::Let { value, .. } => match &**value {
+                ExprIR::MethodCall { method, .. } => {
+                    assert_eq!(method.to_string(), "wrapping_add");
+                }
+                other => {
+                    panic!("expected MethodCall (not WitnessCall) on local var, got: {other:?}")
+                }
+            },
+            other => panic!("expected Let, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn impl_before_witnesses_struct_registers_methods() {
+        let ir = parse(quote::quote! {
+            mod impl_first {
+                #[nocturne(ledger)]
+                pub struct State { stored: Cell<Field> }
+
+                // Declared BEFORE the witnesses struct — two-pass item
+                // processing must still register the method.
+                impl W {
+                    pub fn derive(&self) -> Field {
+                        Field::default()
+                    }
+                }
+
+                #[nocturne(witnesses)]
+                pub struct W;
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { stored: Cell::new(Field::default()) } }
+
+                    #[nocturne(circuit)]
+                    pub fn store(&mut self, witnesses: &W) {
+                        self.stored.set(witnesses.derive());
+                    }
+                }
+            }
+        })
+        .expect("impl-before-struct must parse");
+
+        let w = ir.witnesses.as_ref().expect("witnesses registered");
+        assert_eq!(w.methods.len(), 1, "method from impl-before-struct");
+        assert_eq!(w.methods[0].name.to_string(), "derive");
+        match &ir.circuits[0].body[0] {
+            ExprIR::LedgerAccess { args, .. } => match &args[0] {
+                ExprIR::WitnessCall { name, .. } => {
+                    assert_eq!(name.to_string(), "derive");
+                }
+                other => panic!("expected WitnessCall, got: {other:?}"),
+            },
+            other => panic!("expected LedgerAccess, got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Post-parse witness resolution validation (M7, L3)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unknown_witness_field_is_rejected() {
+        let err = parse(quote::quote! {
+            mod typo_field {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { secret: Field }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) {
+                        let x = witnesses.sekret;
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect_err("typo'd witness field must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("sekret"),
+            "diagnostic must name the unknown field; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_witness_method_is_rejected() {
+        let err = parse(quote::quote! {
+            mod typo_method {
+                #[nocturne(ledger)]
+                pub struct State { stored: Cell<Field> }
+
+                #[nocturne(witnesses)]
+                pub struct W;
+
+                impl W {
+                    pub fn derive(&self) -> Field { Field::default() }
+                }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { stored: Cell::new(Field::default()) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) {
+                        self.stored.set(witnesses.derve());
+                    }
+                }
+            }
+        })
+        .expect_err("typo'd witness method must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("derve"),
+            "diagnostic must name the unknown method; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn non_registered_method_on_witnesses_receiver_is_rejected() {
+        let err = parse(quote::quote! {
+            mod clone_call {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { secret: Field }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) {
+                        let w2 = witnesses.clone();
+                        self.count.increment();
+                    }
+                }
+            }
+        })
+        .expect_err("witnesses.clone() must error, not become a WitnessCall");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("clone"),
+            "diagnostic must name the method; got: {msg}"
+        );
+    }
+
     #[test]
     fn recursive_helper_is_rejected() {
         let err = parse(quote::quote! {
