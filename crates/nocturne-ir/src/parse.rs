@@ -15,14 +15,8 @@ use crate::expr::*;
 /// witnesses struct (exact param-type matching), ledger field types,
 /// and user enums regardless of item order in the module.
 struct ContractCtx<'a> {
-    // `ledger` feeds constructor-return validation and `as`-cast width
-    // inference; landing in the follow-up commits of this chunk.
-    #[allow(dead_code)]
     ledger: Option<&'a LedgerIR>,
     witnesses: Option<&'a WitnessIR>,
-    // Consumed by match-lowering validations (glob-imported variant
-    // detection), landing in a follow-up commit of this chunk.
-    #[allow(dead_code)]
     user_enums: &'a std::collections::HashMap<String, Vec<UserEnumVariant>>,
 }
 
@@ -38,16 +32,33 @@ impl<'a> ContractCtx<'a> {
 /// parsing classifies `recv.field` / `recv.method(..)` as witness
 /// reads/calls only when `recv` is exactly that ident.
 struct BodyCtx<'a> {
-    // Used by the cast/match validations landing in the follow-up
-    // commits of this chunk.
-    #[allow(dead_code)]
     contract: &'a ContractCtx<'a>,
     witnesses_param: Option<syn::Ident>,
+    /// Declared types of the function's public params, used for
+    /// `as`-cast width inference (`x as u64` with `x: u32`).
+    param_types: std::collections::HashMap<String, syn::Type>,
+    /// Monotonic counter for synthetic match-scrutinee bindings, so
+    /// nested matches inside one function body never collide in the
+    /// emitters' flat variable maps.
+    scrutinee_counter: std::cell::Cell<u32>,
 }
 
 impl BodyCtx<'_> {
     fn is_witnesses_receiver(&self, ident: &syn::Ident) -> bool {
         self.witnesses_param.as_ref() == Some(ident)
+    }
+
+    fn param_types_of(params: &[ParamIR]) -> std::collections::HashMap<String, syn::Type> {
+        params
+            .iter()
+            .map(|p| (p.name.to_string(), p.ty.clone()))
+            .collect()
+    }
+
+    fn fresh_scrutinee_ident(&self, span: Span) -> syn::Ident {
+        let n = self.scrutinee_counter.get();
+        self.scrutinee_counter.set(n + 1);
+        syn::Ident::new(&format!("__nocturne_scrutinee_{n}"), span)
     }
 }
 
@@ -60,7 +71,20 @@ pub fn parse_contract(module: ItemMod) -> Result<ContractIR, Diagnostics> {
     let name = module.ident.clone();
     let span = name.span();
 
-    let items = module.content.map(|(_, items)| items).unwrap_or_default();
+    let Some((_, items)) = module.content else {
+        // `mod foo;` has no inline content — the proc macro never sees
+        // the out-of-line file, so this can't be compiled as a
+        // contract. Without the dedicated error this would surface as
+        // a misleading MissingLedger.
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.push(MidnightError::new(
+            span,
+            ErrorCode::EmptyContractModule,
+            "contract module must have inline content (`mod foo { ... }`); \
+             `mod foo;` out-of-line modules are not supported by #[nocturne::contract]",
+        ));
+        return Err(diagnostics);
+    };
 
     let mut ledger: Option<LedgerIR> = None;
     let mut ledger_seen = false;
@@ -527,6 +551,19 @@ fn impl_targets_ident(impl_block: &ItemImpl, ident: &syn::Ident) -> bool {
 fn try_parse_helper(item_fn: &ItemFn, ctx: &ContractCtx<'_>) -> Option<HelperIR> {
     let name = item_fn.sig.ident.clone();
 
+    // Generic, async, const, and unsafe fns can't be inlined into a
+    // circuit body (no monomorphisation or effect model at the IR
+    // layer) — leave them as plain Rust fns.
+    let sig = &item_fn.sig;
+    if sig.asyncness.is_some()
+        || sig.constness.is_some()
+        || sig.unsafety.is_some()
+        || !sig.generics.params.is_empty()
+        || sig.generics.where_clause.is_some()
+    {
+        return None;
+    }
+
     // Don't shadow builtins recognised by the codegen.
     let n = name.to_string();
     if matches!(
@@ -577,6 +614,8 @@ fn try_parse_helper(item_fn: &ItemFn, ctx: &ContractCtx<'_>) -> Option<HelperIR>
     let body_ctx = BodyCtx {
         contract: ctx,
         witnesses_param: None,
+        param_types: BodyCtx::param_types_of(&params),
+        scrutinee_counter: std::cell::Cell::new(0),
     };
     let body = parse_block_stmts(&item_fn.block, &body_ctx).ok()?;
     if body.iter().any(contains_unsupported) {
@@ -836,10 +875,43 @@ fn parse_witness_method(method: &ImplItemFn) -> MidnightResult<WitnessMethodIR> 
 
 fn parse_constructor(method: &ImplItemFn, ctx: &ContractCtx<'_>) -> MidnightResult<ConstructorIR> {
     let name = method.sig.ident.clone();
+
+    // A constructor must produce the ledger state: its return type is
+    // `Self` or the ledger struct's name. Anything else would make the
+    // generated deploy code call a function that doesn't build the
+    // state. Skipped when the ledger failed to parse (that error is
+    // already reported).
+    if let Some(ledger) = ctx.ledger {
+        let returns_ledger = match &method.sig.output {
+            ReturnType::Type(_, ty) => {
+                if let syn::Type::Path(tp) = &**ty
+                    && let Some(seg) = tp.path.segments.last()
+                {
+                    seg.ident == "Self" || seg.ident == ledger.name
+                } else {
+                    false
+                }
+            }
+            ReturnType::Default => false,
+        };
+        if !returns_ledger {
+            return Err(MidnightError::new(
+                name.span(),
+                ErrorCode::InvalidConstructorReturn,
+                format!(
+                    "constructor `{name}` must return `Self` or `{}` (the ledger struct)",
+                    ledger.name
+                ),
+            ));
+        }
+    }
+
     let (witnesses_param, params) = parse_fn_params(&method.sig, ctx.witnesses_struct_name())?;
     let body_ctx = BodyCtx {
         contract: ctx,
         witnesses_param,
+        param_types: BodyCtx::param_types_of(&params),
+        scrutinee_counter: std::cell::Cell::new(0),
     };
     let body = parse_block_stmts(&method.block, &body_ctx)?;
 
@@ -858,6 +930,8 @@ fn parse_circuit(method: &ImplItemFn, ctx: &ContractCtx<'_>) -> MidnightResult<C
     let body_ctx = BodyCtx {
         contract: ctx,
         witnesses_param: witnesses_param_name.clone(),
+        param_types: BodyCtx::param_types_of(&params),
+        scrutinee_counter: std::cell::Cell::new(0),
     };
     let body = parse_block_stmts(&method.block, &body_ctx)?;
     let return_type = match &method.sig.output {
@@ -895,6 +969,8 @@ fn parse_query(method: &ImplItemFn, ctx: &ContractCtx<'_>) -> MidnightResult<Que
     let body_ctx = BodyCtx {
         contract: ctx,
         witnesses_param,
+        param_types: BodyCtx::param_types_of(&params),
+        scrutinee_counter: std::cell::Cell::new(0),
     };
     let body = parse_block_stmts(&method.block, &body_ctx)?;
     let return_type = match &method.sig.output {
@@ -928,6 +1004,110 @@ fn is_witnesses_type(ty: &syn::Type, witnesses_struct: &syn::Ident) -> bool {
     false
 }
 
+/// Bit width of a type the IR models as an unsigned integer wire:
+/// `u8`..`u128`, `Uint<N>`, and `bool`/`Boolean` (1 bit). `None` for
+/// everything else (Field, Bytes<N>, user types) — the caller treats
+/// those as "width unknown".
+fn type_bit_width(ty: &syn::Type) -> Option<u32> {
+    let mut t = ty;
+    while let syn::Type::Reference(r) = t {
+        t = &r.elem;
+    }
+    let type_str = quote::quote!(#t).to_string().replace(' ', "");
+    match type_str.as_str() {
+        "bool" | "Boolean" => Some(1),
+        "u8" => Some(8),
+        "u16" => Some(16),
+        "u32" => Some(32),
+        "u64" => Some(64),
+        "u128" => Some(128),
+        _ => type_str
+            .strip_prefix("Uint<")
+            .and_then(|rest| rest.strip_suffix('>'))
+            .and_then(|n| n.parse::<u32>().ok()),
+    }
+}
+
+/// Infer the bit width of an already-parsed expression where the
+/// declared types make it knowable: int literals, witness reads/calls,
+/// typed params, and pure value reads off ledger fields. `None` means
+/// "not provable" — the cast rule then only allows widening to u128.
+fn infer_expr_width(expr: &ExprIR, ctx: &BodyCtx<'_>) -> Option<u32> {
+    match expr {
+        ExprIR::Literal { value, .. } => match value {
+            LiteralIR::Int(n) => Some((128 - n.leading_zeros()).max(1)),
+            LiteralIR::Bool(_) => Some(1),
+            LiteralIR::Str(_) => None,
+        },
+        ExprIR::WitnessAccess { field, .. } => ctx
+            .contract
+            .witnesses
+            .and_then(|w| w.fields.iter().find(|f| f.name == *field))
+            .and_then(|f| type_bit_width(&f.ty)),
+        ExprIR::WitnessCall { name, .. } => ctx
+            .contract
+            .witnesses
+            .and_then(|w| w.methods.iter().find(|m| m.name == *name))
+            .and_then(|m| type_bit_width(&m.return_type)),
+        ExprIR::Var { name, .. } => ctx
+            .param_types
+            .get(&name.to_string())
+            .and_then(type_bit_width),
+        // `.value()` / `.clone()` / `.into()` on a width-known receiver
+        // preserve the value's width.
+        ExprIR::MethodCall {
+            receiver,
+            method,
+            args,
+            ..
+        } if args.is_empty()
+            && matches!(method.to_string().as_str(), "value" | "clone" | "into") =>
+        {
+            infer_expr_width(receiver, ctx)
+        }
+        // Pure reads off ledger fields: Counter holds a u64; Cell<T>
+        // holds a T.
+        ExprIR::LedgerAccess { field, method, .. }
+            if matches!(
+                method.to_string().as_str(),
+                "value" | "get" | "__direct_access"
+            ) =>
+        {
+            let f = ctx
+                .contract
+                .ledger
+                .and_then(|l| l.fields.iter().find(|f| f.name == *field))?;
+            match &f.type_kind {
+                LedgerTypeKind::Counter => Some(64),
+                LedgerTypeKind::Cell => cell_inner_type(&f.ty).and_then(|t| type_bit_width(&t)),
+                _ => None,
+            }
+        }
+        ExprIR::Reference { expr: inner, .. } | ExprIR::Disclose { value: inner, .. } => {
+            infer_expr_width(inner, ctx)
+        }
+        _ => None,
+    }
+}
+
+/// Extract `T` from `Cell<T>`.
+fn cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let seg = tp.path.segments.last()?;
+    if seg.ident != "Cell" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    args.args.iter().find_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t.clone()),
+        _ => None,
+    })
+}
+
 /// Parse function parameters, skipping `self`. A param whose type
 /// resolves to the registered witnesses struct is returned separately
 /// (first tuple element) instead of joining the public params.
@@ -938,9 +1118,18 @@ fn parse_fn_params(
     let mut witnesses_param = None;
     let mut params = Vec::new();
     for arg in &sig.inputs {
-        if let FnArg::Typed(pat_type) = arg
-            && let Pat::Ident(pat_ident) = &*pat_type.pat
-        {
+        if let FnArg::Typed(pat_type) = arg {
+            let Pat::Ident(pat_ident) = &*pat_type.pat else {
+                // Silently skipping a destructuring pattern would drop
+                // the parameter from the circuit's public inputs while
+                // the runtime function still takes it.
+                return Err(MidnightError::new(
+                    pat_type.pat.span(),
+                    ErrorCode::UnsupportedExpression,
+                    "parameter patterns must be plain identifiers; \
+                     destructuring patterns are not supported in nocturne functions",
+                ));
+            };
             let name = &pat_ident.ident;
             if let Some(w) = witnesses_struct
                 && is_witnesses_type(&pat_type.ty, w)
@@ -1038,7 +1227,7 @@ fn validate_witness_resolution<'a>(
 
 /// Depth-first walk over an `ExprIR` tree, calling `f` on every node
 /// (including the root).
-fn for_each_expr(expr: &ExprIR, f: &mut impl FnMut(&ExprIR)) {
+pub(crate) fn for_each_expr(expr: &ExprIR, f: &mut impl FnMut(&ExprIR)) {
     f(expr);
     match expr {
         ExprIR::BinaryOp { lhs, rhs, .. } => {
@@ -1209,6 +1398,31 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
         }
 
         Expr::Binary(bin) => {
+            // Compound assignments would parse into a BinaryOp whose
+            // result is silently dropped (the rebinding never happens
+            // in the IR), so the circuit and the user's Rust would
+            // disagree. Hard error instead.
+            use syn::BinOp;
+            if matches!(
+                bin.op,
+                BinOp::AddAssign(_)
+                    | BinOp::SubAssign(_)
+                    | BinOp::MulAssign(_)
+                    | BinOp::DivAssign(_)
+                    | BinOp::RemAssign(_)
+                    | BinOp::BitXorAssign(_)
+                    | BinOp::BitAndAssign(_)
+                    | BinOp::BitOrAssign(_)
+                    | BinOp::ShlAssign(_)
+                    | BinOp::ShrAssign(_)
+            ) {
+                return Err(MidnightError::new(
+                    bin.op.span(),
+                    ErrorCode::UnsupportedExpression,
+                    "compound assignment operators are not supported in circuits; \
+                     rebind with `let x = x + y;` or use ledger methods like `increment_by`",
+                ));
+            }
             let lhs = parse_expr(&bin.left, ctx)?;
             let rhs = parse_expr(&bin.right, ctx)?;
             Ok(ExprIR::BinaryOp {
@@ -1335,18 +1549,26 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                     .map(|s| s.ident.clone())
                     .unwrap_or_else(|| syn::Ident::new("unknown", Span::call_site()));
 
-                // Detect special functions.
+                // Detect the disclose builtin — exact path match only
+                // (`disclose` or `nocturne::disclose`), so a user
+                // helper like `disclose_amount(a, b)` is NOT hijacked
+                // (and its extra args NOT dropped).
                 let full_path = quote::quote!(#path).to_string().replace(' ', "");
-                if full_path.contains("disclose") {
-                    if let Some(arg) = parsed_args.into_iter().next() {
-                        return Ok(ExprIR::Disclose {
-                            span: func_name.span(),
-                            value: Box::new(arg),
-                        });
+                if full_path == "disclose" || full_path == "nocturne::disclose" {
+                    if parsed_args.len() != 1 {
+                        return Err(MidnightError::new(
+                            func_name.span(),
+                            ErrorCode::UnsupportedExpression,
+                            format!(
+                                "disclose() takes exactly one argument, got {}",
+                                parsed_args.len()
+                            ),
+                        ));
                     }
-                    return Ok(ExprIR::Unsupported {
+                    let arg = parsed_args.into_iter().next().expect("checked len == 1");
+                    return Ok(ExprIR::Disclose {
                         span: func_name.span(),
-                        description: "disclose() requires an argument".to_string(),
+                        value: Box::new(arg),
                     });
                 }
 
@@ -1582,13 +1804,52 @@ fn parse_expr(expr: &Expr, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
 
         Expr::ForLoop(for_expr) => parse_const_for_loop(for_expr, ctx),
 
-        // `x as u64` / `x as Field` etc. — Nocturne treats the cast as
-        // transparent for IR purposes (the wire-side encoding is
-        // determined by the surrounding consumer's expected type, not
-        // by the cast itself). Lower to the inner expression so
-        // downstream codegen handles the Rust-side `as` verbatim where
-        // it needs to.
-        Expr::Cast(c) => parse_expr(&c.expr, ctx),
+        // `x as u64` — Nocturne treats the cast as transparent for IR
+        // purposes (the wire-side encoding is determined by the
+        // surrounding consumer's expected type, not by the cast
+        // itself). That is only sound when the cast cannot narrow: a
+        // Rust-side truncation the circuit doesn't model would make
+        // the proof and the runtime disagree. The cast stays
+        // transparent when the source's bit width is inferable and
+        // <= the target width, or when the target is u128 (nothing
+        // the IR models exceeds 128 bits); everything else errors.
+        Expr::Cast(c) => {
+            let inner = parse_expr(&c.expr, ctx)?;
+            let target = type_bit_width(&c.ty);
+            let source = infer_expr_width(&inner, ctx);
+            let ty = &c.ty;
+            let target_str = quote::quote!(#ty).to_string().replace(' ', "");
+            match (source, target) {
+                (Some(s), Some(t)) if s <= t => Ok(inner),
+                (Some(s), Some(t)) => Err(MidnightError::new(
+                    c.as_token.span(),
+                    ErrorCode::UnsupportedExpression,
+                    format!(
+                        "narrowing `as` cast: the source is {s} bits wide but `{target_str}` \
+                         is only {t} bits. Nocturne casts are transparent on the wire, so the \
+                         circuit would not perform the truncation the Rust code performs"
+                    ),
+                )),
+                (None, Some(t)) if t >= 128 => Ok(inner),
+                (None, Some(_)) => Err(MidnightError::new(
+                    c.as_token.span(),
+                    ErrorCode::UnsupportedExpression,
+                    format!(
+                        "cannot prove this `as {target_str}` cast is non-narrowing: the \
+                         source expression's bit width is not inferable. Bind the value with \
+                         a typed source (witness field, typed param, literal) or cast to u128"
+                    ),
+                )),
+                (_, None) => Err(MidnightError::new(
+                    c.as_token.span(),
+                    ErrorCode::UnsupportedExpression,
+                    format!(
+                        "unsupported `as` cast target `{target_str}`; \
+                         only u8, u16, u32, u64, and u128 are supported"
+                    ),
+                )),
+            }
+        }
 
         // `arr[idx]` — only const integer literal indices (`arr[0]`,
         // `arr[1]`, ...). After `parse_const_for_loop` unrolls a const
@@ -1783,7 +2044,32 @@ fn lower_enum_match(
             }
             Pat::Wild(_) => shapes.push((ArmShape::Wild, arm.body.as_ref())),
             Pat::Ident(pi) if pi.subpat.is_none() => {
-                // Catch-all identifier (no `@` sub-pattern) acts as wildcard.
+                // Catch-all identifier (no `@` sub-pattern) acts as a
+                // wildcard — EXCEPT when the ident is itself a known
+                // enum variant name (glob-imported `use Status::*`
+                // style). Rust would match that as the variant; the
+                // wildcard lowering would silently match everything.
+                // `Some`/`None` are exempt: the Option lowering treats
+                // a bare `None` arm as the catch-all it is.
+                let ident_str = pi.ident.to_string();
+                if ident_str != "Some"
+                    && ident_str != "None"
+                    && let Some((enum_name, _)) = ctx
+                        .contract
+                        .user_enums
+                        .iter()
+                        .find(|(_, vs)| vs.iter().any(|v| v.name == pi.ident))
+                {
+                    return Err(MidnightError::new(
+                        pi.ident.span(),
+                        ErrorCode::UnsupportedExpression,
+                        format!(
+                            "match arm pattern `{ident_str}` is a bare identifier and would \
+                             lower to a catch-all, but `{enum_name}::{ident_str}` is an enum \
+                             variant; qualify it as `{enum_name}::{ident_str}`"
+                        ),
+                    ));
+                }
                 shapes.push((ArmShape::Wild, arm.body.as_ref()));
             }
             _ => return Ok(None),
@@ -1791,9 +2077,33 @@ fn lower_enum_match(
     }
     let scrutinee = parse_expr(&expr_match.expr, ctx)?;
 
-    // Find the wildcard arm if any; it becomes the final else branch. If no
-    // wildcard, the final variant arm's body is used directly as the bare
-    // else (the user is responsible for exhaustiveness).
+    // H2: bind an effectful scrutinee ONCE. The if-chain below clones
+    // the scrutinee into every arm's discriminant comparison (and
+    // payload projection); for a `WitnessCall` scrutinee each clone
+    // would be a fresh, unconstrained-against-each-other witness draw —
+    // the arms could each see a different value. Pure reads (vars,
+    // witness/ledger field reads, paths) are left in place: they're
+    // cached/idempotent in both emitters, and the transcript codegen
+    // resolves their enum handling from the access shape itself.
+    let mut scrutinee_binding: Option<ExprIR> = None;
+    let scrutinee = if contains_witness_call(&scrutinee) {
+        let span = expr_match.expr.span();
+        let ident = ctx.fresh_scrutinee_ident(span);
+        scrutinee_binding = Some(ExprIR::Let {
+            span,
+            name: ident.clone(),
+            value: Box::new(scrutinee),
+        });
+        ExprIR::Var { span, name: ident }
+    } else {
+        scrutinee
+    };
+
+    // Find the wildcard arm if any; it becomes the final else branch.
+    // Without a wildcard the innermost `if` simply has no else — every
+    // variant arm gets its own discriminant comparison (the user is
+    // responsible for exhaustiveness, which Rust already enforces on
+    // the original match).
     let wild_idx = shapes.iter().position(|(s, _)| matches!(s, ArmShape::Wild));
     type VariantArm<'a> = (&'a syn::Path, Option<syn::Ident>, &'a syn::Expr);
     let (variant_arms, default_body): (Vec<VariantArm<'_>>, Option<Vec<ExprIR>>) =
@@ -1876,7 +2186,26 @@ fn lower_enum_match(
         else_branch = Some(vec![if_expr]);
     }
     // `else_branch` now holds a single-element vec with the outermost If.
-    Ok(else_branch.and_then(|mut v| v.pop()))
+    let chain = else_branch.and_then(|mut v| v.pop());
+    match (scrutinee_binding, chain) {
+        (Some(binding), Some(chain)) => Ok(Some(ExprIR::Block {
+            span: expr_match.match_token.span(),
+            stmts: vec![binding, chain],
+        })),
+        (_, chain) => Ok(chain),
+    }
+}
+
+/// True when the expression tree contains a parametric witness call —
+/// the one IR node whose every evaluation draws a fresh witness value.
+fn contains_witness_call(expr: &ExprIR) -> bool {
+    let mut found = false;
+    for_each_expr(expr, &mut |e| {
+        if matches!(e, ExprIR::WitnessCall { .. }) {
+            found = true;
+        }
+    });
+    found
 }
 
 /// Parse a match arm's body, which is either a block or a bare expression.
@@ -2057,6 +2386,22 @@ fn parse_const_for_loop(for_expr: &syn::ExprForLoop, ctx: &BodyCtx<'_>) -> Midni
             span: for_expr.for_token.span(),
             stmts: Vec::new(),
         });
+    }
+
+    // Cap the unroll: every iteration is a full copy of the body in
+    // the circuit, so a huge bound would explode constraint count and
+    // compile time long before anything useful happens.
+    const MAX_UNROLL: u64 = 1024;
+    let count = (last - start).saturating_add(1);
+    if count > MAX_UNROLL {
+        return Err(MidnightError::new(
+            for_expr.for_token.span(),
+            ErrorCode::UnsupportedLoop,
+            format!(
+                "for-loop unrolls to {count} iterations, exceeding the {MAX_UNROLL}-iteration \
+                 cap; restructure the circuit to do less work per proof"
+            ),
+        ));
     }
 
     let mut iterations: Vec<ExprIR> = Vec::new();

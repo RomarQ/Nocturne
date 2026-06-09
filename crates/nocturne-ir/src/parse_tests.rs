@@ -859,6 +859,493 @@ mod tests {
         assert!(msg.contains("sekret") && msg.contains("also_wrong"));
     }
 
+    // -----------------------------------------------------------------
+    // Match scrutinee bound once (H2)
+    // -----------------------------------------------------------------
+
+    fn count_witness_calls(body: &[ExprIR]) -> usize {
+        let mut n = 0;
+        for stmt in body {
+            crate::parse::for_each_expr(stmt, &mut |e| {
+                if matches!(e, ExprIR::WitnessCall { .. }) {
+                    n += 1;
+                }
+            });
+        }
+        n
+    }
+
+    #[test]
+    fn match_on_witness_call_scrutinee_draws_once() {
+        let ir = parse(quote::quote! {
+            mod scrutinee_once {
+                pub enum Vote { For, Against, Abstain }
+
+                #[nocturne(ledger)]
+                pub struct State { a: Counter, b: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W;
+
+                impl W {
+                    pub fn choice(&self) -> Vote { Vote::For }
+                }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self {
+                        Self { a: Counter::zero(), b: Counter::zero() }
+                    }
+
+                    #[nocturne(circuit)]
+                    pub fn cast(&mut self, witnesses: &W) {
+                        // Two qualified arms + wildcard: without the
+                        // bind-once fix the scrutinee is cloned into
+                        // each arm's comparison (two witness draws).
+                        match witnesses.choice() {
+                            Vote::For => { self.a.increment(); }
+                            Vote::Against => { self.b.increment(); }
+                            _ => { self.a.increment(); }
+                        }
+                    }
+                }
+            }
+        })
+        .expect("match on a WitnessCall scrutinee must parse");
+
+        let body = &ir.circuits[0].body;
+        assert_eq!(
+            count_witness_calls(body),
+            1,
+            "an effectful scrutinee must be drawn exactly once, not once per arm; body: {body:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Exact-match disclose (H4)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn helper_named_disclose_amount_is_not_hijacked() {
+        let ir = parse(quote::quote! {
+            mod not_disclose {
+                #[nocturne(ledger)]
+                pub struct State { total: Cell<u64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { total: Cell::new(0) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, a: u64, b: u64) {
+                        self.total.set(disclose_amount(a, b));
+                    }
+                }
+
+                pub fn disclose_amount(a: u64, b: u64) -> u64 { a + b }
+            }
+        })
+        .expect("disclose_amount must parse as a regular helper call");
+
+        match &ir.circuits[0].body[0] {
+            ExprIR::LedgerAccess { args, .. } => match &args[0] {
+                ExprIR::FnCall { name, args, .. } => {
+                    assert_eq!(name.to_string(), "disclose_amount");
+                    assert_eq!(args.len(), 2, "both args must be preserved");
+                }
+                other => panic!("expected FnCall, got: {other:?}"),
+            },
+            other => panic!("expected LedgerAccess, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn disclose_with_two_args_is_rejected() {
+        let err = parse(quote::quote! {
+            mod bad_disclose {
+                #[nocturne(ledger)]
+                pub struct State { total: Cell<u64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { total: Cell::new(0) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, a: u64, b: u64) {
+                        self.total.set(nocturne::disclose(a, b));
+                    }
+                }
+            }
+        })
+        .expect_err("disclose with two args must error");
+        let msg = format!("{err:?}");
+        assert!(msg.contains("disclose"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------
+    // Loop unroll cap (H5)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn for_loop_over_unroll_cap_is_rejected() {
+        let err = parse(quote::quote! {
+            mod big_loop {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self) {
+                        for _i in 0..2000 {
+                            self.count.increment();
+                        }
+                    }
+                }
+            }
+        })
+        .expect_err("2000-iteration unroll must be rejected");
+        let err = err.into_first_error();
+        assert_eq!(err.code, crate::error::ErrorCode::UnsupportedLoop);
+        assert!(
+            err.message.contains("2000") && err.message.contains("1024"),
+            "message must include the count and the cap; got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn for_loop_at_unroll_cap_parses() {
+        let ir = parse(quote::quote! {
+            mod max_loop {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self) {
+                        for _i in 0..1024 {
+                            self.count.increment();
+                        }
+                    }
+                }
+            }
+        })
+        .expect("1024 iterations is exactly at the cap and must parse");
+        assert_eq!(ir.circuits.len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // `as` casts: transparent only when provably non-narrowing (M3)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn width_equal_witness_cast_keeps_parsing() {
+        // The `witnesses.target.value() as u64` pattern with a Uint<64>
+        // witness (ledger_integration_test.rs counter_set contract).
+        let ir = parse(quote::quote! {
+            mod counter_set {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { pub target: Uint<64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn assign(&mut self, witnesses: &W) {
+                        self.count.set(witnesses.target.value() as u64);
+                    }
+                }
+            }
+        })
+        .expect("width-equal cast must keep parsing");
+        // Cast stays transparent: the arg is the inner MethodCall.
+        match &ir.circuits[0].body[0] {
+            ExprIR::LedgerAccess { args, .. } => match &args[0] {
+                ExprIR::MethodCall { method, .. } => {
+                    assert_eq!(method.to_string(), "value");
+                }
+                other => panic!("expected MethodCall, got: {other:?}"),
+            },
+            other => panic!("expected LedgerAccess, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn narrowing_witness_cast_is_rejected() {
+        let err = parse(quote::quote! {
+            mod narrows {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { pub target: Uint<64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+
+                    #[nocturne(circuit)]
+                    pub fn assign(&mut self, witnesses: &W) {
+                        self.count.set(witnesses.target.value() as u32);
+                    }
+                }
+            }
+        })
+        .expect_err("Uint<64> -> u32 cast must be rejected as narrowing");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("narrow"),
+            "diagnostic must explain narrowing; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn widening_param_cast_parses_and_narrowing_param_cast_errors() {
+        let ok = parse(quote::quote! {
+            mod widens {
+                #[nocturne(ledger)]
+                pub struct State { total: Cell<u64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { total: Cell::new(0) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, x: u32) {
+                        self.total.set(x as u64);
+                    }
+                }
+            }
+        });
+        assert!(ok.is_ok(), "u32 -> u64 param cast must parse: {ok:?}");
+
+        let err = parse(quote::quote! {
+            mod narrows_param {
+                #[nocturne(ledger)]
+                pub struct State { total: Cell<u64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { total: Cell::new(0) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, x: u64) {
+                        self.total.set(x as u32);
+                    }
+                }
+            }
+        });
+        assert!(err.is_err(), "u64 -> u32 param cast must be rejected");
+    }
+
+    #[test]
+    fn uninferable_cast_to_u128_is_allowed() {
+        let ir = parse(quote::quote! {
+            mod widest {
+                #[nocturne(ledger)]
+                pub struct State { total: Cell<u128> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { total: Cell::new(0) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self) {
+                        let v = self.total.get();
+                        self.total.set(v as u128);
+                    }
+                }
+            }
+        })
+        .expect("cast to u128 can never narrow and must parse");
+        assert_eq!(ir.circuits.len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Compound assignment + non-ident params (M4, M1)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn compound_assignment_is_rejected() {
+        let err = parse(quote::quote! {
+            mod plus_eq {
+                #[nocturne(ledger)]
+                pub struct State { total: Cell<u64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { total: Cell::new(0) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, x: u64) {
+                        let mut acc = 1u64;
+                        acc += x;
+                        self.total.set(acc);
+                    }
+                }
+            }
+        })
+        .expect_err("+= must be a hard error, not a silent miscompile");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("let"),
+            "diagnostic must suggest rebinding; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn tuple_pattern_param_is_rejected() {
+        let err = parse(quote::quote! {
+            mod tuple_param {
+                #[nocturne(ledger)]
+                pub struct State { total: Cell<u64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { total: Cell::new(0) } }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, (a, b): (u64, u64)) {
+                        self.total.set(a + b);
+                    }
+                }
+            }
+        })
+        .expect_err("tuple-pattern param must be a hard error, not silently dropped");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("identifier"),
+            "diagnostic must explain the restriction; got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Small parser validations (M8, M9, L1, L6)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn constructor_with_wrong_return_type_is_rejected() {
+        let err = parse(quote::quote! {
+            mod bad_ctor {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> u64 { 0 }
+
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+            }
+        })
+        .expect_err("constructor returning u64 must be rejected");
+        let err = err.into_first_error();
+        assert_eq!(err.code, crate::error::ErrorCode::InvalidConstructorReturn);
+    }
+
+    #[test]
+    fn constructor_returning_ledger_name_parses() {
+        let ir = parse(quote::quote! {
+            mod named_ctor {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> State {
+                        State { count: Counter::zero() }
+                    }
+
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+            }
+        })
+        .expect("constructor returning the ledger struct name must parse");
+        assert_eq!(ir.constructors.len(), 1);
+    }
+
+    #[test]
+    fn generic_free_fn_is_not_a_helper() {
+        let ir = parse(quote::quote! {
+            mod generic_helper {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+
+                pub fn id<T>(x: T) -> T { x }
+            }
+        })
+        .expect("generic free fn must not error the parse");
+        assert!(
+            ir.helpers.is_empty(),
+            "generic fns can't be inlined and must not register as helpers"
+        );
+    }
+
+    #[test]
+    fn glob_imported_variant_pattern_is_rejected() {
+        let err = parse(quote::quote! {
+            mod glob_variant {
+                pub enum Status { Open, Closed }
+
+                #[nocturne(ledger)]
+                pub struct State { a: Counter, b: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { pub status: Status }
+
+                impl State {
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) {
+                        match witnesses.status {
+                            Status::Open => { self.a.increment(); }
+                            Closed => { self.b.increment(); }
+                        }
+                    }
+
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self {
+                        Self { a: Counter::zero(), b: Counter::zero() }
+                    }
+                }
+            }
+        })
+        .expect_err("bare `Closed` arm silently becomes a wildcard; must error");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Closed") && msg.contains("Status"),
+            "diagnostic must tell the user to qualify; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mod_without_inline_content_is_rejected() {
+        let err = parse(quote::quote! {
+            mod external;
+        })
+        .expect_err("`mod foo;` must get a dedicated error");
+        let err = err.into_first_error();
+        assert_eq!(err.code, crate::error::ErrorCode::EmptyContractModule);
+    }
+
     #[test]
     fn recursive_helper_is_rejected() {
         let err = parse(quote::quote! {
