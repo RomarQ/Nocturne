@@ -1,6 +1,6 @@
 use proc_macro2::Span;
 use syn::{
-    Expr, ExprCall, ExprField, ExprMethodCall, ExprPath, FnArg, ImplItem, ImplItemFn, Item,
+    Expr, ExprCall, ExprField, ExprMethodCall, ExprPath, FnArg, ImplItem, ImplItemFn, Item, ItemFn,
     ItemImpl, ItemMod, ItemStruct, Pat, ReturnType, Stmt, parse::Parser,
 };
 
@@ -21,6 +21,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
     let mut constructors: Vec<ConstructorIR> = Vec::new();
     let mut circuits: Vec<CircuitIR> = Vec::new();
     let mut queries: Vec<QueryIR> = Vec::new();
+    let mut helpers: Vec<HelperIR> = Vec::new();
     let mut other_items: Vec<Item> = Vec::new();
     let mut user_structs: std::collections::HashMap<String, Vec<UserStructField>> =
         std::collections::HashMap::new();
@@ -160,10 +161,31 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
                 }
                 other_items.push(item);
             }
+            Item::Fn(item_fn) => {
+                // Free `fn` items inside the contract module are
+                // helper candidates. Try parsing into HelperIR; if the
+                // signature uses references (`&self`, `&Witnesses`) or
+                // the body contains shapes the IR doesn't recognise,
+                // we silently leave the fn alone — the user's Rust
+                // code keeps compiling and the existing path-preserving
+                // FnCall arm still handles transcript-side calls. The
+                // ZKIR side has no way to constrain non-inlinable
+                // calls but that was already true before this commit.
+                if let Some(helper) = try_parse_helper(item_fn) {
+                    helpers.push(helper);
+                }
+                other_items.push(item);
+            }
             _ => {
                 other_items.push(item);
             }
         }
+    }
+
+    // Reject recursive helpers BEFORE downstream consumption — the
+    // inliner's termination depends on the call graph being acyclic.
+    if let Err(e) = validate_helpers_acyclic(&helpers) {
+        diagnostics.push(e);
     }
 
     // Validation
@@ -202,6 +224,7 @@ pub fn parse_contract(module: ItemMod) -> MidnightResult<ContractIR> {
         other_items,
         user_structs,
         user_enums,
+        helpers,
     })
 }
 
@@ -380,6 +403,295 @@ fn impl_targets_ident(impl_block: &ItemImpl, ident: &syn::Ident) -> bool {
         return &seg.ident == ident;
     }
     false
+}
+
+/// Try parsing a free `fn` item as a helper. Returns `None` on any
+/// shape we don't yet inline (referenced parameters, missing return
+/// type, builtin-name shadow, body the IR can't model). The original
+/// `Item::Fn` stays in `other_items` so the user's Rust code is
+/// untouched and the transcript-side codegen still calls it as Rust;
+/// the only effect of `None` is "no ZKIR inlining for this fn".
+fn try_parse_helper(item_fn: &ItemFn) -> Option<HelperIR> {
+    let name = item_fn.sig.ident.clone();
+
+    // Don't shadow builtins recognised by the codegen.
+    let n = name.to_string();
+    if matches!(
+        n.as_str(),
+        "persistent_hash" | "transient_hash" | "merkle_tree_path_root" | "disclose"
+    ) {
+        return None;
+    }
+
+    // v1: reject reference params. Owned types only (Uint<N>, Bytes<N>,
+    // user structs, tuples, etc.). `&Self` / `&Witnesses` require
+    // separate plumbing tracked as v2.
+    let mut params: Vec<ParamIR> = Vec::new();
+    for arg in &item_fn.sig.inputs {
+        match arg {
+            FnArg::Receiver(_) => return None,
+            FnArg::Typed(pat_type) => {
+                if matches!(&*pat_type.ty, syn::Type::Reference(_)) {
+                    return None;
+                }
+                let Pat::Ident(pat_ident) = &*pat_type.pat else {
+                    return None;
+                };
+                params.push(ParamIR {
+                    span: pat_ident.ident.span(),
+                    name: pat_ident.ident.clone(),
+                    ty: *pat_type.ty.clone(),
+                });
+            }
+        }
+    }
+
+    let return_type = match &item_fn.sig.output {
+        ReturnType::Default => return None,
+        ReturnType::Type(_, ty) => {
+            if matches!(&**ty, syn::Type::Reference(_)) {
+                return None;
+            }
+            (**ty).clone()
+        }
+    };
+
+    // Parse the body. If anything inside lowers to `Unsupported`,
+    // we'd produce broken inlined IR — better to leave the fn alone
+    // and let the user notice the runtime failure.
+    let body = parse_block_stmts(&item_fn.block).ok()?;
+    if body.iter().any(contains_unsupported) {
+        return None;
+    }
+
+    Some(HelperIR {
+        span: name.span(),
+        name,
+        params,
+        return_type,
+        body,
+    })
+}
+
+/// Recursive `Unsupported` check for helper body acceptance. A helper
+/// containing any unsupported node would inline broken IR into a
+/// caller; rejecting up-front gives the user a clearer failure mode
+/// (the transcript-side Rust call still works) than silently
+/// miscompiling.
+fn contains_unsupported(expr: &ExprIR) -> bool {
+    match expr {
+        ExprIR::Unsupported { .. } => true,
+        ExprIR::BinaryOp { lhs, rhs, .. } => contains_unsupported(lhs) || contains_unsupported(rhs),
+        ExprIR::UnaryOp { expr, .. } | ExprIR::Reference { expr, .. } => contains_unsupported(expr),
+        ExprIR::FnCall { args, .. } | ExprIR::MethodCall { args, .. } => {
+            args.iter().any(contains_unsupported)
+        }
+        ExprIR::Let { value, .. } => contains_unsupported(value),
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            contains_unsupported(cond)
+                || then_branch.iter().any(contains_unsupported)
+                || else_branch
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(contains_unsupported))
+        }
+        ExprIR::Assert { kind, .. } => match kind {
+            AssertKind::Assert(e) => contains_unsupported(e),
+            AssertKind::AssertEq(a, b) => contains_unsupported(a) || contains_unsupported(b),
+        },
+        ExprIR::Disclose { value, .. } => contains_unsupported(value),
+        ExprIR::EnumPayload { scrutinee, .. } => contains_unsupported(scrutinee),
+        ExprIR::Block { stmts, .. } => stmts.iter().any(contains_unsupported),
+        ExprIR::StructInit { fields, .. } => fields.iter().any(|(_, e)| contains_unsupported(e)),
+        ExprIR::Return { value, .. } => value.as_deref().is_some_and(contains_unsupported),
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            elements.iter().any(contains_unsupported)
+        }
+        ExprIR::Index { array, .. } => contains_unsupported(array),
+        ExprIR::LedgerAccess { args, .. } | ExprIR::WitnessCall { args, .. } => {
+            args.iter().any(contains_unsupported)
+        }
+        // Leaf nodes.
+        ExprIR::Literal { .. }
+        | ExprIR::Var { .. }
+        | ExprIR::Path { .. }
+        | ExprIR::WitnessAccess { .. } => false,
+    }
+}
+
+/// DFS cycle check over the helper call graph. compactc's inliner
+/// asserts acyclicity instead of detecting it; the equivalent
+/// guarantee in Nocturne lives here. Reports the cycle by listing
+/// the helpers on the back-edge path.
+fn validate_helpers_acyclic(helpers: &[HelperIR]) -> MidnightResult<()> {
+    use std::collections::HashMap;
+
+    let names: HashMap<String, usize> = helpers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (h.name.to_string(), i))
+        .collect();
+
+    // Adjacency: helper i → helpers j whose name appears in i's body
+    // as a FnCall callee.
+    let edges: Vec<Vec<usize>> = helpers
+        .iter()
+        .map(|h| {
+            let mut called: Vec<String> = Vec::new();
+            for stmt in &h.body {
+                collect_fncall_names(stmt, &mut called);
+            }
+            called
+                .into_iter()
+                .filter_map(|n| names.get(&n).copied())
+                .collect()
+        })
+        .collect();
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Colour {
+        White,
+        Gray,
+        Black,
+    }
+
+    let mut colour = vec![Colour::White; helpers.len()];
+    let mut path: Vec<usize> = Vec::new();
+
+    fn dfs(
+        node: usize,
+        edges: &[Vec<usize>],
+        colour: &mut [Colour],
+        path: &mut Vec<usize>,
+    ) -> Option<Vec<usize>> {
+        colour[node] = Colour::Gray;
+        path.push(node);
+        for &next in &edges[node] {
+            match colour[next] {
+                Colour::Gray => {
+                    // Back-edge — cycle. Slice the path from the
+                    // first occurrence of `next` to the end, then
+                    // append `next` again to close it visually.
+                    let mut cycle: Vec<usize> =
+                        path.iter().skip_while(|&&i| i != next).copied().collect();
+                    cycle.push(next);
+                    return Some(cycle);
+                }
+                Colour::White => {
+                    if let Some(c) = dfs(next, edges, colour, path) {
+                        return Some(c);
+                    }
+                }
+                Colour::Black => {}
+            }
+        }
+        path.pop();
+        colour[node] = Colour::Black;
+        None
+    }
+
+    for i in 0..helpers.len() {
+        if colour[i] == Colour::White
+            && let Some(cycle) = dfs(i, &edges, &mut colour, &mut path)
+        {
+            let chain: Vec<String> = cycle
+                .into_iter()
+                .map(|i| helpers[i].name.to_string())
+                .collect();
+            return Err(MidnightError::new(
+                helpers[i].name.span(),
+                ErrorCode::UnsupportedExpression,
+                format!("recursive helper: {}", chain.join(" → ")),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn collect_fncall_names(expr: &ExprIR, out: &mut Vec<String>) {
+    match expr {
+        ExprIR::FnCall { name, args, .. } => {
+            out.push(name.to_string());
+            for a in args {
+                collect_fncall_names(a, out);
+            }
+        }
+        ExprIR::BinaryOp { lhs, rhs, .. } => {
+            collect_fncall_names(lhs, out);
+            collect_fncall_names(rhs, out);
+        }
+        ExprIR::UnaryOp { expr, .. } | ExprIR::Reference { expr, .. } => {
+            collect_fncall_names(expr, out);
+        }
+        ExprIR::MethodCall { receiver, args, .. } => {
+            collect_fncall_names(receiver, out);
+            for a in args {
+                collect_fncall_names(a, out);
+            }
+        }
+        ExprIR::Let { value, .. } => collect_fncall_names(value, out),
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_fncall_names(cond, out);
+            for s in then_branch {
+                collect_fncall_names(s, out);
+            }
+            if let Some(b) = else_branch {
+                for s in b {
+                    collect_fncall_names(s, out);
+                }
+            }
+        }
+        ExprIR::Assert { kind, .. } => match kind {
+            AssertKind::Assert(e) => collect_fncall_names(e, out),
+            AssertKind::AssertEq(a, b) => {
+                collect_fncall_names(a, out);
+                collect_fncall_names(b, out);
+            }
+        },
+        ExprIR::Disclose { value, .. } => collect_fncall_names(value, out),
+        ExprIR::EnumPayload { scrutinee, .. } => collect_fncall_names(scrutinee, out),
+        ExprIR::Block { stmts, .. } => {
+            for s in stmts {
+                collect_fncall_names(s, out);
+            }
+        }
+        ExprIR::StructInit { fields, .. } => {
+            for (_, e) in fields {
+                collect_fncall_names(e, out);
+            }
+        }
+        ExprIR::Return { value, .. } => {
+            if let Some(v) = value {
+                collect_fncall_names(v, out);
+            }
+        }
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            for e in elements {
+                collect_fncall_names(e, out);
+            }
+        }
+        ExprIR::Index { array, .. } => collect_fncall_names(array, out),
+        ExprIR::LedgerAccess { args, .. } | ExprIR::WitnessCall { args, .. } => {
+            for a in args {
+                collect_fncall_names(a, out);
+            }
+        }
+        // Leaves.
+        ExprIR::Literal { .. }
+        | ExprIR::Var { .. }
+        | ExprIR::Path { .. }
+        | ExprIR::WitnessAccess { .. }
+        | ExprIR::Unsupported { .. } => {}
+    }
 }
 
 fn parse_witness_method(method: &ImplItemFn) -> MidnightResult<WitnessMethodIR> {

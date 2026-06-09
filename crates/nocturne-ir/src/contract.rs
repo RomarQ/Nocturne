@@ -34,6 +34,17 @@ pub struct ContractIR {
     /// 1, ...). Codegen uses this to lay out enums as Cell/Map values
     /// and to lower `match` arms to discriminant comparisons.
     pub user_enums: std::collections::HashMap<String, Vec<UserEnumVariant>>,
+    /// Free `fn` items in the contract module that are eligible to be
+    /// inlined into circuit bodies at ZKIR emit time. Mirrors compactc's
+    /// model where a non-export `circuit` is purely a compile-time
+    /// macro: every call site gets the body spliced in.
+    ///
+    /// At parse time the body is recorded on `HelperIR.body` but the
+    /// original `fn` item also stays in `other_items` so the user's
+    /// Rust code keeps compiling — the transcript-side codegen calls
+    /// the helper as a regular Rust function via the path-preserving
+    /// `FnCall` arm.
+    pub helpers: Vec<HelperIR>,
 }
 
 /// One field of a user-defined struct usable as a Map/Set key.
@@ -142,6 +153,22 @@ pub struct WitnessMethodIR {
     pub name: Ident,
     pub params: Vec<ParamIR>,
     pub return_type: Type,
+}
+
+/// A free `fn` item declared inside the contract module that's
+/// eligible for inlining at ZKIR emit time. The body is parsed into
+/// `ExprIR` exactly like a circuit body; the ZKIR emitter splices it
+/// into call sites with arg substitution and alpha-renaming. The
+/// transcript codegen does NOT consume this — it keeps calling the
+/// user's Rust `fn` directly via the path-preserving FnCall arm, and
+/// the two views agree because both execute the same body.
+#[derive(Debug)]
+pub struct HelperIR {
+    pub span: Span,
+    pub name: Ident,
+    pub params: Vec<ParamIR>,
+    pub return_type: Type,
+    pub body: Vec<ExprIR>,
 }
 
 /// IR for a `#[nocturne(constructor)]` function.

@@ -380,4 +380,120 @@ mod tests {
             "diagnostic must name the offending variant + cite payload as the reason; got: {msg}"
         );
     }
+
+    #[test]
+    fn free_fn_with_primitive_params_registers_as_helper() {
+        let ir = parse(quote::quote! {
+            mod with_helper {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+                pub fn double(x: u64) -> u64 { x + x }
+            }
+        })
+        .expect("contract with a helper must parse");
+        assert_eq!(ir.helpers.len(), 1, "exactly one helper expected");
+        assert_eq!(ir.helpers[0].name.to_string(), "double");
+        assert_eq!(ir.helpers[0].params.len(), 1);
+        assert_eq!(ir.helpers[0].params[0].name.to_string(), "x");
+        assert!(!ir.helpers[0].body.is_empty(), "body must be parsed");
+    }
+
+    #[test]
+    fn free_fn_with_reference_param_is_not_a_helper() {
+        let ir = parse(quote::quote! {
+            mod rejected_helper {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+                // `&u64` arg → not inlinable in v1; should fall
+                // through to other_items without errors.
+                pub fn peek(_x: &u64) -> u64 { 0 }
+            }
+        })
+        .expect("non-inlinable free fns must NOT error the parse");
+        assert!(
+            ir.helpers.is_empty(),
+            "ref-taking fn must NOT be registered"
+        );
+    }
+
+    #[test]
+    fn free_fn_shadowing_builtin_is_not_a_helper() {
+        let ir = parse(quote::quote! {
+            mod shadowing {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+                pub fn persistent_hash(x: u64) -> u64 { x }
+            }
+        })
+        .expect("builtin-named fn must NOT error the parse");
+        assert!(
+            ir.helpers.is_empty(),
+            "fn shadowing a builtin name must NOT be registered"
+        );
+    }
+
+    #[test]
+    fn recursive_helper_is_rejected() {
+        let err = parse(quote::quote! {
+            mod recursive {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+                pub fn loops(x: u64) -> u64 { loops(x) }
+            }
+        })
+        .expect_err("self-recursive helper must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("recursive helper") && msg.contains("loops"),
+            "diagnostic must name the offending helper; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn mutually_recursive_helpers_are_rejected() {
+        let err = parse(quote::quote! {
+            mod mutual_recursion {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn noop(&mut self) {}
+                }
+                pub fn a(x: u64) -> u64 { b(x) }
+                pub fn b(x: u64) -> u64 { a(x) }
+            }
+        })
+        .expect_err("a → b → a must be rejected");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("recursive helper") && msg.contains("a") && msg.contains("b"),
+            "diagnostic must name the cycle; got: {msg}"
+        );
+    }
 }
