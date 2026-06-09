@@ -327,6 +327,66 @@ mod tests {
         );
     }
 
+    /// End-to-end pin for the bind-once match-scrutinee fix.
+    ///
+    /// `match witnesses.choice() { ... }` lowers to a synthetic
+    /// `let __nocturne_scrutinee_N = witnesses.choice();` followed by an
+    /// if-chain comparing the bound Var against each variant. Each
+    /// `WitnessCall` the emitter sees allocates a fresh PrivateInput
+    /// block (no cache key), so if the scrutinee were cloned into every
+    /// arm's comparison the circuit would draw one witness PER ARM —
+    /// the arms could each see a different value. A unit-only enum
+    /// return is exactly one Fr (the 8-bit discriminant), so the whole
+    /// circuit must allocate exactly one PrivateInput.
+    #[test]
+    fn match_on_witness_call_allocates_one_private_input_block() {
+        let circuits = compile_circuits(quote::quote! {
+            mod scrutinee_once {
+                pub enum Vote { For, Against, Abstain }
+
+                #[nocturne(ledger)]
+                pub struct State { a: Counter, b: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W;
+
+                impl W {
+                    pub fn choice(&self) -> Vote { Vote::For }
+                }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self {
+                        Self { a: Counter::zero(), b: Counter::zero() }
+                    }
+
+                    #[nocturne(circuit)]
+                    pub fn cast(&mut self, witnesses: &W) {
+                        match witnesses.choice() {
+                            Vote::For => { self.a.increment(); }
+                            Vote::Against => { self.b.increment(); }
+                            _ => { self.a.increment(); }
+                        }
+                    }
+                }
+            }
+        });
+
+        let (name, ir) = &circuits[0];
+        assert_eq!(name, "cast");
+        let instrs = ir.instructions.as_ref();
+
+        let private_input_count = instrs
+            .iter()
+            .filter(|i| matches!(i, Instruction::PrivateInput { .. }))
+            .count();
+        assert_eq!(
+            private_input_count, 1,
+            "one witness call behind a synthetic scrutinee binding must \
+             allocate exactly one PrivateInput, not one per match arm"
+        );
+    }
+
     /// Regression guard for the on-chain public-input layout.
     ///
     /// `midnight_ledger::verify::ContractCall::public_inputs` unconditionally

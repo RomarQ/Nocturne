@@ -41,6 +41,14 @@ struct BodyCtx<'a> {
     /// nested matches inside one function body never collide in the
     /// emitters' flat variable maps.
     scrutinee_counter: std::cell::Cell<u32>,
+    /// Idents bound by `let` statements seen so far in this body. A
+    /// `let` that shadows a param makes the param's declared type
+    /// meaningless for later uses of that name, so `infer_expr_width`
+    /// must not resolve a shadowed ident against `param_types` (that
+    /// would re-open the narrowing-cast hole). Names are recorded
+    /// after the initializer is parsed, matching Rust scoping: in
+    /// `let x = x as u64;` the initializer's `x` is still the param.
+    let_bound: std::cell::RefCell<std::collections::HashSet<String>>,
 }
 
 impl BodyCtx<'_> {
@@ -616,6 +624,7 @@ fn try_parse_helper(item_fn: &ItemFn, ctx: &ContractCtx<'_>) -> Option<HelperIR>
         witnesses_param: None,
         param_types: BodyCtx::param_types_of(&params),
         scrutinee_counter: std::cell::Cell::new(0),
+        let_bound: std::cell::RefCell::new(std::collections::HashSet::new()),
     };
     let body = parse_block_stmts(&item_fn.block, &body_ctx).ok()?;
     if body.iter().any(contains_unsupported) {
@@ -912,6 +921,7 @@ fn parse_constructor(method: &ImplItemFn, ctx: &ContractCtx<'_>) -> MidnightResu
         witnesses_param,
         param_types: BodyCtx::param_types_of(&params),
         scrutinee_counter: std::cell::Cell::new(0),
+        let_bound: std::cell::RefCell::new(std::collections::HashSet::new()),
     };
     let body = parse_block_stmts(&method.block, &body_ctx)?;
 
@@ -932,6 +942,7 @@ fn parse_circuit(method: &ImplItemFn, ctx: &ContractCtx<'_>) -> MidnightResult<C
         witnesses_param: witnesses_param_name.clone(),
         param_types: BodyCtx::param_types_of(&params),
         scrutinee_counter: std::cell::Cell::new(0),
+        let_bound: std::cell::RefCell::new(std::collections::HashSet::new()),
     };
     let body = parse_block_stmts(&method.block, &body_ctx)?;
     let return_type = match &method.sig.output {
@@ -971,6 +982,7 @@ fn parse_query(method: &ImplItemFn, ctx: &ContractCtx<'_>) -> MidnightResult<Que
         witnesses_param,
         param_types: BodyCtx::param_types_of(&params),
         scrutinee_counter: std::cell::Cell::new(0),
+        let_bound: std::cell::RefCell::new(std::collections::HashSet::new()),
     };
     let body = parse_block_stmts(&method.block, &body_ctx)?;
     let return_type = match &method.sig.output {
@@ -1049,10 +1061,18 @@ fn infer_expr_width(expr: &ExprIR, ctx: &BodyCtx<'_>) -> Option<u32> {
             .witnesses
             .and_then(|w| w.methods.iter().find(|m| m.name == *name))
             .and_then(|m| type_bit_width(&m.return_type)),
-        ExprIR::Var { name, .. } => ctx
-            .param_types
-            .get(&name.to_string())
-            .and_then(type_bit_width),
+        // A var's width comes from its param declaration — but only
+        // when no `let` has rebound the name. A shadowing let
+        // (`let x = self.big.get();` with `x: u32` as a param) makes
+        // the param type a lie about the current value, so shadowed
+        // idents are treated as width-unknown.
+        ExprIR::Var { name, .. } => {
+            let name = name.to_string();
+            if ctx.let_bound.borrow().contains(&name) {
+                return None;
+            }
+            ctx.param_types.get(&name).and_then(type_bit_width)
+        }
         // `.value()` / `.clone()` / `.into()` on a width-known receiver
         // preserve the value's width.
         ExprIR::MethodCall {
@@ -1348,6 +1368,13 @@ fn parse_stmt(stmt: &Stmt, ctx: &BodyCtx<'_>) -> MidnightResult<ExprIR> {
                     description: "let binding without initializer".to_string(),
                 }
             };
+
+            // Recorded AFTER the initializer parses: in
+            // `let x = x as u64;` the initializer's `x` still refers
+            // to the param, so its declared width stays usable there.
+            // From this statement on, the name is let-bound and
+            // `infer_expr_width` treats its width as unknown.
+            ctx.let_bound.borrow_mut().insert(name.to_string());
 
             Ok(ExprIR::Let {
                 span: name.span(),
@@ -1996,6 +2023,23 @@ fn lower_enum_match(
         },
         Wild,
     }
+    // Enums explicitly named by this match's qualified arms
+    // (`Status::Open` names `Status`). The bare-ident glob-variant
+    // check below consults only these, so a binding arm that happens
+    // to share a name with an UNRELATED enum's variant isn't
+    // misrejected. Only when no arm is qualified (pure glob-import
+    // style) does the check fall back to every user enum.
+    let named_enums: std::collections::HashSet<String> = expr_match
+        .arms
+        .iter()
+        .filter_map(|arm| match &arm.pat {
+            Pat::Path(p) => Some(&p.path),
+            Pat::TupleStruct(ts) => Some(&ts.path),
+            _ => None,
+        })
+        .filter(|path| path.segments.len() >= 2)
+        .map(|path| path.segments[path.segments.len() - 2].ident.to_string())
+        .collect();
     let mut shapes: Vec<(ArmShape<'_>, &syn::Expr)> = Vec::with_capacity(expr_match.arms.len());
     for arm in &expr_match.arms {
         if arm.guard.is_some() {
@@ -2058,6 +2102,7 @@ fn lower_enum_match(
                         .contract
                         .user_enums
                         .iter()
+                        .filter(|(name, _)| named_enums.is_empty() || named_enums.contains(*name))
                         .find(|(_, vs)| vs.iter().any(|v| v.name == pi.ident))
                 {
                     return Err(MidnightError::new(

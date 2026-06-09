@@ -762,11 +762,11 @@ mod tests {
             }
         })
         .expect_err("#[nocturne] without arguments must error");
-        let msg = format!("{err:?}");
-        assert!(
-            msg.contains("nocturne"),
-            "diagnostic must mention the attribute; got: {msg}"
-        );
+        // Must be the dedicated attribute diagnostic — a message
+        // substring check would also pass on the old behavior's
+        // MissingLedger fallback (whose text mentions "nocturne" too).
+        let err = err.into_first_error();
+        assert_eq!(err.code, crate::error::ErrorCode::InvalidAttribute);
     }
 
     #[test]
@@ -1149,6 +1149,39 @@ mod tests {
     }
 
     #[test]
+    fn let_shadowing_a_param_blocks_param_width_inference() {
+        // `let x = ...` rebinds the u32 param `x` to a width-unknown
+        // value; resolving the later `x as u32` against the PARAM type
+        // would wrongly prove the cast non-narrowing. The shadowed
+        // ident must infer as width-unknown, so the cast errors.
+        let err = parse(quote::quote! {
+            mod shadows {
+                #[nocturne(ledger)]
+                pub struct State { big: Cell<u64>, total: Cell<u64> }
+
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self {
+                        Self { big: Cell::new(0), total: Cell::new(0) }
+                    }
+
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, x: u32) {
+                        let x = self.big.get();
+                        self.total.set(x as u32);
+                    }
+                }
+            }
+        })
+        .expect_err("cast of a let-shadowed param must not use the param's width");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not inferable"),
+            "diagnostic must say the width is not inferable; got: {msg}"
+        );
+    }
+
+    #[test]
     fn uninferable_cast_to_u128_is_allowed() {
         let ir = parse(quote::quote! {
             mod widest {
@@ -1334,6 +1367,44 @@ mod tests {
             msg.contains("Closed") && msg.contains("Status"),
             "diagnostic must tell the user to qualify; got: {msg}"
         );
+    }
+
+    #[test]
+    fn binding_arm_colliding_with_unrelated_enum_variant_is_allowed() {
+        // The glob-variant check must only consult enums named by the
+        // match's qualified arms (`Status::Open` names `Status`). The
+        // catch-all binding `low` here collides with UNRELATED
+        // `Levels::low`; rejecting it would be misleading — Rust never
+        // resolves it as a variant in a match over `Status`.
+        let ir = parse(quote::quote! {
+            mod unrelated_collision {
+                pub enum Status { Open, Closed }
+                pub enum Levels { low, high }
+
+                #[nocturne(ledger)]
+                pub struct State { a: Counter, b: Counter }
+
+                #[nocturne(witnesses)]
+                pub struct W { pub status: Status }
+
+                impl State {
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) {
+                        match witnesses.status {
+                            Status::Open => { self.a.increment(); }
+                            low => { self.b.increment(); }
+                        }
+                    }
+
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self {
+                        Self { a: Counter::zero(), b: Counter::zero() }
+                    }
+                }
+            }
+        })
+        .expect("binding arm colliding with an unrelated enum's variant must parse");
+        assert_eq!(ir.circuits.len(), 1);
     }
 
     #[test]
