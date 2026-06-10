@@ -245,6 +245,27 @@ fn expr_needs_state(expr: &ExprIR) -> bool {
         ExprIR::UnaryOp { expr: inner, .. } => expr_needs_state(inner),
         ExprIR::Reference { expr: inner, .. } => expr_needs_state(inner),
         ExprIR::Disclose { value, .. } => expr_needs_state(value),
+        // `assert!(self.allowed.contains(&k))` bakes the contains result
+        // from `state` — without this arm the generated fn lacks the
+        // `state` param while its body references it.
+        ExprIR::Assert { kind, .. } => match kind {
+            nocturne_ir::expr::AssertKind::Assert(cond) => expr_needs_state(cond),
+            nocturne_ir::expr::AssertKind::AssertEq(a, b) => {
+                expr_needs_state(a) || expr_needs_state(b)
+            }
+        },
+        // Payload projection over a ledger read (`match self.f.get() { … }`).
+        ExprIR::EnumPayload { scrutinee, .. } => expr_needs_state(scrutinee),
+        // Arg-bearing shapes: any argument may carry a ledger read.
+        ExprIR::FnCall { args, .. } | ExprIR::WitnessCall { args, .. } => {
+            args.iter().any(expr_needs_state)
+        }
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            elements.iter().any(expr_needs_state)
+        }
+        ExprIR::StructInit { fields, .. } => fields.iter().any(|(_, e)| expr_needs_state(e)),
+        ExprIR::Index { array, .. } => expr_needs_state(array),
+        ExprIR::Return { value, .. } => value.as_deref().is_some_and(expr_needs_state),
         _ => false,
     }
 }
@@ -873,9 +894,11 @@ fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
         // doesn't model yet). Emit a `compile_error!` carrying the IR's
         // description so the user gets a real diagnostic instead of a
         // silently-zero side-effect.
-        ExprIR::Unsupported { description, .. } => {
+        ExprIR::Unsupported { description, span } => {
             let msg = format!("nocturne: unsupported expression in circuit body: {description}");
-            quote! { compile_error!(#msg); }
+            // `quote_spanned!` points the diagnostic at the offending
+            // source expression instead of the macro invocation site.
+            quote::quote_spanned! {*span=> compile_error!(#msg); }
         }
 
         // Pure value shapes: no transcript ops.
@@ -891,24 +914,47 @@ fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
     }
 }
 
-/// If `value` is a `self.<field>.<get|value>()` ledger read, build the
-/// Rust expression that fetches the same value from the live `state`.
-/// Returns `None` for other shapes.
+/// If `value` is a `self.<field>.<get|value|lookup>()` ledger read,
+/// build the Rust expression that fetches the same value from the live
+/// `state`. Returns `None` for other shapes.
 fn let_binding_value_for_ledger_read(
     value: &ExprIR,
     ctx: &TranscriptCtx<'_>,
 ) -> Option<TokenStream> {
     let field_names = ctx.field_names;
-    let ExprIR::LedgerAccess { field, method, .. } = value else {
+    let ExprIR::LedgerAccess {
+        field,
+        method,
+        args,
+        ..
+    } = value
+    else {
         return None;
     };
-    if !field_names.iter().any(|f| f == &field.to_string()) {
-        return None;
-    }
+    let field_pos = field_names.iter().position(|f| f == &field.to_string())?;
+    let field_ty = ctx.field_types.get(field_pos);
     let f_ident = format_ident!("{}", field.to_string());
     match method.to_string().as_str() {
         "get" => Some(quote! { state.#f_ident.get() }),
-        "value" | "__direct_access" => Some(quote! { state.#f_ident.value() }),
+        // `__direct_access` is the parser's marker for a bare
+        // `self.<field>` read — its accessor depends on the field kind:
+        // Cell exposes `.get()`, Counter exposes `.value()`. Routing
+        // both through `.value()` broke Cell fields (no such method).
+        "value" | "__direct_access" => {
+            if field_ty.map(|t| extract_cell_inner_type(t).is_some()) == Some(true) {
+                Some(quote! { state.#f_ident.get() })
+            } else {
+                Some(quote! { state.#f_ident.value() })
+            }
+        }
+        // `let v = self.map.lookup(&k);` — the canonical
+        // `if let Some(v) = map.get(&k)` sugar rewrites to
+        // contains + lookup (see `memories/map-get-sugar.md`), so the
+        // bound name must carry the real value, not `()`.
+        "lookup" => {
+            let key = args.first().map(arg_to_runtime_raw_expr)?;
+            Some(quote! { state.#f_ident.lookup(&#key) })
+        }
         _ => None,
     }
 }
@@ -944,7 +990,11 @@ fn let_binding_runtime_value(value: &ExprIR, ctx: &TranscriptCtx<'_>) -> Option<
             enum_name,
             ..
         } => {
-            let scrutinee_expr = let_binding_runtime_value(scrutinee, ctx)?;
+            // A ledger-read scrutinee (`match self.opt_cell.get() { … }`)
+            // binds through the state accessor; everything else through
+            // the regular runtime-value recursion.
+            let scrutinee_expr = let_binding_runtime_value(scrutinee, ctx)
+                .or_else(|| let_binding_value_for_ledger_read(scrutinee, ctx))?;
             // `Option` is the synthetic marker the parser uses for
             // single-segment `Some`/`None` patterns; codegen knows the
             // arm names without a user_enums lookup.
@@ -2551,26 +2601,63 @@ fn generate_runtime_cond(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream 
         } => {
             let field_name = field.to_string();
             let method_name = method.to_string();
+            // Same internal invariant as `generate_op_stmt`: never
+            // silently fall back to field 0.
+            let field_idx = field_names
+                .iter()
+                .position(|f| f == &field_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "nocturne internal error: ledger field `{field_name}` not \
+                         found among {field_names:?}"
+                    )
+                }) as u8;
+            let field_ty = field_types.get(field_idx as usize);
             if matches!(method_name.as_str(), "contains" | "member") {
-                // Same internal invariant as `generate_op_stmt`: never
-                // silently fall back to field 0.
-                let field_idx = field_names
-                    .iter()
-                    .position(|f| f == &field_name)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "nocturne internal error: ledger field `{field_name}` not \
-                             found among {field_names:?}"
-                        )
-                    }) as u8;
-                let field_ty = field_types.get(field_idx as usize);
                 return generate_map_contains_block(field_idx, &field_name, args, field_ty, ctx);
             }
+            // `Cell<Boolean>` / `Cell<bool>` reads ARE bool-typed and
+            // usable as conditions: bake the live state's value into a
+            // Dup+Idx+Popeq block (the same ops the statement-position
+            // read emits) and evaluate to the bool — mirroring
+            // `generate_map_contains_block`'s shape.
+            if matches!(method_name.as_str(), "get" | "value" | "__direct_access") {
+                let inner = field_ty.and_then(extract_cell_inner_type);
+                let inner_str = inner
+                    .as_ref()
+                    .map(|t| quote!(#t).to_string().replace(' ', ""));
+                if let Some(s) = inner_str.as_deref()
+                    && matches!(s, "Boolean" | "bool")
+                {
+                    let field_ident = format_ident!("{}", field_name);
+                    let result_expr = if s == "Boolean" {
+                        quote! { state.#field_ident.get().value() }
+                    } else {
+                        quote! { state.#field_ident.get() }
+                    };
+                    return quote! {
+                        {
+                            ops.push(Op::Dup { n: 0 });
+                            ops.push(Op::Idx {
+                                cached: false,
+                                push_path: false,
+                                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+                            });
+                            let __result: bool = #result_expr;
+                            ops.push(Op::Popeq {
+                                cached: true,
+                                result: AlignedValue::from(__result),
+                            });
+                            __result
+                        }
+                    };
+                }
+            }
             // Other LedgerAccess methods aren't bool-typed (lookup returns V,
-            // get/value return T, increment returns nothing). The IR parser
-            // doesn't actually reject these, so a user writing
-            // `if self.cell.get() { ... }` would silently take the
-            // always-true branch. Surface it as a real diagnostic.
+            // get/value return non-bool T, increment returns nothing). The IR
+            // parser doesn't actually reject these, so a user writing
+            // `if self.cell.get() { ... }` on a non-bool cell would silently
+            // take the always-true branch. Surface it as a real diagnostic.
             let msg = format!(
                 "nocturne: ledger method `{}` on field `{}` doesn't return bool — not usable as an `if` condition",
                 method, field_name

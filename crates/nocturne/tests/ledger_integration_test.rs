@@ -10341,3 +10341,288 @@ async fn cond_flag_same_field_in_cond_and_body_pushes_once_proves_and_verifies()
             .unwrap_or_else(|e| panic!("verify (flag={flag}): {e}"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Lowering completeness: let-bound lookup values, assert-with-state, and
+// Cell<Boolean> reads in `if` conditions.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod lookup_bind {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct LookupBindState {
+        pub scores: Map<Uint<64>, Uint<64>>,
+        pub total: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct LookupBindWitnesses {
+        pub k: Uint<64>,
+    }
+
+    impl LookupBindState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                scores: Map::empty(),
+                total: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn copy_score(&mut self, witnesses: &LookupBindWitnesses) {
+            let v = self.scores.lookup(&witnesses.k);
+            self.total.set(v);
+        }
+    }
+}
+
+fn build_lookup_bind_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod lookup_bind {
+            #[nocturne(ledger)]
+            pub struct LookupBindState {
+                pub scores: Map<Uint<64>, Uint<64>>,
+                pub total: Cell<Uint<64>>,
+            }
+            #[nocturne(witnesses)]
+            pub struct LookupBindWitnesses { pub k: Uint<64> }
+            impl LookupBindState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self { scores: Map::empty(), total: Cell::new(Uint::<64>::from(0u64)) }
+                }
+                #[nocturne(circuit)]
+                pub fn copy_score(&mut self, witnesses: &LookupBindWitnesses) {
+                    let v = self.scores.lookup(&witnesses.k);
+                    self.total.set(v);
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "copy_score")
+        .unwrap()
+        .ir_source
+}
+
+/// `let v = self.map.lookup(&k); self.total.set(v);` — the bound value
+/// must be the real looked-up value (consumed in a typed position), not
+/// `()` from the block-wrapped op emission. This is the canonical
+/// `if let Some(v) = map.get(&k)` sugar's binding shape.
+#[tokio::test]
+async fn let_bound_lookup_value_consumed_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_lookup_bind_ir();
+    let mut state = lookup_bind::LookupBindState::new();
+    state.scores.insert(Uint::<64>::new(7), Uint::<64>::new(99));
+    let witnesses = lookup_bind::LookupBindWitnesses {
+        k: Uint::<64>::new(7),
+    };
+    let t = lookup_bind::transcript::build_copy_score_transcript(&state, &witnesses);
+
+    let preimage = canonical_preimage("copy_score", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("let-bound lookup consumed in a typed position must prove+verify");
+}
+
+#[nocturne::contract]
+mod assert_member {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct AssertMemberState {
+        pub allowed: Set<Uint<64>>,
+        pub hits: Counter,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct AssertMemberWitnesses {
+        pub k: Uint<64>,
+    }
+
+    impl AssertMemberState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                allowed: Set::empty(),
+                hits: Counter::zero(),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn gated_bump(&mut self, witnesses: &AssertMemberWitnesses) {
+            assert!(self.allowed.contains(&witnesses.k));
+            self.hits.increment();
+        }
+    }
+}
+
+fn build_assert_member_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod assert_member {
+            #[nocturne(ledger)]
+            pub struct AssertMemberState {
+                pub allowed: Set<Uint<64>>,
+                pub hits: Counter,
+            }
+            #[nocturne(witnesses)]
+            pub struct AssertMemberWitnesses { pub k: Uint<64> }
+            impl AssertMemberState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self { allowed: Set::empty(), hits: Counter::zero() }
+                }
+                #[nocturne(circuit)]
+                pub fn gated_bump(&mut self, witnesses: &AssertMemberWitnesses) {
+                    assert!(self.allowed.contains(&witnesses.k));
+                    self.hits.increment();
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "gated_bump")
+        .unwrap()
+        .ir_source
+}
+
+/// `assert!(self.allowed.contains(&witnesses.k))` — the assert condition
+/// carries a state-baked ledger read, so the generated builder must take
+/// the `state` param (expr_needs_state's Assert arm) and the contains
+/// ops/pushes must land exactly once.
+#[tokio::test]
+async fn assert_contains_with_state_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_assert_member_ir();
+    let mut state = assert_member::AssertMemberState::new();
+    state.allowed.insert(Uint::<64>::new(42));
+    let witnesses = assert_member::AssertMemberWitnesses {
+        k: Uint::<64>::new(42),
+    };
+    let t = assert_member::transcript::build_gated_bump_transcript(&state, &witnesses);
+
+    let preimage = canonical_preimage("gated_bump", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("assert!(contains) circuit must prove+verify");
+}
+
+#[nocturne::contract]
+mod pausable {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct PausableState {
+        pub paused: Cell<Boolean>,
+        pub count: Counter,
+    }
+
+    impl PausableState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                paused: Cell::new(Boolean::from(true)),
+                count: Counter::zero(),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn tick(&mut self) {
+            if self.paused.get().value() {
+                self.count.increment();
+            }
+        }
+    }
+}
+
+fn build_pausable_tick_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod pausable {
+            #[nocturne(ledger)]
+            pub struct PausableState {
+                pub paused: Cell<Boolean>,
+                pub count: Counter,
+            }
+            impl PausableState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self { paused: Cell::new(Boolean::from(true)), count: Counter::zero() }
+                }
+                #[nocturne(circuit)]
+                pub fn tick(&mut self) {
+                    if self.paused.get().value() {
+                        self.count.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "tick")
+        .unwrap()
+        .ir_source
+}
+
+/// `if self.paused.get() { ... }` on a `Cell<Boolean>` — the condition is
+/// a state-baked Dup+Idx+Popeq block (mirroring contains-in-cond), not a
+/// compile_error. Proves+verifies on both branch outcomes.
+#[tokio::test]
+async fn cell_boolean_condition_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_pausable_tick_ir();
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    for paused in [true, false] {
+        let mut state = pausable::PausableState::new();
+        state.paused.set(Boolean::from(paused));
+        let t = pausable::transcript::build_tick_transcript(&state);
+
+        let preimage = canonical_preimage("tick", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (paused={paused}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (paused={paused}): {e}"));
+    }
+}
