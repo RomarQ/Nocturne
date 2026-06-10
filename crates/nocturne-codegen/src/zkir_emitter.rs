@@ -2843,6 +2843,19 @@ enum FrLayout {
 /// `MerkleTreePath<H, T>` expands as `T`'s leaf layout followed by H
 /// repetitions of `[Field, Boolean]` (one sibling + one goes_left per
 /// path entry).
+/// Number of Frs (PrivateInputs) one witness invocation of type `ty`
+/// expands to. Test-only mirror used by the private-event parity tests
+/// to convert the canonical event walk into an expected PrivateInput
+/// count.
+#[cfg(test)]
+pub(crate) fn witness_fr_width(
+    ty: &syn::Type,
+    user_structs: &HashMap<String, Vec<nocturne_ir::UserStructField>>,
+    user_enums: &HashMap<String, Vec<nocturne_ir::UserEnumVariant>>,
+) -> usize {
+    witness_fr_layout(ty, user_structs, user_enums).len()
+}
+
 fn witness_fr_layout(
     ty: &syn::Type,
     user_structs: &HashMap<String, Vec<nocturne_ir::UserStructField>>,

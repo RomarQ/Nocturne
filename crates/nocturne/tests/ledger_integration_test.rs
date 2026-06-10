@@ -10119,3 +10119,225 @@ async fn cell_u128_literal_set_proves_and_verifies() {
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for Cell<Uint<128>>::set(u128 literal)");
 }
+
+// ---------------------------------------------------------------------------
+// Private-transcript emission parity (Task: transcript codegen derives all
+// private pushes from the canonical event walk; `private_transcript_outputs`
+// comes straight from the generated builder instead of being hand-rolled).
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod direct_arg {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct DirectArgState {
+        pub value: Cell<Uint<64>>,
+    }
+
+    // The circuit param is deliberately NOT named `witnesses`: the
+    // generated transcript builder must normalize its own parameter name
+    // (its body always references `witnesses.<field>`).
+    #[nocturne(witnesses)]
+    pub struct DirectArgWitnesses {
+        pub v: Uint<64>,
+    }
+
+    impl DirectArgState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                value: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn store(&mut self, my_witnesses: &DirectArgWitnesses) {
+            self.value.set(my_witnesses.v);
+        }
+    }
+}
+
+fn build_direct_arg_store_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod direct_arg {
+            #[nocturne(ledger)]
+            pub struct DirectArgState { pub value: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct DirectArgWitnesses { pub v: Uint<64> }
+            impl DirectArgState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { value: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn store(&mut self, my_witnesses: &DirectArgWitnesses) {
+                    self.value.set(my_witnesses.v);
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store")
+        .unwrap()
+        .ir_source
+}
+
+/// A witness used DIRECTLY as a ledger-method argument
+/// (`self.value.set(witnesses.v)`) must push exactly one private-transcript
+/// entry — the shape the old per-occurrence push logic missed entirely.
+/// Uses the GENERATED `private_transcript_outputs` end to end (no
+/// hand-rolling), and a user-chosen witnesses param name (`my_witnesses`).
+#[tokio::test]
+async fn direct_arg_witness_set_proves_and_verifies_with_generated_private_transcript() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use midnight_zkir::Instruction;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_direct_arg_store_ir();
+    let witnesses = direct_arg::DirectArgWitnesses {
+        v: Uint::<64>::new(42),
+    };
+    let t = direct_arg::transcript::build_store_transcript(&witnesses);
+
+    // Builder/circuit parity: the generated private transcript must have
+    // exactly as many Frs as the circuit has PrivateInputs.
+    let private_input_count = ir
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::PrivateInput { .. }))
+        .count();
+    assert_eq!(
+        t.private_transcript.len(),
+        private_input_count,
+        "generated private_transcript length must match the circuit's PrivateInput count"
+    );
+    assert_eq!(
+        t.private_transcript_outputs.len(),
+        1,
+        "one AlignedValue per witness invocation"
+    );
+
+    let preimage = canonical_preimage("store", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("direct-arg witness set must prove+verify with the generated private transcript");
+}
+
+#[nocturne::contract]
+mod cond_flag {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct CondFlagState {
+        pub flag_cell: Cell<Boolean>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct CondFlagWitnesses {
+        pub flag: Boolean,
+    }
+
+    impl CondFlagState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                flag_cell: Cell::new(Boolean::from(false)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn maybe_store(&mut self, witnesses: &CondFlagWitnesses) {
+            if witnesses.flag.value() {
+                self.flag_cell.set(witnesses.flag);
+            }
+        }
+    }
+}
+
+fn build_cond_flag_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod cond_flag {
+            #[nocturne(ledger)]
+            pub struct CondFlagState { pub flag_cell: Cell<Boolean> }
+            #[nocturne(witnesses)]
+            pub struct CondFlagWitnesses { pub flag: Boolean }
+            impl CondFlagState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { flag_cell: Cell::new(Boolean::from(false)) } }
+                #[nocturne(circuit)]
+                pub fn maybe_store(&mut self, witnesses: &CondFlagWitnesses) {
+                    if witnesses.flag.value() {
+                        self.flag_cell.set(witnesses.flag);
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "maybe_store")
+        .unwrap()
+        .ir_source
+}
+
+/// The exact shape from the review finding: the same witness field in the
+/// `if` condition (unguarded first touch, cached) AND in the branch body
+/// (cache hit). The old builder pushed per syntactic occurrence
+/// (double-push); the event-walk builder pushes exactly once, matching the
+/// circuit's single PrivateInput. Proves+verifies with the generated
+/// private transcript for both branch outcomes.
+#[tokio::test]
+async fn cond_flag_same_field_in_cond_and_body_pushes_once_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use midnight_zkir::Instruction;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_cond_flag_ir();
+    let private_input_count = ir
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::PrivateInput { .. }))
+        .count();
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    for flag in [true, false] {
+        let witnesses = cond_flag::CondFlagWitnesses {
+            flag: Boolean::from(flag),
+        };
+        let t = cond_flag::transcript::build_maybe_store_transcript(&witnesses);
+
+        assert_eq!(
+            t.private_transcript.len(),
+            private_input_count,
+            "flag={flag}: generated private_transcript must match the circuit's \
+             PrivateInput count (the field pushes ONCE — at the condition's \
+             unguarded first touch — not per occurrence)"
+        );
+
+        let preimage = canonical_preimage("maybe_store", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (flag={flag}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (flag={flag}): {e}"));
+    }
+}
