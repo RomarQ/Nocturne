@@ -9,6 +9,7 @@ pub mod codegen;
 pub mod deploy_codegen;
 pub mod enum_helpers;
 pub mod transcript_codegen;
+mod typing;
 pub mod zkir_emitter;
 
 #[cfg(test)]

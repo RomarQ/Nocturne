@@ -31,6 +31,7 @@
 //! pi_skip guard:G count:4   // group marker
 //! ```
 
+use crate::typing::{is_transparent_wrapper, parse_uint_type};
 use midnight_transient_crypto::curve::Fr;
 use midnight_zkir::{Instruction, IrSource};
 use nocturne_ir::expr::{AssertKind, LiteralIR};
@@ -193,6 +194,12 @@ struct ZkirEmitter {
     /// `None` from `emit_expr`. `None` is reserved for statements that
     /// legitimately produce no wire.
     errors: Vec<String>,
+    /// Names of `let` bindings whose RHS failed to lower (the failure's
+    /// error is already in `errors`). The `Var` arm stays silent for
+    /// these instead of cascading a misleading "variable `x` has no
+    /// circuit wire" error per use — compilation already fails on the
+    /// root cause.
+    poisoned: HashSet<String>,
     /// Witness fields whose FIRST read happened inside a conditional
     /// branch. Such reads allocate a guarded `PrivateInput` and are
     /// deliberately NOT cached (the cache would leak a guarded wire
@@ -241,6 +248,7 @@ impl ZkirEmitter {
             user_structs: user_structs.clone(),
             user_enums: user_enums.clone(),
             errors: Vec::new(),
+            poisoned: HashSet::new(),
             guarded_witness_fields: HashSet::new(),
             helper_inline_depth: 0,
             branch_spans: Vec::new(),
@@ -275,9 +283,11 @@ impl ZkirEmitter {
     }
 
     /// Type inference for the limited set of expressions whose source
-    /// type we can recover from the IR alone. Used by
-    /// `array_element_type` (for `Index`) and by the `Let` arm (to
-    /// populate `variable_types` for downstream `Var` lookups).
+    /// type we can recover from the IR alone. Used by the `Index` emit
+    /// arm (to recover the array element type), the `Let` arm and
+    /// helper inlining (to populate `variable_types` for downstream
+    /// `Var` lookups), and `expr_comparison_width` (to pick a sound
+    /// `LessThan` bit width).
     ///
     /// This is intentionally conservative — when a shape isn't covered
     /// here, callers get `None` and fall back to whatever default the
@@ -338,10 +348,12 @@ impl ZkirEmitter {
                 LiteralIR::Str(_) => None,
             },
             // `.value()` / `.into()` are transparent wrappers around
-            // the receiver's declared type.
+            // the receiver's declared type (shared rule in `crate::typing`).
             ExprIR::MethodCall {
                 receiver, method, ..
-            } if method == "value" || method == "into" => self.expr_comparison_width(receiver),
+            } if is_transparent_wrapper(&method.to_string()) => {
+                self.expr_comparison_width(receiver)
+            }
             ExprIR::Reference { expr: inner, .. } => self.expr_comparison_width(inner),
             _ => {
                 let t = self.infer_expr_type(expr)?;
@@ -426,11 +438,17 @@ impl ZkirEmitter {
             match last_wire {
                 Some(var) => self.instructions.push(Instruction::Output { var }),
                 None => {
-                    self.errors.push(
-                        "circuit declares a return type but its final statement \
-                         produces no value"
-                            .to_string(),
-                    );
+                    // Only report when nothing else failed: with earlier
+                    // errors the missing value is almost always their
+                    // cascade (a failed final expression), and this
+                    // message would just bury the root cause.
+                    if self.errors.is_empty() {
+                        self.errors.push(
+                            "circuit declares a return type but its final statement \
+                             produces no value"
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -491,6 +509,15 @@ impl ZkirEmitter {
         }
         self.helper_inline_depth -= 1;
         last
+    }
+
+    /// Evaluate a builtin call's arguments strictly, in order. A failing
+    /// argument has already recorded its own emission error; propagating
+    /// `None` keeps the builtin from being emitted with fewer inputs
+    /// than the source call has (a `filter_map` here would silently
+    /// drop the failing argument from e.g. a hash input list).
+    fn emit_builtin_args(&mut self, args: &[ExprIR]) -> Option<Vec<Index>> {
+        args.iter().map(|a| self.emit_expr(a)).collect()
     }
 
     /// Emit instructions for an expression, returning the memory index of the result (if any).
@@ -716,13 +743,21 @@ impl ZkirEmitter {
                 Some(self.emit_load_imm(fr))
             }
 
-            ExprIR::Var { name, .. } => match self.variables.get(&name.to_string()).copied() {
-                Some(idx) => Some(idx),
-                None => self.unsupported(format!(
-                    "variable `{name}` has no circuit wire (binding shape not supported \
-                     by the ZKIR emitter)"
-                )),
-            },
+            ExprIR::Var { name, .. } => {
+                let key = name.to_string();
+                match self.variables.get(&key).copied() {
+                    Some(idx) => Some(idx),
+                    // The binding's initializer already failed and
+                    // recorded the root-cause error — stay silent here
+                    // instead of adding one misleading "no circuit
+                    // wire" error per use.
+                    None if self.poisoned.contains(&key) => None,
+                    None => self.unsupported(format!(
+                        "variable `{name}` has no circuit wire (binding shape not supported \
+                         by the ZKIR emitter)"
+                    )),
+                }
+            }
 
             // A `Path` like `Status::Open` is a compile-time constant.
             // When it names a known user enum variant, lower to a
@@ -844,8 +879,30 @@ impl ZkirEmitter {
                 // the entry stays absent and downstream `Var` lookups
                 // gracefully fall back.
                 let ty = self.infer_expr_type(value);
-                let idx = self.emit_expr(value)?;
+                let Some(idx) = self.emit_expr(value) else {
+                    // The RHS produced no wire. With errors already
+                    // recorded this is (transitively) their cascade —
+                    // poison the name so later uses stay silent instead
+                    // of piling a misleading message per use on top of
+                    // the root cause. On an otherwise clean circuit the
+                    // RHS returned `None` legitimately (e.g. a ledger
+                    // write used as an initializer) — record THAT as
+                    // the binding's error; the uses are still poisoned
+                    // so it surfaces exactly once.
+                    if self.errors.is_empty() {
+                        self.errors.push(format!(
+                            "let binding `{name}`'s initializer produces no circuit value"
+                        ));
+                    }
+                    self.poisoned.insert(name.to_string());
+                    // A failed rebind also shadows: drop any earlier
+                    // binding (and its type tag) of the same name.
+                    self.variables.remove(&name.to_string());
+                    self.variable_types.remove(&name.to_string());
+                    return None;
+                };
                 self.variables.insert(name.to_string(), idx);
+                self.poisoned.remove(&name.to_string());
                 if let Some(t) = ty {
                     self.variable_types.insert(name.to_string(), t);
                 }
@@ -958,7 +1015,9 @@ impl ZkirEmitter {
                 Some(cond_idx)
             }
 
-            ExprIR::FnCall { name, args, .. } => {
+            ExprIR::FnCall {
+                name, path, args, ..
+            } => {
                 let name_str = name.to_string();
 
                 // `merkle_tree_path_root(&path)` must inspect args[0]
@@ -981,25 +1040,49 @@ impl ZkirEmitter {
                     return self.emit_inlined_helper(&helper, args);
                 }
 
-                let arg_indices: Vec<Index> =
-                    args.iter().filter_map(|a| self.emit_expr(a)).collect();
+                // `Uint::<N>::from(x)` and the other wrapper-type
+                // constructors are transparent: the constructed value's
+                // circuit wire IS the argument's wire, the FnCall twin
+                // of the `.into()`/`.value()` rule in `crate::typing`.
+                // (The runtime side reconstructs the call verbatim.)
+                if args.len() == 1 && is_wrapper_from_call(path) {
+                    return self.emit_expr(&args[0]);
+                }
 
                 match name_str.as_str() {
                     "persistent_hash" => {
                         use midnight_base_crypto::fab::{
                             Alignment, AlignmentAtom, AlignmentSegment,
                         };
+                        let inputs = self.emit_builtin_args(args)?;
                         let alignment =
                             Alignment(vec![AlignmentSegment::Atom(AlignmentAtom::Field)]);
-                        Some(self.emit_instruction(Instruction::PersistentHash {
-                            alignment,
-                            inputs: arg_indices,
-                        }))
+                        Some(
+                            self.emit_instruction(Instruction::PersistentHash {
+                                alignment,
+                                inputs,
+                            }),
+                        )
                     }
-                    "transient_hash" => Some(self.emit_instruction(Instruction::TransientHash {
-                        inputs: arg_indices,
-                    })),
-                    _ => arg_indices.last().copied(),
+                    "transient_hash" => {
+                        let inputs = self.emit_builtin_args(args)?;
+                        Some(self.emit_instruction(Instruction::TransientHash { inputs }))
+                    }
+                    // Any other callee has NO circuit lowering. Falling
+                    // back to "last arg's wire" here (the old behavior)
+                    // would silently drop whatever constraint the call
+                    // was supposed to enforce — e.g. `std::cmp::max`,
+                    // or a contract `fn` that helper collection skipped
+                    // (reference params, generics, missing return type).
+                    other => self.unsupported(format!(
+                        "call to `{other}` cannot be lowered to circuit \
+                         instructions: it is neither a ZKIR builtin \
+                         (`persistent_hash`, `transient_hash`, \
+                         `merkle_tree_path_root`) nor an inlinable helper \
+                         (helpers must be free `fn`s in the contract module \
+                         with owned parameters, a return type, and no \
+                         generics)"
+                    )),
                 }
             }
 
@@ -1848,13 +1931,19 @@ impl ZkirEmitter {
     fn emit_merkle_tree_path_root(&mut self, args: &[nocturne_ir::ExprIR]) -> Option<Index> {
         use midnight_base_crypto::fab::{Alignment, AlignmentAtom, AlignmentSegment};
 
+        // Single lookup of the argument — reused below to emit the
+        // witness wires, so there's no second (silently failing) fetch.
+        let Some(arg) = args.first() else {
+            return self.unsupported(
+                "merkle_tree_path_root takes exactly one argument \
+                 (`&witnesses.<field>` of type `MerkleTreePath<H, Bytes<N>>`)",
+            );
+        };
         // Drill through `Reference` to find the WitnessAccess.
-        let resolved = args.first().and_then(|arg| {
-            let field = find_witness_field(arg)?;
+        let resolved = find_witness_field(arg).and_then(|field| {
             let ty = self.witness_types.get(&field).cloned()?;
             let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
-            let (height, leaf_ty_str) = parse_merkle_tree_path_type(&ty_str)?;
-            Some((height, leaf_ty_str))
+            parse_merkle_tree_path_type(&ty_str)
         });
         let Some((height, leaf_ty_str)) = resolved else {
             return self.unsupported(
@@ -1870,7 +1959,6 @@ impl ZkirEmitter {
             return self
                 .unsupported("merkle_tree_path_root currently supports `Bytes<N>` leaves only");
         };
-        let arg = args.first()?;
         let leaf_fr_count = leaf_n.div_ceil(FR_BYTES_STORED) as usize;
 
         // Emit the witness PrivateInputs by evaluating the arg.
@@ -2892,21 +2980,23 @@ fn parse_bytes_n_type(ty_str: &str) -> Option<u32> {
         .filter(|n| *n > 0)
 }
 
-fn parse_uint_type(ty_str: &str) -> Option<u32> {
-    if let Some(n) = ty_str
-        .strip_prefix("Uint<")
-        .and_then(|s| s.strip_suffix('>'))
-    {
-        return n.parse::<u32>().ok();
+/// True when a `FnCall` path is a transparent wrapper constructor:
+/// `Uint::<N>::from(x)`, `Field::from(x)`, `Boolean::from(x)`,
+/// `Bytes::<N>::from(x)`, or a primitive `uN::from(x)`. These construct
+/// an eDSL value type around the argument without changing the value
+/// the circuit carries, so (with exactly one argument) the call lowers
+/// to the argument's wire — the `FnCall` twin of the `.into()` /
+/// `.value()` transparency rule in `crate::typing`.
+fn is_wrapper_from_call(path: &syn::Path) -> bool {
+    let segs = &path.segments;
+    if segs.len() < 2 || segs[segs.len() - 1].ident != "from" {
+        return false;
     }
-    match ty_str {
-        "u8" => Some(8),
-        "u16" => Some(16),
-        "u32" => Some(32),
-        "u64" => Some(64),
-        "u128" => Some(128),
-        _ => None,
-    }
+    let qualifier = segs[segs.len() - 2].ident.to_string();
+    matches!(
+        qualifier.as_str(),
+        "Uint" | "Field" | "Boolean" | "Bytes" | "u8" | "u16" | "u32" | "u64" | "u128"
+    )
 }
 
 /// Parse `MerkleTreePath<H, T>` → `(H, T_str)`. Returns `None` if `ty_str`

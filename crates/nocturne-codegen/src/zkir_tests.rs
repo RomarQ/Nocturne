@@ -1020,6 +1020,72 @@ mod tests {
         );
     }
 
+    /// A call to a function that is neither a ZKIR builtin nor an
+    /// inlinable helper must be an emission error naming the callee —
+    /// the old fallthrough silently lowered it to the last argument's
+    /// wire, dropping whatever constraint the call was meant to enforce.
+    #[test]
+    fn unknown_fn_call_errors_instead_of_last_arg_fallthrough() {
+        let errors = emit_errors(quote::quote! {
+            mod unknown_call {
+                #[nocturne(ledger)]
+                pub struct State { cell: Cell<Uint<64>> }
+                #[nocturne(witnesses)]
+                pub struct W { a: Uint<64>, b: Uint<64> }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { cell: Cell::new(Uint::<64>::from(0u64)) } }
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) {
+                        let m = core::cmp::max(witnesses.a, witnesses.b);
+                        self.cell.set(m);
+                    }
+                }
+            }
+        });
+        assert!(
+            errors.iter().any(|e| e.contains("`max`")),
+            "a non-builtin, non-helper call must error naming the callee, got: {errors:?}"
+        );
+    }
+
+    /// One unsupported `let` RHS used several times must record exactly
+    /// ONE error (the root cause). The binding is poisoned: each later
+    /// use stays silent instead of adding a misleading "variable has no
+    /// circuit wire" error, and the missing-Output check is suppressed
+    /// when the circuit already failed.
+    #[test]
+    fn failed_let_rhs_reports_one_error_not_one_per_use() {
+        let errors = emit_errors(quote::quote! {
+            mod poisoned_let {
+                #[nocturne(ledger)]
+                pub struct State { cell: Cell<Uint<64>> }
+                #[nocturne(witnesses)]
+                pub struct W { a: Uint<64> }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { cell: Cell::new(Uint::<64>::from(0u64)) } }
+                    #[nocturne(circuit)]
+                    pub fn run(&mut self, witnesses: &W) -> Uint<64> {
+                        let x = unknown_helper(witnesses.a);
+                        self.cell.set(x);
+                        let y = x + x;
+                        y
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            errors.len(),
+            1,
+            "one failed RHS used 3 times must yield exactly one error, got: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("unknown_helper"),
+            "the single error must be the root cause, got: {errors:?}"
+        );
+    }
+
     // -------------------------------------------------------------------
     // Task 2.9: structural invariants over the emitted instruction
     // stream. Applied to representative circuit shapes; would have

@@ -7,6 +7,7 @@
 //! - Only emits ops for the active branch (matching ZKIR's pi_skip behavior)
 //! - Converts witness values to `Fr` for the private transcript
 
+use crate::typing::{is_transparent_wrapper, parse_uint_type, uint_max_value};
 use nocturne_ir::{CircuitIR, ContractIR, ExprIR, UserEnumVariant, UserStructField, WitnessIR};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -1014,7 +1015,7 @@ fn literal_int_value(expr: &ExprIR) -> Option<u128> {
         ExprIR::Reference { expr: inner, .. } => literal_int_value(inner),
         ExprIR::MethodCall {
             receiver, method, ..
-        } if method == "into" || method == "value" => literal_int_value(receiver),
+        } if is_transparent_wrapper(&method.to_string()) => literal_int_value(receiver),
         _ => None,
     }
 }
@@ -1032,22 +1033,7 @@ fn int_type_max(ty: &syn::Type) -> Option<u128> {
         t = &r.elem;
     }
     let ty_str = quote!(#t).to_string().replace(' ', "");
-    let bits: u32 = match ty_str.as_str() {
-        "u8" => 8,
-        "u16" => 16,
-        "u32" => 32,
-        "u64" => 64,
-        "u128" => 128,
-        _ => ty_str
-            .strip_prefix("Uint<")
-            .and_then(|s| s.strip_suffix('>'))
-            .and_then(|s| s.parse::<u32>().ok())?,
-    };
-    Some(if bits >= 128 {
-        u128::MAX
-    } else {
-        (1u128 << bits) - 1
-    })
+    parse_uint_type(&ty_str).map(uint_max_value)
 }
 
 /// Generate a runtime Rust expression that evaluates to the value of an
@@ -1089,7 +1075,7 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             let m = method.to_string();
             match m.as_str() {
                 // `.into()` / `.value()` are transparent: forward the receiver.
-                "into" | "value" => arg_to_runtime_expr(receiver),
+                s if is_transparent_wrapper(s) => arg_to_runtime_expr(receiver),
                 _ => {
                     let r = arg_to_runtime_expr(receiver);
                     let m_ident = format_ident!("{}", m);
@@ -2406,7 +2392,7 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
         } => {
             let m = method.to_string();
             match m.as_str() {
-                "into" | "value" => arg_to_runtime_raw_expr(receiver),
+                s if is_transparent_wrapper(s) => arg_to_runtime_raw_expr(receiver),
                 _ => {
                     let r = arg_to_runtime_raw_expr(receiver);
                     let m_ident = format_ident!("{}", m);
@@ -2606,7 +2592,7 @@ fn generate_runtime_cond(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream 
         } => {
             let method_name = method.to_string();
             match method_name.as_str() {
-                "into" | "value" => generate_runtime_cond(receiver, ctx),
+                s if is_transparent_wrapper(s) => generate_runtime_cond(receiver, ctx),
                 _ => {
                     let recv = generate_runtime_cond(receiver, ctx);
                     let m = format_ident!("{}", method_name);

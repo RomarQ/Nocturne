@@ -28,8 +28,16 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let artifacts = match nocturne_codegen::codegen::generate_artifacts(&contract_ir) {
                 Ok(artifacts) => artifacts,
                 Err(errors) => {
+                    // The emitter can record the same message more than
+                    // once for a single construct (e.g. the return-
+                    // position check). Each `compile_error!` is one
+                    // diagnostic, so dedup here — keeping first-
+                    // occurrence order — to surface each distinct
+                    // message exactly once.
+                    let mut seen = std::collections::HashSet::new();
                     let error_tokens: Vec<proc_macro2::TokenStream> = errors
                         .iter()
+                        .filter(|msg| seen.insert(msg.as_str()))
                         .map(|msg| {
                             let msg = format!("nocturne: {msg}");
                             quote::quote! { compile_error!(#msg); }
