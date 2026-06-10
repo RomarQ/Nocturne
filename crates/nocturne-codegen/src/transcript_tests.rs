@@ -131,6 +131,146 @@ mod tests {
         );
     }
 
+    /// An `if` whose VALUE flows into a surrounding expression
+    /// (`self.x.set(if c { a } else { b })`) must be rejected at compile
+    /// time: the event walk would push BOTH branches' private-transcript
+    /// entries while the circuit's guarded `PrivateInput`s consume only
+    /// the active branch's slot at prove time ("Transcripts not fully
+    /// consumed"). See `find_expression_position_if`.
+    #[test]
+    fn expression_position_if_emits_compile_error() {
+        let tokens = transcript_tokens(quote::quote! {
+            mod expr_if {
+                #[nocturne(ledger)]
+                pub struct State { value: Cell<Uint<64>> }
+                #[nocturne(witnesses)]
+                pub struct W { pub flag: Boolean, pub a: Uint<64>, pub b: Uint<64> }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { value: Cell::new(Uint::<64>::from(0u64)) } }
+                    #[nocturne(circuit)]
+                    pub fn pick(&mut self, witnesses: &W) {
+                        self.value.set(
+                            if witnesses.flag.value() { witnesses.a } else { witnesses.b }
+                        );
+                    }
+                }
+            }
+        });
+        assert!(
+            tokens.contains("compile_error"),
+            "expression-position `if` must generate a compile_error, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("not supported in expression position"),
+            "compile_error must explain the expression-position rejection, got: {tokens}"
+        );
+    }
+
+    /// Negative cases for the expression-position-`if` rejection: a
+    /// STATEMENT-position `if` and a `let`-RHS `if` are both handled by
+    /// `generate_op_stmt` (cond events before the runtime `if`,
+    /// branch-body events inside it) and must stay clean.
+    #[test]
+    fn statement_and_let_rhs_if_do_not_emit_compile_error() {
+        let tokens = transcript_tokens(quote::quote! {
+            mod stmt_if {
+                #[nocturne(ledger)]
+                pub struct State { value: Cell<Uint<64>>, other: Cell<Uint<64>> }
+                #[nocturne(witnesses)]
+                pub struct W { pub flag: Boolean, pub a: Uint<64>, pub b: Uint<64> }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self {
+                        Self {
+                            value: Cell::new(Uint::<64>::from(0u64)),
+                            other: Cell::new(Uint::<64>::from(0u64)),
+                        }
+                    }
+                    #[nocturne(circuit)]
+                    pub fn pick_stmt(&mut self, witnesses: &W) {
+                        if witnesses.flag.value() {
+                            self.value.set(witnesses.a);
+                        } else {
+                            self.value.set(witnesses.b);
+                        }
+                    }
+                    #[nocturne(circuit)]
+                    pub fn pick_let(&mut self, witnesses: &W) {
+                        let v = if witnesses.flag.value() { witnesses.a } else { witnesses.b };
+                        self.other.set(v);
+                    }
+                }
+            }
+        });
+        assert!(
+            !tokens.contains("compile_error"),
+            "statement-position and let-RHS `if` must not generate a compile_error, got: {tokens}"
+        );
+        // Placement sanity: the branch-body pushes land INSIDE the runtime
+        // `if` (after the cond's own push + the `if` keyword), not before it.
+        let if_pos = tokens
+            .find("if witnesses . flag . value ()")
+            .expect("runtime if must be present");
+        let a_push = tokens
+            .find("witnesses . a . clone ()")
+            .expect("then-branch witness push must be present");
+        assert!(
+            a_push > if_pos,
+            "branch-body witness push must be emitted inside the runtime if, got: {tokens}"
+        );
+    }
+
+    /// Revert-sensitive coverage for the key bind-once fix (keyed-container
+    /// key expressions evaluate exactly once): the generated Map contains
+    /// block must derive the op's Push value from the bound `__key`, not
+    /// re-evaluate the key expression. A parametric witness call is the
+    /// observable case — re-evaluation would invoke the user's method twice
+    /// (or three times counting the private-transcript push).
+    #[test]
+    fn map_contains_key_binds_once_and_push_derives_from_key() {
+        let tokens = transcript_tokens(quote::quote! {
+            mod wc_key {
+                #[nocturne(ledger)]
+                pub struct State { scores: Map<Uint<64>, Uint<64>>, hits: Counter }
+                #[nocturne(witnesses)]
+                pub struct W;
+                impl W {
+                    pub fn pick(&self) -> Uint<64> { Uint::<64>::from(7u64) }
+                }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { scores: Map::empty(), hits: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn gate(&mut self, witnesses: &W) {
+                        if self.scores.contains(&witnesses.pick()) {
+                            self.hits.increment();
+                        }
+                    }
+                }
+            }
+        });
+        // Exactly two invocations: one for the private-transcript push
+        // (`let __wc = witnesses.pick()`), one for the `__key` binding.
+        // Re-evaluating the key inside the op's AlignedValue would add a
+        // third.
+        assert_eq!(
+            tokens.matches("witnesses . pick ()").count(),
+            2,
+            "key expression must be evaluated exactly once in the contains block \
+             (plus once for the private push), got: {tokens}"
+        );
+        assert!(
+            tokens.contains("let __key = witnesses . pick ()"),
+            "contains block must bind the key once as __key, got: {tokens}"
+        );
+        // The Push's AlignedValue derives from the bound __key.
+        assert!(
+            tokens.contains("AlignedValue :: from (((__key . clone ()) . value () as u64))"),
+            "the contains Push value must derive from the bound __key, got: {tokens}"
+        );
+    }
+
     /// Task 3.6: generated locals use reserved `__nocturne_*` idents so
     /// user `let` bindings can't shadow them.
     #[test]

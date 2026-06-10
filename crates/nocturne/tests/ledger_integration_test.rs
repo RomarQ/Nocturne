@@ -10537,6 +10537,301 @@ async fn assert_contains_with_state_proves_and_verifies() {
         .expect("assert!(contains) circuit must prove+verify");
 }
 
+// ---------------------------------------------------------------------------
+// Branch-body private-push PLACEMENT. The transcript builder must emit a
+// branch body's witness pushes INSIDE the runtime `if` (the circuit's
+// PrivateInput for the branch is guarded, so the zkir VM skips its
+// transcript slot on the inactive path — see
+// memories/conditional-io-guards.md). If the builder hoisted branch-body
+// pushes out of the runtime `if`, the INACTIVE case below would push an
+// entry the circuit never consumes and prove would fail with
+// "Transcripts not fully consumed".
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod branch_witness_call {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct BranchCallState {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct BranchCallWitnesses {
+        pub flag: Boolean,
+    }
+
+    impl BranchCallWitnesses {
+        pub fn secret(&self) -> Uint<64> {
+            Uint::<64>::from(99u64)
+        }
+    }
+
+    impl BranchCallState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn gated_store(&mut self, witnesses: &BranchCallWitnesses) {
+            if witnesses.flag.value() {
+                self.stored.set(witnesses.secret());
+            }
+        }
+    }
+}
+
+fn build_branch_witness_call_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod branch_witness_call {
+            #[nocturne(ledger)]
+            pub struct BranchCallState { pub stored: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct BranchCallWitnesses { pub flag: Boolean }
+            impl BranchCallWitnesses {
+                pub fn secret(&self) -> Uint<64> { Uint::<64>::from(99u64) }
+            }
+            impl BranchCallState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn gated_store(&mut self, witnesses: &BranchCallWitnesses) {
+                    if witnesses.flag.value() {
+                        self.stored.set(witnesses.secret());
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "gated_store")
+        .unwrap()
+        .ir_source
+}
+
+/// A parametric witness CALL inside a conditional branch, with the branch
+/// INACTIVE (flag=false): the generated builder must push only the cond's
+/// flag entry, not the branch body's `witnesses.secret()` entry. This is
+/// the placement-sensitive case — it fails if branch-body pushes move
+/// outside the runtime `if`. The active case is proven too so both
+/// transcript shapes verify against the same vk.
+#[tokio::test]
+async fn witness_call_in_inactive_branch_proves_and_verifies_with_generated_outputs() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_branch_witness_call_ir();
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    // false FIRST: the inactive branch is the case that catches a
+    // misplaced (unconditionally emitted) branch-body push.
+    for flag in [false, true] {
+        let witnesses = branch_witness_call::BranchCallWitnesses {
+            flag: Boolean::from(flag),
+        };
+        let t = branch_witness_call::transcript::build_gated_store_transcript(&witnesses);
+
+        let expected_outputs = if flag { 2 } else { 1 };
+        assert_eq!(
+            t.private_transcript_outputs.len(),
+            expected_outputs,
+            "flag={flag}: the branch body's witness-call push must fire only \
+             when the branch is active (cond flag push is unconditional)"
+        );
+
+        let preimage = canonical_preimage("gated_store", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (flag={flag}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (flag={flag}): {e}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyed-container key bind-once (commit 3668e51): a parametric witness
+// call used as a Map key must be evaluated exactly once per contains
+// block (the op's Push AlignedValue derives from the bound `__key`).
+// The token-level shape is asserted in nocturne-codegen's
+// `map_contains_key_binds_once_and_push_derives_from_key`; this is the
+// end-to-end prove+verify of the same shape with the GENERATED outputs.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod map_witness_key {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct MapKeyState {
+        pub scores: Map<Uint<64>, Uint<64>>,
+        pub hits: Counter,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct MapKeyWitnesses;
+
+    impl MapKeyWitnesses {
+        pub fn pick(&self) -> Uint<64> {
+            Uint::<64>::from(7u64)
+        }
+    }
+
+    impl MapKeyState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                scores: Map::empty(),
+                hits: Counter::zero(),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn gate(&mut self, witnesses: &MapKeyWitnesses) {
+            if self.scores.contains(&witnesses.pick()) {
+                self.hits.increment();
+            }
+        }
+    }
+}
+
+fn build_map_witness_key_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod map_witness_key {
+            #[nocturne(ledger)]
+            pub struct MapKeyState {
+                pub scores: Map<Uint<64>, Uint<64>>,
+                pub hits: Counter,
+            }
+            #[nocturne(witnesses)]
+            pub struct MapKeyWitnesses;
+            impl MapKeyWitnesses {
+                pub fn pick(&self) -> Uint<64> { Uint::<64>::from(7u64) }
+            }
+            impl MapKeyState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { scores: Map::empty(), hits: Counter::zero() } }
+                #[nocturne(circuit)]
+                pub fn gate(&mut self, witnesses: &MapKeyWitnesses) {
+                    if self.scores.contains(&witnesses.pick()) {
+                        self.hits.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "gate")
+        .unwrap()
+        .ir_source
+}
+
+/// A witness METHOD as a Map key: `self.scores.contains(&witnesses.pick())`
+/// in cond position. Proves+verifies with the generated outputs for both
+/// the key-present and key-absent states.
+#[tokio::test]
+async fn witness_method_map_key_proves_and_verifies_with_generated_outputs() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_map_witness_key_ir();
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    for present in [true, false] {
+        let mut state = map_witness_key::MapKeyState::new();
+        if present {
+            state.scores.insert(Uint::<64>::new(7), Uint::<64>::new(1));
+        }
+        let witnesses = map_witness_key::MapKeyWitnesses;
+        let t = map_witness_key::transcript::build_gate_transcript(&state, &witnesses);
+
+        // One witness invocation per contains block: the bound __key.
+        // A key re-evaluation bug wouldn't change this count (the value
+        // is deterministic) but the prove below pins the full shape.
+        assert_eq!(
+            t.private_transcript_outputs.len(),
+            1,
+            "present={present}: exactly one private push for the witness-call key"
+        );
+
+        let preimage = canonical_preimage("gate", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (present={present}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (present={present}): {e}"));
+    }
+}
+
+/// A `Bytes<32>` witness (multi-Fr: 2 private_transcript Frs from one
+/// AlignedValue) flowing into `Cell<Bytes<32>>::set`, proved with the
+/// GENERATED `private_transcript_outputs` (the older
+/// `cell_bytes32_set_proves_and_verifies` hand-rolls them).
+#[tokio::test]
+async fn bytes32_witness_set_proves_and_verifies_with_generated_outputs() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use midnight_zkir::Instruction;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_rotate_digest_ir();
+    let witnesses = bytes_cell::BytesCellWitnesses {
+        new_digest: Bytes::<32>::from([0x55u8; 32]),
+    };
+    let t = bytes_cell::transcript::build_rotate_digest_transcript(&witnesses);
+
+    // One AlignedValue per witness invocation; its value_only_field_repr
+    // flattening must match the circuit's PrivateInput count (2 Frs for
+    // Bytes<32>).
+    let private_input_count = ir
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::PrivateInput { .. }))
+        .count();
+    assert_eq!(
+        t.private_transcript_outputs.len(),
+        1,
+        "one AlignedValue for the Bytes<32> witness"
+    );
+    assert_eq!(
+        t.private_transcript.len(),
+        private_input_count,
+        "generated private_transcript must carry one Fr per circuit PrivateInput \
+         (multi-Fr Bytes<32> flattening)"
+    );
+
+    let preimage = canonical_preimage("rotate_digest", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("Bytes<32> witness set must prove+verify with the generated outputs");
+}
+
 #[nocturne::contract]
 mod pausable {
     use super::*;

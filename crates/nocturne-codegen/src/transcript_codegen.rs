@@ -445,15 +445,84 @@ fn generate_op_stmt(
     }
 }
 
+/// Find an `ExprIR::If` nested anywhere inside an expression-position
+/// tree (an `if` whose VALUE flows into a surrounding expression, e.g.
+/// `self.value.set(if c { witnesses.a } else { witnesses.b })`).
+///
+/// Why this must be rejected: `generate_op_stmt` only places branch-body
+/// event pushes inside a runtime `if` for STATEMENT-position `if`s (and
+/// `let`-RHS `if`s, which route through the same arm). An `if` reached
+/// through `private_event_pushes`'s walk would push BOTH branches'
+/// private-transcript entries unconditionally, while the circuit's
+/// guarded `PrivateInput`s consume only the active branch's slot at
+/// prove time (see `memories/conditional-io-guards.md`) — the zkir VM
+/// then bails with "Transcripts not fully consumed"
+/// (midnight-ledger ledger-8, zkir/src/ir_vm.rs:472).
+fn find_expression_position_if(expr: &ExprIR) -> Option<proc_macro2::Span> {
+    match expr {
+        ExprIR::If { span, .. } => Some(*span),
+        ExprIR::LedgerAccess { args, .. }
+        | ExprIR::WitnessCall { args, .. }
+        | ExprIR::FnCall { args, .. } => args.iter().find_map(find_expression_position_if),
+        ExprIR::MethodCall { receiver, args, .. } => find_expression_position_if(receiver)
+            .or_else(|| args.iter().find_map(find_expression_position_if)),
+        ExprIR::BinaryOp { lhs, rhs, .. } => {
+            find_expression_position_if(lhs).or_else(|| find_expression_position_if(rhs))
+        }
+        ExprIR::UnaryOp { expr: inner, .. }
+        | ExprIR::Reference { expr: inner, .. }
+        | ExprIR::Disclose { value: inner, .. } => find_expression_position_if(inner),
+        ExprIR::Let { value, .. } => find_expression_position_if(value),
+        // A block nested inside an expression still yields its value to
+        // the surrounding expression, so an `if` anywhere inside it has
+        // the same both-branches-pushed hazard.
+        ExprIR::Block { stmts, .. } => stmts.iter().find_map(find_expression_position_if),
+        ExprIR::Assert { kind, .. } => match kind {
+            nocturne_ir::expr::AssertKind::Assert(cond) => find_expression_position_if(cond),
+            nocturne_ir::expr::AssertKind::AssertEq(a, b) => {
+                find_expression_position_if(a).or_else(|| find_expression_position_if(b))
+            }
+        },
+        ExprIR::EnumPayload { scrutinee, .. } => find_expression_position_if(scrutinee),
+        ExprIR::Index { array, .. } => find_expression_position_if(array),
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            elements.iter().find_map(find_expression_position_if)
+        }
+        ExprIR::StructInit { fields, .. } => fields
+            .iter()
+            .find_map(|(_, e)| find_expression_position_if(e)),
+        ExprIR::Return { value, .. } => value.as_deref().and_then(find_expression_position_if),
+        ExprIR::WitnessAccess { .. }
+        | ExprIR::Literal { .. }
+        | ExprIR::Var { .. }
+        | ExprIR::Path { .. }
+        | ExprIR::Unsupported { .. } => None,
+    }
+}
+
 /// Emit the private-transcript pushes for every private-input event in
 /// `expr`, in canonical IR walk order (see `crate::private_events`).
 /// Witness-field first touches push once (the tracker mirrors the
 /// emitter's cache); `WitnessCall`s push per call site.
+///
+/// Every call site hands this function an expression-position tree
+/// (statement-position `if`s are intercepted by `generate_op_stmt`), so
+/// any `ExprIR::If` found here would break private-transcript parity —
+/// reject it with a `compile_error!` instead of silently pushing both
+/// branches' events.
 fn private_event_pushes(
     expr: &ExprIR,
     ctx: &TranscriptCtx<'_>,
     tracker: &mut FirstTouchTracker,
 ) -> TokenStream {
+    if let Some(span) = find_expression_position_if(expr) {
+        let msg = "nocturne: `if` is not supported in expression position (e.g. \
+                   `self.x.set(if c { a } else { b })`) — the transcript builder would \
+                   push private-transcript entries for both branches while the circuit \
+                   consumes only the active branch's. Use a statement-position `if` \
+                   instead: `if c { self.x.set(a); } else { self.x.set(b); }`";
+        return quote::quote_spanned! {span=> compile_error!(#msg); };
+    }
     let mut pushes: Vec<TokenStream> = Vec::new();
     walk_expr_events(expr, ctx.user_structs, tracker, &mut |_, ev| {
         pushes.push(match ev {
@@ -686,7 +755,11 @@ fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                             let comps: Vec<TokenStream> = (0..n as usize)
                                 .map(|i| {
                                     let idx = syn::Index::from(i);
-                                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] })
+                                    tuple_component_aligned_repr(
+                                        &elem_ty,
+                                        &quote! { __a[#idx] },
+                                        ctx,
+                                    )
                                 })
                                 .collect();
                             let trailing = if n == 1 {
@@ -722,8 +795,11 @@ fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                                     let payload_match =
                                         enum_payload_match_expr(&quote! { __e.clone() }, t, ctx)
                                             .unwrap_or_else(|| quote! { unreachable!() });
-                                    let payload_repr =
-                                        tuple_component_aligned_repr(&p, &quote! { __payload });
+                                    let payload_repr = tuple_component_aligned_repr(
+                                        &p,
+                                        &quote! { __payload },
+                                        ctx,
+                                    );
                                     let disc = enum_like_discriminant_expr(&quote! { __e }, t);
                                     quote! {
                                         {
@@ -1295,9 +1371,16 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             let arg_exprs: Vec<TokenStream> = args.iter().map(arg_to_runtime_raw_expr).collect();
             quote! { #path(#(#arg_exprs),*).value() }
         }
-        // Anything else falls back to `()` and will fail to compile with a
-        // clear "the trait `From<()>` is not implemented" message, which
-        // points the user at an unsupported argument shape.
+        // Anything else falls back to `()`. NOTE: this is NOT a
+        // compile-time guard — upstream implements `Aligned for ()`
+        // (base-crypto/src/fab/alignments.rs, `tuple_aligned!`) and
+        // `From<()> for Value` (base-crypto/src/fab/conversions.rs,
+        // `tuple_conversions!`), so `AlignedValue::from(())` compiles to
+        // an EMPTY (zero-atom) value. Shapes that would desync the
+        // transcript must be rejected explicitly before reaching here,
+        // the way `private_event_pushes` rejects expression-position
+        // `if`. `()` only fails to compile in positions that demand a
+        // concrete primitive (arithmetic, `as` casts).
         _ => quote! { () },
     }
 }
@@ -1643,7 +1726,7 @@ fn aligned_value_arg_expr(
                 .enumerate()
                 .map(|(i, elem)| {
                     let idx = syn::Index::from(i);
-                    tuple_component_aligned_repr(elem, &quote! { __t.#idx })
+                    tuple_component_aligned_repr(elem, &quote! { __t.#idx }, ctx)
                 })
                 .collect();
             // A 1-tuple needs the trailing comma so Rust parses it as
@@ -1669,7 +1752,7 @@ fn aligned_value_arg_expr(
             let comps: Vec<TokenStream> = (0..n as usize)
                 .map(|i| {
                     let idx = syn::Index::from(i);
-                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] })
+                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] }, ctx)
                 })
                 .collect();
             let trailing = if n == 1 {
@@ -1717,7 +1800,7 @@ fn aligned_value_arg_expr(
                 .iter()
                 .map(|f| {
                     let fname = f.name.clone();
-                    tuple_component_aligned_repr(&f.ty, &quote! { __t.#fname })
+                    tuple_component_aligned_repr(&f.ty, &quote! { __t.#fname }, ctx)
                 })
                 .collect();
             let trailing = if fields.len() == 1 {
@@ -1751,7 +1834,7 @@ fn aligned_value_arg_expr(
                 Some(p) => {
                     let payload_match = enum_payload_match_expr(&quote! { __e.clone() }, t, ctx)
                         .unwrap_or_else(|| quote! { unreachable!() });
-                    let payload_repr = tuple_component_aligned_repr(&p, &quote! { __payload });
+                    let payload_repr = tuple_component_aligned_repr(&p, &quote! { __payload }, ctx);
                     let disc = enum_like_discriminant_expr(&quote! { __e }, t);
                     quote! {
                         {
@@ -1790,41 +1873,21 @@ fn aligned_value_arg_expr(
 
 /// Convert a single tuple-component expression `accessor` (e.g.
 /// `__t.0`) of declared type `ty` into the form `AlignedValue::from`
-/// accepts directly. Mirrors the per-type arms of
-/// `aligned_value_arg_expr` but takes a token-tree accessor instead of
-/// an `ExprIR` because tuple elements aren't first-class IR exprs —
-/// they're field projections on a temporary binding.
-fn tuple_component_aligned_repr(ty: &syn::Type, accessor: &TokenStream) -> TokenStream {
-    let ty_str = quote!(#ty).to_string().replace(' ', "");
-    if ty_str.starts_with("Bytes<") {
-        return quote! { *(#accessor).as_bytes() };
-    }
-    if ty_str == "Field" {
-        return quote! { Fr::from((#accessor).value()) };
-    }
-    if ty_str == "MerkleTreeDigest" {
-        return quote! {
-            Fr::from_le_bytes(&(#accessor).as_le_bytes())
-                .expect("MerkleTreeDigest bytes round-trip through Fr")
-        };
-    }
-    if ty_str == "Boolean" || ty_str == "bool" {
-        return quote! { (#accessor).value() };
-    }
-    // Uint<N> / primitive integers: snap to the matching Rust primitive
-    // so the upstream Aligned-for-primitive impl picks the right Bytes<n>
-    //
-    // Note: tuple_component_aligned_repr doesn't take user_enums today,
-    // so enum-valued tuple components fall through to the integer path
-    // — fine for now since the per-component accessor's primitive cast
-    // pulls in `.discriminant()` when the type is recognized at the
-    // top-level dispatch. Nested enum-in-tuple-in-struct would need
-    // user_enums plumbed here too.
-    // alignment.
-    match primitive_cast_for_type(ty) {
-        Some(cast) => quote! { (#accessor).value() #cast },
-        None => quote! { (#accessor).value() },
-    }
+/// accepts directly. Takes a token-tree accessor instead of an `ExprIR`
+/// because tuple elements aren't first-class IR exprs — they're field
+/// projections on a temporary binding.
+///
+/// Delegates to `crate::aligned::accessor_aligned_value_expr` (the one
+/// recursion shared with the deploy codegen and the witness pushes) so
+/// the per-type dispatch can't drift from the other accessor-shaped
+/// sites. This also gives nested enum/struct/tuple components the full
+/// recursion a previous hand-rolled copy here didn't have.
+fn tuple_component_aligned_repr(
+    ty: &syn::Type,
+    accessor: &TokenStream,
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
+    accessor_aligned_value_expr(Some(ty), accessor, ctx.user_enums, ctx.user_structs)
 }
 
 /// Emit the runtime ops for `Map<K, V>::insert(k, v)`. The on-chain pattern

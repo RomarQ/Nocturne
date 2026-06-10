@@ -3,10 +3,24 @@
 //! Given a declared Rust type and a token accessor for a runtime value of
 //! that type (e.g. `__state.field.get()` or `witnesses.secret`), build the
 //! expression that `AlignedValue::from(_)` accepts and that produces the
-//! same wire shape the ZKIR emitter declares for the type. One recursion,
-//! shared by the deploy codegen (Cell initializers) and the transcript
-//! codegen (private-transcript witness pushes) so the two sides can't
-//! drift apart.
+//! same wire shape the ZKIR emitter declares for the type. One recursion
+//! for every ACCESSOR-shaped site: the deploy codegen (Cell initializers),
+//! the transcript codegen's private-transcript witness pushes, and its
+//! tuple/array/struct component projections
+//! (`transcript_codegen::tuple_component_aligned_repr` delegates here).
+//!
+//! Two transcript-side dispatches intentionally stay separate and must be
+//! kept in sync by hand:
+//!
+//! - `transcript_codegen::aligned_value_arg_expr` is rooted at an `ExprIR`
+//!   (not a token accessor) because it needs expression-level knowledge:
+//!   the over-range literal compile check and the Var-vs-witness `.value()`
+//!   unwrap both inspect the IR node, not just the declared type.
+//! - the Cell/Counter read arm in `transcript_codegen::generate_expr_ops`
+//!   ("get"/"value") dispatches on the POPEQ result type where the
+//!   accessor is a live-state getter; its primitive arm casts the getter
+//!   result directly rather than going through the surface-type `.value()`
+//!   arms below.
 
 use std::collections::HashMap;
 
