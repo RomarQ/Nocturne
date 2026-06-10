@@ -1000,6 +1000,56 @@ fn int_literal_tokens(n: u128) -> TokenStream {
     }
 }
 
+/// The compile-time integer value of an argument expression, reaching
+/// through the same transparent wrappers `arg_to_runtime_expr` forwards
+/// (`disclose(...)`, `&x`, `.into()`, `.value()`). `None` when the
+/// argument's value isn't an integer literal known at codegen time.
+fn literal_int_value(expr: &ExprIR) -> Option<u128> {
+    match expr {
+        ExprIR::Literal {
+            value: nocturne_ir::expr::LiteralIR::Int(n),
+            ..
+        } => Some(*n),
+        ExprIR::Disclose { value, .. } => literal_int_value(value),
+        ExprIR::Reference { expr: inner, .. } => literal_int_value(inner),
+        ExprIR::MethodCall {
+            receiver, method, ..
+        } if method == "into" || method == "value" => literal_int_value(receiver),
+        _ => None,
+    }
+}
+
+/// Maximum value an integer-like target type can hold (`u8`..`u128`,
+/// `Uint<N>`), `None` for non-integer types (`Field`, `Bytes<N>`,
+/// booleans, user ADTs). References unwrap so a `&Uint<32>` map-key
+/// position checks like `Uint<32>`. Uses the declared `Uint<N>` bit
+/// width, NOT the primitive `primitive_cast_for_type` snaps to: the
+/// circuit range-constrains the wire to N bits, so anything above
+/// `2^N - 1` can never prove even when it fits the runtime primitive.
+fn int_type_max(ty: &syn::Type) -> Option<u128> {
+    let mut t = ty;
+    while let syn::Type::Reference(r) = t {
+        t = &r.elem;
+    }
+    let ty_str = quote!(#t).to_string().replace(' ', "");
+    let bits: u32 = match ty_str.as_str() {
+        "u8" => 8,
+        "u16" => 16,
+        "u32" => 32,
+        "u64" => 64,
+        "u128" => 128,
+        _ => ty_str
+            .strip_prefix("Uint<")
+            .and_then(|s| s.strip_suffix('>'))
+            .and_then(|s| s.parse::<u32>().ok())?,
+    };
+    Some(if bits >= 128 {
+        u128::MAX
+    } else {
+        (1u128 << bits) - 1
+    })
+}
+
 /// Generate a runtime Rust expression that evaluates to the value of an
 /// argument expression, suitable for wrapping in `AlignedValue::from(...)`.
 ///
@@ -1492,6 +1542,23 @@ fn aligned_value_arg_expr(
     ctx: &TranscriptCtx<'_>,
 ) -> TokenStream {
     let user_structs = ctx.user_structs;
+    // Over-range literal: the circuit's LoadImm carries the full
+    // literal while the runtime cast at the bottom of this function
+    // would silently truncate (`(5000000000u64) as u32` for a
+    // `Cell<Uint<32>>`), so the two sides disagree and prove fails —
+    // or worse, the on-chain write holds a truncated value. Both the
+    // literal and the target width are known here (this function is
+    // the single chokepoint for Cell/Map/Set key & value positions),
+    // so reject at compile time instead.
+    if let Some(t) = ty
+        && let Some(n) = literal_int_value(expr)
+        && let Some(max) = int_type_max(t)
+        && n > max
+    {
+        let ty_str = quote!(#t).to_string().replace(' ', "");
+        let msg = format!("literal {n} exceeds {ty_str} range (max {max})");
+        return quote! { { compile_error!(#msg); 0u8 } };
+    }
     if let Some(t) = ty {
         // Tuple keys / values: build the upstream tuple shape that
         // `AlignedValue::from(_)` accepts via `Aligned for (T1, .., Tn)`.

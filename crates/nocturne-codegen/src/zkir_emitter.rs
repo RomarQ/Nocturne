@@ -44,6 +44,16 @@ type Index = u32;
 pub struct ZkirOutput {
     pub circuit_name: String,
     pub ir_source: IrSource,
+    /// Instruction-index ranges of conditional branch bodies, in
+    /// emission order (then-branch and else-branch each get their own
+    /// span; nested branches nest). Ground-truth metadata for the
+    /// structural-invariant tests: an instruction is "inside a
+    /// conditional" iff its position falls in one of these spans, so
+    /// the tests can assert every `PrivateInput`/`PublicInput` emitted
+    /// there carries `guard: Some(_)` (see
+    /// `memories/conditional-io-guards.md`). Not part of the `.zkir`
+    /// artifact.
+    pub branch_spans: Vec<std::ops::Range<usize>>,
 }
 
 /// Result of full contract emission.
@@ -195,6 +205,12 @@ struct ZkirEmitter {
     /// an inlined helper body is rejected (the inliner splices the body
     /// into the caller, so `return` would not mean what it says).
     helper_inline_depth: u32,
+    /// Instruction-index ranges of conditional branch bodies (one span
+    /// per then/else body, recorded by the `If` arm). Surfaced through
+    /// `ZkirOutput::branch_spans` so the structural-invariant tests
+    /// know exactly which instructions were emitted under a branch
+    /// guard.
+    branch_spans: Vec<std::ops::Range<usize>>,
 }
 
 impl ZkirEmitter {
@@ -227,6 +243,7 @@ impl ZkirEmitter {
             errors: Vec::new(),
             guarded_witness_fields: HashSet::new(),
             helper_inline_depth: 0,
+            branch_spans: Vec::new(),
         }
     }
 
@@ -428,6 +445,7 @@ impl ZkirEmitter {
         ZkirOutput {
             circuit_name: circuit.name.to_string(),
             ir_source,
+            branch_spans: std::mem::take(&mut self.branch_spans),
         }
     }
 
@@ -884,10 +902,16 @@ impl ZkirEmitter {
                 // `then_result` as `None` and we fall back to the
                 // legacy `Some(cond_idx)` return so existing
                 // if-as-statement behaviour is unchanged.
+                let then_start = self.instructions.len();
                 let mut then_result: Option<Index> = None;
                 for expr in then_branch {
                     then_result = self.emit_expr(expr).or(then_result);
                 }
+                // Record the branch-body span for the structural
+                // invariant tests: every instruction in it was emitted
+                // with `in_conditional == true`, so its IO guards must
+                // be `Some(_)`.
+                self.branch_spans.push(then_start..self.instructions.len());
 
                 let mut else_result: Option<Index> = None;
                 if let Some(else_stmts) = else_branch {
@@ -905,9 +929,11 @@ impl ZkirEmitter {
                     };
                     self.guard = else_guard;
 
+                    let else_start = self.instructions.len();
                     for expr in else_stmts {
                         else_result = self.emit_expr(expr).or(else_result);
                     }
+                    self.branch_spans.push(else_start..self.instructions.len());
                 }
 
                 self.guard = outer_guard;

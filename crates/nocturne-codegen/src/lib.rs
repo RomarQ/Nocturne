@@ -12,6 +12,8 @@ pub mod transcript_codegen;
 pub mod zkir_emitter;
 
 #[cfg(test)]
+mod transcript_tests;
+#[cfg(test)]
 mod zkir_check_tests;
 #[cfg(test)]
 mod zkir_tests;

@@ -5,6 +5,19 @@ mod tests {
     use nocturne_ir::parse_contract;
 
     fn compile_circuits(input: proc_macro2::TokenStream) -> Vec<(String, IrSource)> {
+        compile_circuits_with_spans(input)
+            .into_iter()
+            .map(|(name, ir, _)| (name, ir))
+            .collect()
+    }
+
+    type CircuitWithSpans = (String, IrSource, Vec<std::ops::Range<usize>>);
+
+    /// Like `compile_circuits` but keeps the emitter's recorded
+    /// conditional branch spans alongside each circuit — the ground
+    /// truth `assert_structural_invariants` uses to decide which
+    /// instructions were emitted inside a conditional.
+    fn compile_circuits_with_spans(input: proc_macro2::TokenStream) -> Vec<CircuitWithSpans> {
         let module: syn::ItemMod = syn::parse2(input).expect("parse module");
         let contract = parse_contract(module).expect("parse contract");
         let output = zkir_emitter::emit_contract(&contract);
@@ -16,7 +29,7 @@ mod tests {
         output
             .circuits
             .into_iter()
-            .map(|c| (c.circuit_name, c.ir_source))
+            .map(|c| (c.circuit_name, c.ir_source, c.branch_spans))
             .collect()
     }
 
@@ -1020,9 +1033,22 @@ mod tests {
     ///     top-level guard wire), every PublicInput carries the group's
     ///     guard and every DeclarePubInput value is produced by a
     ///     CondSelect (the inactive-path zeroing mux);
-    /// (c) a PrivateInput sandwiched between two conditional groups
-    ///     must carry a guard (witness reads in branch bodies).
-    fn assert_structural_invariants(name: &str, ir: &IrSource) {
+    /// (c) EVERY `PrivateInput`/`PublicInput` emitted inside a
+    ///     conditional branch carries `guard: Some(_)`, and every one
+    ///     emitted outside carries `guard: None`. "Inside" comes from
+    ///     `branch_spans`, the emitter's record of the instruction
+    ///     ranges it emitted while a branch guard was active — the
+    ///     instruction stream alone can't recover branch extents (a
+    ///     branch whose condition was hoisted to a `let` and whose body
+    ///     only reads a witness leaves no other trace), so the spans
+    ///     are the ground truth. See
+    ///     `memories/conditional-io-guards.md` for why a missing guard
+    ///     desynchronizes transcript consumption.
+    fn assert_structural_invariants(
+        name: &str,
+        ir: &IrSource,
+        branch_spans: &[std::ops::Range<usize>],
+    ) {
         let instrs = ir.instructions.as_ref();
 
         // Map wire index -> producing instruction position.
@@ -1056,9 +1082,8 @@ mod tests {
             "circuit '{name}': DeclarePubInput count must equal the sum of PiSkip counts"
         );
 
-        // (b) + (c): walk PiSkip-delimited groups.
+        // (b): walk PiSkip-delimited groups.
         let mut group: Vec<usize> = Vec::new();
-        let mut prev_group_conditional = false;
         for (pos, instr) in instrs.iter().enumerate() {
             match instr {
                 Instruction::PiSkip { guard, .. } => {
@@ -1089,23 +1114,42 @@ mod tests {
                                          group must carry the group guard"
                                     );
                                 }
-                                Instruction::PrivateInput { guard: g }
-                                    if prev_group_conditional =>
-                                {
-                                    assert!(
-                                        g.is_some(),
-                                        "circuit '{name}': PrivateInput between conditional \
-                                         groups must carry a guard"
-                                    );
-                                }
                                 _ => {}
                             }
                         }
                     }
                     group.clear();
-                    prev_group_conditional = conditional;
                 }
                 _ => group.push(pos),
+            }
+        }
+
+        // (c): every IO instruction inside a branch span must carry a
+        // guard; every one outside must not. Together with the
+        // emitter-recorded spans this is exact in both directions —
+        // it subsumes the old "PrivateInput between two conditional
+        // PiSkip groups" heuristic, which never checked the first
+        // conditional group.
+        for (pos, instr) in instrs.iter().enumerate() {
+            let (kind, g) = match instr {
+                Instruction::PrivateInput { guard } => ("PrivateInput", guard),
+                Instruction::PublicInput { guard } => ("PublicInput", guard),
+                _ => continue,
+            };
+            let in_branch = branch_spans.iter().any(|s| s.contains(&pos));
+            if in_branch {
+                assert!(
+                    g.is_some(),
+                    "circuit '{name}': {kind} at instruction {pos} was emitted inside a \
+                     conditional branch but carries no guard — the zkir VM would consume \
+                     a transcript entry even when the branch is inactive"
+                );
+            } else {
+                assert!(
+                    g.is_none(),
+                    "circuit '{name}': {kind} at instruction {pos} was emitted outside \
+                     any conditional branch but carries guard {g:?}"
+                );
             }
         }
     }
@@ -1115,7 +1159,7 @@ mod tests {
         // Conditional map read: witness first-touched inside a branch
         // (guarded PrivateInput) + a conditional Popeq (guarded
         // PublicInput + CondSelect-zeroed declares).
-        let cond_map_read = compile_circuits(quote::quote! {
+        let cond_map_read = compile_circuits_with_spans(quote::quote! {
             mod cond_read {
                 #[nocturne(ledger)]
                 pub struct State { members: Map<Uint<64>, Boolean> }
@@ -1135,7 +1179,7 @@ mod tests {
         });
 
         // Nested conditionals: composed guards.
-        let nested_if = compile_circuits(quote::quote! {
+        let nested_if = compile_circuits_with_spans(quote::quote! {
             mod nested {
                 #[nocturne(ledger)]
                 pub struct State { count: Counter }
@@ -1160,7 +1204,7 @@ mod tests {
         });
 
         // Multi-Fr Bytes<48> write + read (2 Frs per value).
-        let multi_fr_bytes = compile_circuits(quote::quote! {
+        let multi_fr_bytes = compile_circuits_with_spans(quote::quote! {
             mod wide_bytes {
                 #[nocturne(ledger)]
                 pub struct State { digest: Cell<Bytes<48>> }
@@ -1182,7 +1226,7 @@ mod tests {
         });
 
         // Multi-Fr Popeq through a payload-enum Cell (the H4 shape).
-        let enum_cell_read = compile_circuits(quote::quote! {
+        let enum_cell_read = compile_circuits_with_spans(quote::quote! {
             mod enum_cell {
                 pub enum Action { Mint(Uint<64>), Burn(Uint<64>) }
                 #[nocturne(ledger)]
@@ -1207,13 +1251,20 @@ mod tests {
             }
         });
 
-        for (name, ir) in cond_map_read
+        // Sanity: the conditional circuits must actually record branch
+        // spans, otherwise invariant (c) would pass vacuously.
+        assert!(
+            cond_map_read.iter().all(|(_, _, spans)| !spans.is_empty()),
+            "cond_map_read must record at least one conditional branch span"
+        );
+
+        for (name, ir, spans) in cond_map_read
             .iter()
             .chain(nested_if.iter())
             .chain(multi_fr_bytes.iter())
             .chain(enum_cell_read.iter())
         {
-            assert_structural_invariants(name, ir);
+            assert_structural_invariants(name, ir, spans);
         }
     }
 }
