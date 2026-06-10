@@ -155,3 +155,35 @@ fn test_merkle_tree_field_initial_state() {
 }
 
 use std::ops::Deref;
+
+#[nocturne::contract]
+mod prepopulated {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct PrepopState {
+        pub allowed: Set<Uint<64>>,
+    }
+
+    impl PrepopState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            let mut allowed = Set::empty();
+            allowed.insert(Uint::<64>::new(1));
+            Self { allowed }
+        }
+
+        #[nocturne(circuit)]
+        pub fn noop(&mut self) {}
+    }
+}
+
+/// Constructor-populated Map/Set/Array fields are not yet encoded into
+/// the deploy StateValue — `initial_state` must fail LOUDLY instead of
+/// silently deploying an empty container that desyncs from the
+/// constructor's view of the state.
+#[nocturne::test]
+#[should_panic(expected = "must start empty")]
+fn constructor_populated_set_panics_at_deploy() {
+    let _ = prepopulated::deploy::initial_state();
+}

@@ -71,9 +71,24 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                         }
                     }
                 }
-                LedgerTypeKind::Map | LedgerTypeKind::Set => quote! {
-                    fields.push(StateValue::Map(Default::default()));
-                },
+                // Map/Set deploy as an EMPTY container regardless of what
+                // the constructor inserted — statically encoding
+                // constructor-populated entries into the StateValue tree
+                // isn't implemented yet. Until it is, fail LOUDLY at
+                // deploy-state construction instead of silently dropping
+                // the entries (which would desync on-chain state from the
+                // constructor's view). See `memories/scope-blockers.md`.
+                LedgerTypeKind::Map | LedgerTypeKind::Set => {
+                    let msg = format!(
+                        "nocturne: constructor-populated Map/Set fields are not yet \
+                         encoded into deploy state; field `{}` must start empty",
+                        field.name
+                    );
+                    quote! {
+                        assert!(__state.#field_ident.is_empty(), #msg);
+                        fields.push(StateValue::Map(Default::default()));
+                    }
+                }
                 LedgerTypeKind::MerkleTree => {
                     // The on-chain shape for `MerkleTree<H, T>` is a 2-element
                     // StateValue::Array of `[BoundedMerkleTree<()>, Cell<u64>(0)]`
@@ -97,9 +112,18 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                         }
                     }
                 }
-                LedgerTypeKind::Array => quote! {
-                    fields.push(StateValue::Array(Default::default()));
-                },
+                // Same loud guard as Map/Set: Array fields deploy empty.
+                LedgerTypeKind::Array => {
+                    let msg = format!(
+                        "nocturne: constructor-populated Array fields are not yet \
+                         encoded into deploy state; field `{}` must start empty",
+                        field.name
+                    );
+                    quote! {
+                        assert!(__state.#field_ident.is_empty(), #msg);
+                        fields.push(StateValue::Array(Default::default()));
+                    }
+                }
                 LedgerTypeKind::Unknown(_) => quote! {
                     fields.push(StateValue::Null);
                 },

@@ -99,4 +99,61 @@ mod tests {
             "in-range literals must not generate a compile_error, got: {tokens}"
         );
     }
+
+    /// Task 3.1: the generated transcript fn's parameter is ALWAYS named
+    /// `witnesses`, regardless of the user's circuit param name — every
+    /// helper emits `witnesses.<field>` accessors.
+    #[test]
+    fn witnesses_param_name_is_normalized() {
+        let tokens = transcript_tokens(quote::quote! {
+            mod renamed_param {
+                #[nocturne(ledger)]
+                pub struct State { value: Cell<Uint<64>> }
+                #[nocturne(witnesses)]
+                pub struct W { pub v: Uint<64> }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { value: Cell::new(Uint::<64>::from(0u64)) } }
+                    #[nocturne(circuit)]
+                    pub fn store(&mut self, my_witnesses: &W) {
+                        self.value.set(my_witnesses.v);
+                    }
+                }
+            }
+        });
+        assert!(
+            tokens.contains("witnesses : & W"),
+            "generated fn must take a param named `witnesses`, got: {tokens}"
+        );
+        assert!(
+            !tokens.contains("my_witnesses"),
+            "the user's param name must not leak into the generated builder, got: {tokens}"
+        );
+    }
+
+    /// Task 3.6: generated locals use reserved `__nocturne_*` idents so
+    /// user `let` bindings can't shadow them.
+    #[test]
+    fn generated_internals_use_reserved_idents() {
+        let tokens = transcript_tokens(quote::quote! {
+            mod internals {
+                #[nocturne(ledger)]
+                pub struct State { count: Counter }
+                impl State {
+                    #[nocturne(constructor)]
+                    pub fn new() -> Self { Self { count: Counter::zero() } }
+                    #[nocturne(circuit)]
+                    pub fn bump(&mut self) { self.count.increment(); }
+                }
+            }
+        });
+        assert!(
+            tokens.contains("__nocturne_ops"),
+            "generated op vec must be named __nocturne_ops, got: {tokens}"
+        );
+        assert!(
+            tokens.contains("__nocturne_private_transcript"),
+            "generated private transcript vec must use the reserved ident, got: {tokens}"
+        );
+    }
 }

@@ -145,7 +145,7 @@ fn generate_circuit_transcript_fn(
 
     let needs_state = circuit_needs_state(&circuit.body);
     let state_param = if needs_state {
-        quote! { state: &#ledger_name, }
+        quote! { __nocturne_state: &#ledger_name, }
     } else {
         quote! {}
     };
@@ -163,39 +163,51 @@ fn generate_circuit_transcript_fn(
         quote! {
             #[doc = #doc]
             pub fn #fn_name(#state_param witnesses: #witnesses_ty) -> TranscriptResult {
-                let mut ops: Vec<VmOp> = Vec::new();
-                let mut private_transcript: Vec<Fr> = Vec::new();
-                let mut private_transcript_outputs: Vec<AlignedValue> = Vec::new();
+                let mut __nocturne_ops: Vec<VmOp> = Vec::new();
+                let mut __nocturne_private_transcript: Vec<Fr> = Vec::new();
+                let mut __nocturne_private_transcript_outputs: Vec<AlignedValue> = Vec::new();
 
                 #(#body_stmts)*
 
-                TranscriptResult { ops, private_transcript, private_transcript_outputs }
+                TranscriptResult {
+                    ops: __nocturne_ops,
+                    private_transcript: __nocturne_private_transcript,
+                    private_transcript_outputs: __nocturne_private_transcript_outputs,
+                }
             }
         }
     } else if needs_state {
         quote! {
             #[doc = #doc]
-            pub fn #fn_name(state: &#ledger_name) -> TranscriptResult {
-                let mut ops: Vec<VmOp> = Vec::new();
-                let mut private_transcript: Vec<Fr> = Vec::new();
-                let mut private_transcript_outputs: Vec<AlignedValue> = Vec::new();
+            pub fn #fn_name(__nocturne_state: &#ledger_name) -> TranscriptResult {
+                let mut __nocturne_ops: Vec<VmOp> = Vec::new();
+                let mut __nocturne_private_transcript: Vec<Fr> = Vec::new();
+                let mut __nocturne_private_transcript_outputs: Vec<AlignedValue> = Vec::new();
 
                 #(#body_stmts)*
 
-                TranscriptResult { ops, private_transcript, private_transcript_outputs }
+                TranscriptResult {
+                    ops: __nocturne_ops,
+                    private_transcript: __nocturne_private_transcript,
+                    private_transcript_outputs: __nocturne_private_transcript_outputs,
+                }
             }
         }
     } else {
         quote! {
             #[doc = #doc]
             pub fn #fn_name() -> TranscriptResult {
-                let mut ops: Vec<VmOp> = Vec::new();
-                let mut private_transcript: Vec<Fr> = Vec::new();
-                let mut private_transcript_outputs: Vec<AlignedValue> = Vec::new();
+                let mut __nocturne_ops: Vec<VmOp> = Vec::new();
+                let mut __nocturne_private_transcript: Vec<Fr> = Vec::new();
+                let mut __nocturne_private_transcript_outputs: Vec<AlignedValue> = Vec::new();
 
                 #(#body_stmts)*
 
-                TranscriptResult { ops, private_transcript, private_transcript_outputs }
+                TranscriptResult {
+                    ops: __nocturne_ops,
+                    private_transcript: __nocturne_private_transcript,
+                    private_transcript_outputs: __nocturne_private_transcript_outputs,
+                }
             }
         }
     }
@@ -527,8 +539,8 @@ fn private_value_push(
             {
                 use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
                 let __av = AlignedValue::from(#leaf_comps);
-                __av.value_only_field_repr(&mut private_transcript);
-                private_transcript_outputs.push(__av);
+                __av.value_only_field_repr(&mut __nocturne_private_transcript);
+                __nocturne_private_transcript_outputs.push(__av);
                 for __entry in (#accessor).path.iter() {
                     // Full-Fr sibling: reconstruct from the digest's
                     // 32-byte LE representation; truncating through
@@ -537,11 +549,11 @@ fn private_value_push(
                         Fr::from_le_bytes(&__entry.sibling.as_le_bytes())
                             .expect("MerkleTreeDigest bytes round-trip through Fr"),
                     );
-                    __sib.value_only_field_repr(&mut private_transcript);
-                    private_transcript_outputs.push(__sib);
+                    __sib.value_only_field_repr(&mut __nocturne_private_transcript);
+                    __nocturne_private_transcript_outputs.push(__sib);
                     let __gl = AlignedValue::from(__entry.goes_left.value());
-                    __gl.value_only_field_repr(&mut private_transcript);
-                    private_transcript_outputs.push(__gl);
+                    __gl.value_only_field_repr(&mut __nocturne_private_transcript);
+                    __nocturne_private_transcript_outputs.push(__gl);
                 }
             }
         };
@@ -551,8 +563,8 @@ fn private_value_push(
         {
             use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
             let __av = AlignedValue::from(#comps);
-            __av.value_only_field_repr(&mut private_transcript);
-            private_transcript_outputs.push(__av);
+            __av.value_only_field_repr(&mut __nocturne_private_transcript);
+            __nocturne_private_transcript_outputs.push(__av);
         }
     }
 }
@@ -611,13 +623,13 @@ fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         }
                     };
                     quote! {
-                        ops.push(Op::Idx {
+                        __nocturne_ops.push(Op::Idx {
                             cached: false,
                             push_path: true,
                             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
                         });
-                        ops.push(Op::Addi { immediate: #n });
-                        ops.push(Op::Ins { cached: true, n: 1 });
+                        __nocturne_ops.push(Op::Addi { immediate: #n });
+                        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
                     }
                 }
                 "get" | "value" | "__direct_access" => {
@@ -628,11 +640,11 @@ fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                     let field_ident = format_ident!("{}", field_name);
                     let (accessor, result_ty) = match field_ty {
                         Some(t) if is_counter_type(t) => (
-                            quote! { state.#field_ident.value() },
+                            quote! { __nocturne_state.#field_ident.value() },
                             Some(syn::parse_quote!(u64)),
                         ),
                         Some(t) if extract_cell_inner_type(t).is_some() => (
-                            quote! { state.#field_ident.get() },
+                            quote! { __nocturne_state.#field_ident.get() },
                             extract_cell_inner_type(t),
                         ),
                         // Unknown field type — emit a compile_error so the
@@ -730,13 +742,13 @@ fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         None => quote! { #accessor },
                     };
                     quote! {
-                        ops.push(Op::Dup { n: 0 });
-                        ops.push(Op::Idx {
+                        __nocturne_ops.push(Op::Dup { n: 0 });
+                        __nocturne_ops.push(Op::Idx {
                             cached: false,
                             push_path: false,
                             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
                         });
-                        ops.push(Op::Popeq {
+                        __nocturne_ops.push(Op::Popeq {
                             cached: true,
                             result: AlignedValue::from(#aligned_arg),
                         });
@@ -935,16 +947,16 @@ fn let_binding_value_for_ledger_read(
     let field_ty = ctx.field_types.get(field_pos);
     let f_ident = format_ident!("{}", field.to_string());
     match method.to_string().as_str() {
-        "get" => Some(quote! { state.#f_ident.get() }),
+        "get" => Some(quote! { __nocturne_state.#f_ident.get() }),
         // `__direct_access` is the parser's marker for a bare
         // `self.<field>` read — its accessor depends on the field kind:
         // Cell exposes `.get()`, Counter exposes `.value()`. Routing
         // both through `.value()` broke Cell fields (no such method).
         "value" | "__direct_access" => {
             if field_ty.map(|t| extract_cell_inner_type(t).is_some()) == Some(true) {
-                Some(quote! { state.#f_ident.get() })
+                Some(quote! { __nocturne_state.#f_ident.get() })
             } else {
-                Some(quote! { state.#f_ident.value() })
+                Some(quote! { __nocturne_state.#f_ident.value() })
             }
         }
         // `let v = self.map.lookup(&k);` — the canonical
@@ -953,7 +965,7 @@ fn let_binding_value_for_ledger_read(
         // bound name must carry the real value, not `()`.
         "lookup" => {
             let key = args.first().map(arg_to_runtime_raw_expr)?;
-            Some(quote! { state.#f_ident.lookup(&#key) })
+            Some(quote! { __nocturne_state.#f_ident.lookup(&#key) })
         }
         _ => None,
     }
@@ -1290,6 +1302,47 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
     }
 }
 
+/// True when an argument expression's value is a compile-time literal
+/// (possibly behind `disclose(...)`, `&x`, or a transparent wrapper).
+/// Literal keys have no double-evaluation hazard and their raw runtime
+/// form is a bare primitive (no `.value()` accessor), so they keep the
+/// expression-based aligned path — which also carries the literal-range
+/// compile check.
+fn is_literal_arg(expr: &ExprIR) -> bool {
+    match expr {
+        ExprIR::Literal { .. } => true,
+        ExprIR::Disclose { value, .. } => is_literal_arg(value),
+        ExprIR::Reference { expr: inner, .. } => is_literal_arg(inner),
+        ExprIR::MethodCall {
+            receiver, method, ..
+        } if is_transparent_wrapper(&method.to_string()) => is_literal_arg(receiver),
+        _ => false,
+    }
+}
+
+/// The aligned-value expression for a keyed-container key, derived from
+/// the ALREADY-BOUND `__key` binding when possible so the key expression
+/// runs exactly once (a `WitnessCall` key used to run twice: once for
+/// the runtime `contains`/`lookup` call and once inside the op's
+/// AlignedValue). Literal keys (and keys whose K type is unknown) keep
+/// the expression-based path.
+fn bound_key_aligned_expr(
+    args: &[ExprIR],
+    k_ty: Option<&syn::Type>,
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
+    match (args.first(), k_ty) {
+        (Some(a), Some(kt)) if !is_literal_arg(a) => accessor_aligned_value_expr(
+            Some(kt),
+            &quote! { __key.clone() },
+            ctx.user_enums,
+            ctx.user_structs,
+        ),
+        (Some(a), _) => aligned_value_arg_expr(a, k_ty, ctx),
+        (None, _) => quote! { () },
+    }
+}
+
 /// Generate a block expression that emits the on-chain Map::contains ops
 /// (Dup + Idx + Push + Member + Popeq) and evaluates to the contains-result
 /// bool. The block has side effects on `ops` (and reads `state`/`witnesses`),
@@ -1314,27 +1367,24 @@ fn generate_map_contains_block(
     // K-type for the AlignedValue alignment: Map<K, V> → K, Set<T> → T.
     // Both expose `.contains(&K)` so the runtime method name is shared.
     let k_ty = field_ty.and_then(extract_field_key_type);
-    let key_aligned = args
-        .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
-        .unwrap_or_else(|| quote! { () });
+    let key_aligned = bound_key_aligned_expr(args, k_ty.as_ref(), ctx);
 
     quote! {
         {
             let __key = #raw_key;
-            ops.push(Op::Dup { n: 0 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 0 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Push {
+            __nocturne_ops.push(Op::Push {
                 storage: false,
                 value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
             });
-            ops.push(Op::Member);
-            let __result: bool = state.#field_ident.contains(&__key);
-            ops.push(Op::Popeq {
+            __nocturne_ops.push(Op::Member);
+            let __result: bool = __nocturne_state.#field_ident.contains(&__key);
+            __nocturne_ops.push(Op::Popeq {
                 cached: true,
                 result: AlignedValue::from(__result),
             });
@@ -1368,15 +1418,15 @@ fn generate_cell_set(
         .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
     quote! {
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#field_idx))),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: true,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#value_aligned))),
         });
-        ops.push(Op::Ins { cached: false, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
     }
 }
 
@@ -1808,21 +1858,21 @@ fn generate_map_insert(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: true,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#val_aligned))),
         });
-        ops.push(Op::Ins { cached: false, n: 1 });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
@@ -1852,35 +1902,35 @@ fn generate_map_lookup(
 
     // The second `Idx`'s key path needs the same Bytes-aware AlignedValue
     // build as `Push` does — multi-Fr K must use `*<raw>.as_bytes()`.
-    let key_aligned = args
-        .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
-        .unwrap_or_else(|| quote! { () });
+    // Derived from the bound `__key` so the key expression runs once.
+    let key_aligned = bound_key_aligned_expr(args, k_ty.as_ref(), ctx);
 
     // Popeq result: V comes back from the runtime (a wrapper like Boolean
     // / Uint<N> / Bytes<N>). Unwrap to the form AlignedValue::from accepts.
     let val_expr = match kv.as_ref().map(|(_, v)| v) {
-        Some(v_ty) => {
-            unwrap_to_aligned_primitive(quote! { state.#field_ident.lookup(&__key) }, v_ty)
-        }
-        None => quote! { state.#field_ident.lookup(&__key) },
+        Some(v_ty) => unwrap_to_aligned_primitive(
+            quote! { __nocturne_state.#field_ident.lookup(&__key) },
+            v_ty,
+            ctx,
+        ),
+        None => quote! { __nocturne_state.#field_ident.lookup(&__key) },
     };
 
     quote! {
         {
             let __key = #raw_key;
-            ops.push(Op::Dup { n: 0 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 0 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#key_aligned))].into_iter().collect(),
             });
-            ops.push(Op::Popeq {
+            __nocturne_ops.push(Op::Popeq {
                 cached: false,
                 result: AlignedValue::from(#val_expr),
             });
@@ -1910,25 +1960,32 @@ fn generate_map_remove(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Rem { cached: false });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Rem { cached: false });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
 /// Wrap `expr` to produce a value `AlignedValue::from(_)` can accept for
 /// type `ty`. Handles wrapper types (`Boolean` → `.value()`, `Uint<N>` →
-/// `.value() as u<N>`) and raw primitives (identity cast). Returns the
-/// raw expression if the type isn't recognized.
-fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream {
+/// `.value() as u<N>`, `Field`/`MerkleTreeDigest` → full-Fr lift) and raw
+/// primitives (identity cast). Composite types (tuples, user structs,
+/// enums, Option) get a pointed `compile_error!` — their multi-Fr Popeq
+/// lowering isn't wired through this path yet, and silently passing the
+/// raw expression produced an unreadable `From` trait error at best.
+fn unwrap_to_aligned_primitive(
+    expr: TokenStream,
+    ty: &syn::Type,
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     if ty_str == "Boolean" {
         return quote! { (#expr).value() };
@@ -1938,6 +1995,19 @@ fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream
     if ty_str.starts_with("Bytes<") {
         return quote! { *(#expr).as_bytes() };
     }
+    // Field: lift to Fr via the value (mirrors the get-side read arm) so
+    // `AlignedValue::from(Fr)` picks the Field alignment atom.
+    if ty_str == "Field" {
+        return quote! { Fr::from((#expr).value()) };
+    }
+    // MerkleTreeDigest: reconstruct the full 254-bit Fr from the 32-byte
+    // LE representation — `.field().value()` would truncate to u128.
+    if ty_str == "MerkleTreeDigest" {
+        return quote! {
+            Fr::from_le_bytes(&(#expr).as_le_bytes())
+                .expect("MerkleTreeDigest bytes round-trip through Fr")
+        };
+    }
     if ty_str.starts_with("Uint<")
         && let Some(c) = primitive_cast_for_type(ty)
     {
@@ -1945,6 +2015,17 @@ fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream
     }
     if let Some(c) = primitive_cast_for_type(ty) {
         return quote! { (#expr) #c };
+    }
+    if matches!(ty, syn::Type::Tuple(_))
+        || user_struct_fields(ty, ctx.user_structs).is_some()
+        || is_enum_like(ty, ctx.user_enums)
+    {
+        let msg = format!(
+            "nocturne: `Map::lookup` with composite value type `{ty_str}` is not \
+             supported yet — store the components in separate maps or use a \
+             `Bytes<N>` encoding"
+        );
+        return quote! { { compile_error!(#msg); 0u8 } };
     }
     expr
 }
@@ -2104,21 +2185,21 @@ fn generate_set_insert(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: true,
             value: StateValue::Null,
         });
-        ops.push(Op::Ins { cached: false, n: 1 });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
@@ -2137,17 +2218,17 @@ fn generate_set_remove(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Rem { cached: false });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Rem { cached: false });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
@@ -2182,25 +2263,25 @@ fn generate_merkle_tree_check_root(
             let __digest = #raw_digest;
             let __digest_fr = Fr::from_le_bytes(&(&__digest).as_le_bytes())
                 .expect("MerkleTreeDigest bytes round-trip through Fr");
-            ops.push(Op::Dup { n: 0 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 0 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(0u8))].into_iter().collect(),
             });
-            ops.push(Op::Root);
-            ops.push(Op::Push {
+            __nocturne_ops.push(Op::Root);
+            __nocturne_ops.push(Op::Push {
                 storage: false,
                 value: StateValue::Cell(Sp::new(AlignedValue::from(__digest_fr))),
             });
-            ops.push(Op::Eq);
-            let __result: bool = state.#field_ident.check_root(&__digest);
-            ops.push(Op::Popeq {
+            __nocturne_ops.push(Op::Eq);
+            let __result: bool = __nocturne_state.#field_ident.check_root(&__digest);
+            __nocturne_ops.push(Op::Popeq {
                 cached: true,
                 result: AlignedValue::from(__result),
             });
@@ -2237,35 +2318,35 @@ fn generate_merkle_tree_insert(field_idx: u8, args: &[ExprIR]) -> TokenStream {
             let __leaf_hash: [u8; 32] = nocturne::runtime::transient_crypto::merkle_tree::leaf_hash(
                 __leaf.as_bytes().as_slice()
             ).0;
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: true,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: true,
                 path: vec![Key::Value(AlignedValue::from(0u8))].into_iter().collect(),
             });
-            ops.push(Op::Dup { n: 2 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 2 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(1u8))].into_iter().collect(),
             });
-            ops.push(Op::Push {
+            __nocturne_ops.push(Op::Push {
                 storage: true,
                 value: StateValue::Cell(Sp::new(AlignedValue::from(__leaf_hash))),
             });
-            ops.push(Op::Ins { cached: false, n: 1 });
-            ops.push(Op::Ins { cached: true, n: 1 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
+            __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: true,
                 path: vec![Key::Value(AlignedValue::from(1u8))].into_iter().collect(),
             });
-            ops.push(Op::Addi { immediate: 1 });
-            ops.push(Op::Ins { cached: true, n: 2 });
+            __nocturne_ops.push(Op::Addi { immediate: 1 });
+            __nocturne_ops.push(Op::Ins { cached: true, n: 2 });
         }
     }
 }
@@ -2631,20 +2712,20 @@ fn generate_runtime_cond(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream 
                 {
                     let field_ident = format_ident!("{}", field_name);
                     let result_expr = if s == "Boolean" {
-                        quote! { state.#field_ident.get().value() }
+                        quote! { __nocturne_state.#field_ident.get().value() }
                     } else {
-                        quote! { state.#field_ident.get() }
+                        quote! { __nocturne_state.#field_ident.get() }
                     };
                     return quote! {
                         {
-                            ops.push(Op::Dup { n: 0 });
-                            ops.push(Op::Idx {
+                            __nocturne_ops.push(Op::Dup { n: 0 });
+                            __nocturne_ops.push(Op::Idx {
                                 cached: false,
                                 push_path: false,
                                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
                             });
                             let __result: bool = #result_expr;
-                            ops.push(Op::Popeq {
+                            __nocturne_ops.push(Op::Popeq {
                                 cached: true,
                                 result: AlignedValue::from(__result),
                             });
