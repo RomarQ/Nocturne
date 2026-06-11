@@ -216,7 +216,7 @@ cargo nocturne keygen        →  prover + verifier keys
 
 **Artifacts in the wrong place** — `cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace (a member crate's directory included). If you're outside a cargo project entirely, it falls back to `CARGO_TARGET_DIR` and then `./target` relative to the current directory.
 
-**`Bytes::<32>::from_slice(...)` panics at deploy time** — `from_slice` zero-pads, so it never panics. If you're seeing a panic, the constructor body itself is panicking; check that the user types referenced in initializers (e.g. enum variants in `Cell::new(Status::Open)`) are imported into scope.
+**`Bytes::<32>::from_slice(...)` panics at deploy time** — `from_slice` debug-asserts that the slice is exactly `N` bytes, so a wrong-length slice panics in debug builds (release builds keep the historical truncate/zero-pad leniency). Pass an exact-length slice, pad explicitly, or use `Bytes::try_from_slice` when the length isn't statically known. If the length is right and you still see a panic, the constructor body itself is panicking; check that the user types referenced in initializers (e.g. enum variants in `Cell::new(Status::Open)`) are imported into scope.
 
 **ZKIR file is missing for a circuit you wrote** — Check that the method has `#[nocturne(circuit)]` (not `#[nocturne(query)]` — queries don't emit ZKIR, they're plain off-chain Rust).
 

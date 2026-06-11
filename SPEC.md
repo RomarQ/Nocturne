@@ -305,6 +305,8 @@ Index 3: Add { a: 0, b: 2 }        // memory[3] = input_0 + 1
 
 ### 5.5 Transcript Construction (Runtime)
 
+Witness methods (parametric witnesses like `witnesses.derive(x)`) must be deterministic: the generated builder may invoke a method more than once for the same call site (once for the private transcript entry, once where the value feeds an op), and a method returning different values per invocation desyncs the private transcript from the ops and fails at prove time.
+
 At call time, the generated Rust runtime code:
 
 1. Collects witness values from the caller.
