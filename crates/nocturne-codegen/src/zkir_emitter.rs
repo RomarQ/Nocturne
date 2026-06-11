@@ -41,6 +41,15 @@ use std::sync::Arc;
 
 type Index = u32;
 
+/// ZKIR format version `(major, minor)` stamped into every emitted
+/// `.zkir` artifact. `IrSource::load()` requires a `version` field but
+/// `IrSource` itself doesn't serialize one, so the writer (the
+/// `#[nocturne::contract]` macro) splices this in. Lives here, next to
+/// the `IrSource` construction, because it must track the opcode set
+/// this emitter targets: bump it when the emitter moves to a new
+/// upstream ZKIR revision, not independently.
+pub const ZKIR_VERSION: (u64, u64) = (2, 0);
+
 /// Result of ZKIR emission for a single circuit.
 pub struct ZkirOutput {
     pub circuit_name: String,

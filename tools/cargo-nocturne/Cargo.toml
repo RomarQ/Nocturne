@@ -1,6 +1,6 @@
 [package]
 name = "cargo-nocturne"
-description = "Cargo subcommand for building, testing, and deploying nocturne contracts."
+description = "Cargo subcommand for building and testing nocturne contracts."
 edition.workspace = true
 license.workspace = true
 version.workspace = true

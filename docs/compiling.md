@@ -214,10 +214,10 @@ cargo nocturne keygen        →  prover + verifier keys
 
 **"No contract artifacts found"** — The macro didn't fire. Run `cargo clean -p <crate>` and rebuild.
 
-**Artifacts in the wrong place** — `cargo nocturne` looks for `./target/nocturne/` relative to the current directory. Run from the workspace root, not from inside an example crate's directory.
+**Artifacts in the wrong place** — `cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace (a member crate's directory included). If you're outside a cargo project entirely, it falls back to `CARGO_TARGET_DIR` and then `./target` relative to the current directory.
 
 **`Bytes::<32>::from_slice(...)` panics at deploy time** — `from_slice` zero-pads, so it never panics. If you're seeing a panic, the constructor body itself is panicking; check that the user types referenced in initializers (e.g. enum variants in `Cell::new(Status::Open)`) are imported into scope.
 
 **ZKIR file is missing for a circuit you wrote** — Check that the method has `#[nocturne(circuit)]` (not `#[nocturne(query)]` — queries don't emit ZKIR, they're plain off-chain Rust).
 
-**`cargo nocturne` reports build success but no artifact path** — The macro write only fires when `OUT_DIR` is reachable from the workspace target. If you set a custom `CARGO_TARGET_DIR`, the artifacts land there; the tool walks both locations.
+**`cargo nocturne` reports build success but no artifact path** — The macro only re-runs when the contract crate actually recompiles; a fully cached build leaves a cleaned `target/nocturne/` empty. Run `cargo clean -p <crate>` to force a re-expansion. If you set a custom `CARGO_TARGET_DIR`, both the macro and the tool resolve it, so artifacts and lookup stay in sync.

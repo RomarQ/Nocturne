@@ -109,7 +109,11 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Sets up a simulated Midnight environment for unit testing.
+/// Marks a contract test function.
+///
+/// Currently equivalent to `#[test]` — it adds no behavior of its own.
+/// Reserved for future environment setup (e.g. wiring up a simulated
+/// Midnight ledger before the test body runs).
 #[proc_macro_attribute]
 pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item: proc_macro2::TokenStream = item.into();
@@ -181,26 +185,37 @@ fn is_midnight_attr(attr: &syn::Attribute) -> bool {
 /// each other's artifacts during parallel compilation.
 fn find_artifact_dir(contract_name: &str) -> std::path::PathBuf {
     // Try CARGO_TARGET_DIR, then OUT_DIR, then default to ./target.
+    // The bare-"target" fallback is relative, so it resolves against
+    // rustc's CWD — under cargo that's the workspace root, which is
+    // where ./target lives.
     let target = std::env::var("CARGO_TARGET_DIR")
-        .or_else(|_| {
-            std::env::var("OUT_DIR").map(|d| {
-                // OUT_DIR is like target/debug/build/<crate>/out -- walk up to target/
-                let p = std::path::PathBuf::from(d);
-                p.ancestors()
-                    .nth(4)
-                    .unwrap_or(&p)
-                    .to_path_buf()
-                    .to_string_lossy()
-                    .into_owned()
-            })
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("OUT_DIR")
+                .ok()
+                .and_then(|d| workspace_target_from_out_dir(std::path::Path::new(&d)))
         })
-        .unwrap_or_else(|_| "target".to_string());
+        .unwrap_or_else(|| std::path::PathBuf::from("target"));
     let crate_name =
         std::env::var("CARGO_CRATE_NAME").unwrap_or_else(|_| "unknown_crate".to_string());
-    std::path::PathBuf::from(target)
-        .join("nocturne")
-        .join(crate_name)
-        .join(contract_name)
+    target.join("nocturne").join(crate_name).join(contract_name)
+}
+
+/// Ascend from `OUT_DIR` (`<target>/<profile>/build/<crate>-<hash>/out`)
+/// to the enclosing cargo target directory. Structural, not a fixed
+/// `nth(4)` hop: a renamed target dir (`CARGO_TARGET_DIR=mytarget`) or
+/// a custom layout still resolves, because cargo drops a `CACHEDIR.TAG`
+/// marker at the target dir root. The name check is the fast path for
+/// the conventional `target/` name; the marker check covers the rest.
+fn workspace_target_from_out_dir(out_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    out_dir
+        .ancestors()
+        .find(|a| {
+            a.file_name().map(|n| n == "target").unwrap_or(false)
+                || a.join("CACHEDIR.TAG").is_file()
+        })
+        .map(std::path::Path::to_path_buf)
 }
 
 fn write_artifacts(
@@ -219,9 +234,10 @@ fn write_artifacts(
     for circuit in &artifacts.zkir.circuits {
         let mut value = serde_json::to_value(&circuit.ir_source).map_err(std::io::Error::other)?;
         if let serde_json::Value::Object(ref mut map) = value {
+            let (major, minor) = nocturne_codegen::zkir_emitter::ZKIR_VERSION;
             map.insert(
                 "version".to_string(),
-                serde_json::json!({ "major": 2, "minor": 0 }),
+                serde_json::json!({ "major": major, "minor": minor }),
             );
         }
         let json = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
@@ -277,4 +293,49 @@ fn write_if_changed(path: &std::path::Path, content: &[u8]) -> std::io::Result<(
     let tmp = path.with_file_name(format!("{file_name}.tmp{}", std::process::id()));
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workspace_target_from_out_dir;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn out_dir_walk_finds_conventional_target_by_name() {
+        let out = Path::new("/ws/target/debug/build/my-crate-abc123/out");
+        assert_eq!(
+            workspace_target_from_out_dir(out),
+            Some(PathBuf::from("/ws/target"))
+        );
+    }
+
+    #[test]
+    fn out_dir_walk_finds_renamed_target_via_cachedir_tag() {
+        // A renamed target dir has no "target" path component; the walk
+        // must fall back to cargo's CACHEDIR.TAG marker.
+        let root = std::env::temp_dir().join(format!(
+            "nocturne-macro-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let target = root.join("mytarget");
+        let out = target.join("debug/build/my-crate-abc123/out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
+
+        assert_eq!(workspace_target_from_out_dir(&out), Some(target));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn out_dir_walk_returns_none_when_unrecognizable() {
+        assert_eq!(
+            workspace_target_from_out_dir(Path::new("/nonexistent/a/b/c")),
+            None
+        );
+    }
 }

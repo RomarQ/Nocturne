@@ -5,20 +5,20 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     // When invoked as `cargo nocturne`, cargo passes "nocturne" as argv[1].
-    let subcommand = if args.get(1).map(|s| s.as_str()) == Some("nocturne") {
-        args.get(2).map(|s| s.as_str())
+    let subcommand_idx = if args.get(1).map(|s| s.as_str()) == Some("nocturne") {
+        2
     } else {
-        args.get(1).map(|s| s.as_str())
+        1
     };
+    let subcommand = args.get(subcommand_idx).map(|s| s.as_str());
+    // Everything after the subcommand is forwarded to the underlying
+    // cargo invocation (`cargo nocturne build --release -p foo`).
+    let extra_args = args.get(subcommand_idx + 1..).unwrap_or_default();
 
     match subcommand {
-        Some("build") => cmd_build(),
+        Some("build") => cmd_build(extra_args),
         Some("keygen") => cmd_keygen(),
-        Some("test") => cmd_test(),
-        Some("deploy") => {
-            eprintln!("cargo-nocturne: deploy not yet implemented");
-            std::process::exit(1);
-        }
+        Some("test") => cmd_test(extra_args),
         Some(other) => {
             eprintln!("cargo-nocturne: unknown subcommand '{other}'");
             std::process::exit(1);
@@ -30,24 +30,27 @@ fn main() {
 fn print_usage() {
     println!("cargo-nocturne: Midnight smart contract build tool");
     println!();
-    println!("Usage: cargo nocturne <command>");
+    println!("Usage: cargo nocturne <command> [cargo args...]");
     println!();
     println!("Commands:");
     println!("  build    Compile contract, emit ZKIR + contract-info.json");
     println!("  keygen   Generate prover/verifier keys from ZKIR files");
     println!("  test     Run contract tests");
-    println!("  deploy   Deploy contract to a Midnight node");
+    println!();
+    println!("Arguments after the command are forwarded to the underlying");
+    println!("`cargo build` / `cargo test` invocation.");
 }
 
 /// Run `cargo build`, list emitted artifacts, then keygen any circuit
 /// whose `.prover`/`.verifier` are missing or older than its `.zkir`.
 /// Existing keys are left untouched — fast iteration doesn't re-pay
 /// the keygen cost on every build.
-fn cmd_build() {
+fn cmd_build(extra_args: &[String]) {
     println!("Building contract...");
 
     let status = Command::new("cargo")
         .arg("build")
+        .args(extra_args)
         .status()
         .expect("failed to run cargo build");
 
@@ -116,7 +119,9 @@ fn cmd_build() {
         "\nGenerating keys for {} circuit(s) with missing/stale prover/verifier files...",
         needs_keygen.len()
     );
-    keygen_paths(&needs_keygen);
+    if keygen_paths(&needs_keygen) > 0 {
+        std::process::exit(1);
+    }
 }
 
 /// True if either the prover or verifier file is missing, or any of
@@ -188,7 +193,9 @@ fn cmd_keygen() {
         zkir_files.len()
     );
 
-    keygen_paths(&zkir_files);
+    if keygen_paths(&zkir_files) > 0 {
+        std::process::exit(1);
+    }
 }
 
 /// Per-zkir keygen loop shared between `cmd_build` and `cmd_keygen`.
@@ -196,7 +203,11 @@ fn cmd_keygen() {
 /// upstream panic (e.g. midnight-circuits constraint failures on a
 /// pathological zkir) doesn't abort the run — the user gets the
 /// keys that did succeed and a clear error for the ones that didn't.
-fn keygen_paths(zkir_files: &[PathBuf]) {
+///
+/// Returns the number of circuits that failed; callers exit nonzero
+/// when any did, so CI and scripts can't mistake a partial keygen for
+/// success.
+fn keygen_paths(zkir_files: &[PathBuf]) -> usize {
     use std::panic::AssertUnwindSafe;
     let mut succeeded = 0usize;
     let mut failed = 0usize;
@@ -234,6 +245,7 @@ fn keygen_paths(zkir_files: &[PathBuf]) {
              Failed circuits won't have prover/verifier files."
         );
     }
+    failed
 }
 
 /// Extract a readable string from a `catch_unwind` panic payload.
@@ -247,10 +259,11 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     "<non-string panic payload>".to_string()
 }
 
-/// Run `cargo test`.
-fn cmd_test() {
+/// Run `cargo test`, forwarding any trailing CLI args.
+fn cmd_test(extra_args: &[String]) {
     let status = Command::new("cargo")
         .arg("test")
+        .args(extra_args)
         .status()
         .expect("failed to run cargo test");
 
@@ -304,11 +317,37 @@ fn load_and_keygen(path: &Path) -> Result<(u8, usize), Box<dyn std::error::Error
     Ok((k, rows))
 }
 
+/// Resolve the cargo target directory. `cargo metadata` is the source
+/// of truth — it already accounts for `CARGO_TARGET_DIR`, workspace
+/// roots, and `.cargo/config.toml` overrides, and it works from any
+/// directory inside the workspace (no more "must run from the
+/// workspace root" footgun). The env-var/`./target` fallbacks only
+/// kick in when `cargo metadata` itself fails (e.g. not in a cargo
+/// project at all).
 fn find_target_dir() -> PathBuf {
-    // Check CARGO_TARGET_DIR, then default to ./target
+    if let Some(dir) = target_dir_from_cargo_metadata() {
+        return dir;
+    }
     std::env::var("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("target"))
+}
+
+fn target_dir_from_cargo_metadata() -> Option<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_target_dir_from_metadata(&output.stdout)
+}
+
+/// Pull `target_directory` out of `cargo metadata` JSON output.
+fn parse_target_dir_from_metadata(json: &[u8]) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_slice(json).ok()?;
+    value.get("target_directory")?.as_str().map(PathBuf::from)
 }
 
 fn find_zkir_files(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -468,6 +507,25 @@ mod tests {
         // No keys/ dir at all — must not panic or create one.
         prune_orphan_keys(&contract_dir);
         assert!(!contract_dir.join("keys").exists());
+    }
+
+    #[test]
+    fn parse_target_dir_from_metadata_happy_path() {
+        let json = br#"{"packages":[],"target_directory":"/ws/target","version":1}"#;
+        assert_eq!(
+            parse_target_dir_from_metadata(json),
+            Some(PathBuf::from("/ws/target"))
+        );
+    }
+
+    #[test]
+    fn parse_target_dir_from_metadata_rejects_garbage() {
+        assert_eq!(parse_target_dir_from_metadata(b"not json"), None);
+        assert_eq!(parse_target_dir_from_metadata(b"{}"), None);
+        assert_eq!(
+            parse_target_dir_from_metadata(br#"{"target_directory":42}"#),
+            None
+        );
     }
 
     #[test]
