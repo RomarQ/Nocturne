@@ -5,14 +5,21 @@ use std::ops::{Add, Mul, Sub};
 /// N-bit unsigned integer for ZK circuits.
 ///
 /// Represented as a field element with a `ConstrainBits(N)` constraint.
-/// Supported bit widths: 8, 16, 32, 64, 128, 256.
+/// Supported bit widths: 8, 16, 32, 64, 128. The backing store is a
+/// `u128`, so widths above 128 are not representable.
+///
+/// Test-mode arithmetic (`+`, `-`, `*`) panics on overflow/underflow
+/// past `2^N` instead of wrapping: the circuit lowers these operators to
+/// unconstrained field arithmetic, so a silent off-chain wrap would mask
+/// a divergence the proof never catches. See
+/// `memories/uint-arithmetic-semantics.md`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Uint<const N: u32>(u128);
 
 impl<const N: u32> Uint<N> {
     pub fn new(value: u128) -> Self {
         debug_assert!(
-            N <= 128 || value <= Self::max_value(),
+            N >= 128 || value <= Self::max_value(),
             "value {value} exceeds Uint<{N}> max"
         );
         Self(value & Self::max_value())
@@ -56,21 +63,44 @@ impl<const N: u32> Default for Uint<N> {
 impl<const N: u32> Add for Uint<N> {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        Self::new(self.0.wrapping_add(rhs.0))
+        match self
+            .0
+            .checked_add(rhs.0)
+            .filter(|v| *v <= Self::max_value())
+        {
+            Some(v) => Self(v),
+            None => {
+                panic!("Uint<{N}> overflow; the circuit would not constrain this — restructure")
+            }
+        }
     }
 }
 
 impl<const N: u32> Sub for Uint<N> {
     type Output = Self;
     fn sub(self, rhs: Self) -> Self {
-        Self::new(self.0.wrapping_sub(rhs.0))
+        match self.0.checked_sub(rhs.0) {
+            Some(v) => Self(v),
+            None => {
+                panic!("Uint<{N}> underflow; the circuit would not constrain this — restructure")
+            }
+        }
     }
 }
 
 impl<const N: u32> Mul for Uint<N> {
     type Output = Self;
     fn mul(self, rhs: Self) -> Self {
-        Self::new(self.0.wrapping_mul(rhs.0))
+        match self
+            .0
+            .checked_mul(rhs.0)
+            .filter(|v| *v <= Self::max_value())
+        {
+            Some(v) => Self(v),
+            None => {
+                panic!("Uint<{N}> overflow; the circuit would not constrain this — restructure")
+            }
+        }
     }
 }
 
@@ -118,9 +148,56 @@ mod tests {
     }
 
     #[test]
-    fn uint8_wrapping() {
+    #[should_panic(expected = "Uint<8> overflow")]
+    fn uint8_add_overflow_panics() {
         let a = Uint::<8>::new(255);
         let b = Uint::<8>::new(1);
-        assert_eq!((a + b).value(), 0); // wraps at 256
+        let _ = a + b;
+    }
+
+    #[test]
+    #[should_panic(expected = "Uint<8> underflow")]
+    fn uint8_sub_underflow_panics() {
+        let a = Uint::<8>::new(0);
+        let b = Uint::<8>::new(1);
+        let _ = a - b;
+    }
+
+    #[test]
+    #[should_panic(expected = "Uint<8> overflow")]
+    fn uint8_mul_overflow_panics() {
+        let a = Uint::<8>::new(16);
+        let b = Uint::<8>::new(16);
+        let _ = a * b;
+    }
+
+    #[test]
+    fn arithmetic_at_the_boundary_does_not_panic() {
+        let max = Uint::<8>::new(255);
+        let zero = Uint::<8>::zero();
+        assert_eq!((max + zero).value(), 255);
+        assert_eq!((max - max).value(), 0);
+        assert_eq!((Uint::<8>::new(15) * Uint::<8>::new(17)).value(), 255);
+    }
+
+    #[test]
+    fn uint128_full_width_works() {
+        let max = Uint::<128>::new(u128::MAX);
+        assert_eq!(max.value(), u128::MAX);
+        assert_eq!((max - Uint::<128>::new(1)).value(), u128::MAX - 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "Uint<128> overflow")]
+    fn uint128_add_overflow_panics() {
+        let max = Uint::<128>::new(u128::MAX);
+        let _ = max + Uint::<128>::new(1);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "exceeds Uint<8> max")]
+    fn new_rejects_out_of_range_value_in_debug() {
+        let _ = Uint::<8>::new(256);
     }
 }

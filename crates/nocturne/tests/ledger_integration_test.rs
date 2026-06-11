@@ -6895,7 +6895,11 @@ mod init_values {
             Self {
                 limit: Cell::new(42u64),
                 phase: Cell::new(Phase::Running),
-                tag: Cell::new(Bytes::<32>::from_slice("nocturne:v1".as_bytes())),
+                // `from_slice` requires exactly 32 bytes, so the tag is
+                // padded with explicit NULs up front.
+                tag: Cell::new(Bytes::<32>::from_slice(
+                    "nocturne:v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".as_bytes(),
+                )),
                 seen: Counter::zero(),
             }
         }
@@ -6935,7 +6939,9 @@ fn constructor_initial_values_flow_into_state_value() {
     );
 
     // Field 2: Cell<Bytes<32>>("nocturne:v1" padded with zeros)
-    let expected_tag = nocturne::types::Bytes::<32>::from_slice("nocturne:v1".as_bytes());
+    let expected_tag = nocturne::types::Bytes::<32>::from_slice(
+        "nocturne:v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".as_bytes(),
+    );
     assert_eq!(
         collected[2],
         StateValue::Cell(Sp::new(AlignedValue::from(*expected_tag.as_bytes()))),
@@ -6984,7 +6990,9 @@ fn constructor_params_flow_into_initial_state() {
     use nocturne::runtime::onchain_state::state::StateValue;
     use nocturne::runtime::storage::arena::Sp;
 
-    let admin = nocturne::types::Bytes::<32>::from_slice("admin@example".as_bytes());
+    let admin = nocturne::types::Bytes::<32>::from_slice(
+        "admin@example\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".as_bytes(),
+    );
     let state = parametric_init::deploy::initial_state(admin.clone(), 250u64);
     let StateValue::Array(ref fields) = state else {
         panic!("expected StateValue::Array");
