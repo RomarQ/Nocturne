@@ -52,6 +52,19 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # MidnightDataProvider caches the universal setup params under
+      # $MIDNIGHT_PP / $XDG_CACHE_HOME/midnight/zk-params /
+      # $HOME/.cache/midnight/zk-params (base-crypto data_provider).
+      # The prove tests fetch them on demand; cache so reruns don't
+      # re-download. Keyed on Cargo.lock: a midnight-base-crypto bump
+      # can change the expected params set.
+      - name: Cache Midnight zk params
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/midnight/zk-params
+          key: midnight-zk-params-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            midnight-zk-params-${{ runner.os }}-
       - run: cargo test --workspace --locked
 
   # ---------- End-to-end: cargo nocturne build + keygen ----------
@@ -64,6 +77,16 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
+      # keygen fetches the universal setup params on demand; same cache
+      # as the test job.
+      - name: Cache Midnight zk params
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/midnight/zk-params
+          key: midnight-zk-params-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            midnight-zk-params-${{ runner.os }}-
 
       # Build the workspace so the cargo-nocturne binary and every
       # example's proc-macro output exist on disk before keygen runs.
