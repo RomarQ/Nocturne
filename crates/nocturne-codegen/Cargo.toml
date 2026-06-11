@@ -4,6 +4,10 @@ description = "Code generation for nocturne: emits ZKIR and transcript VM byteco
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 nocturne-ir = { workspace = true }

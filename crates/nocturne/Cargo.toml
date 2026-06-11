@@ -4,12 +4,15 @@ description = "Rust eDSL for writing Midnight smart contracts."
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 nocturne-macro = { workspace = true }
 nocturne-types = { workspace = true }
 nocturne-storage = { workspace = true }
-# Future: nocturne-env, nocturne-primitives, nocturne-engine
 
 # Re-exported midnight-ledger crates for runtime transcript construction
 midnight-onchain-vm = { workspace = true }
@@ -30,5 +33,5 @@ midnight-coin-structure = { workspace = true }
 midnight-storage = { workspace = true }
 syn = { workspace = true }
 serde_json = { workspace = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
-rand = "0.8"
+tokio = { workspace = true }
+rand = { workspace = true }

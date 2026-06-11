@@ -13,15 +13,13 @@ pub enum MidnightAttr {
     Constructor,
     Query,
     Event,
-    StateType,
     /// Field-level marker: this ledger field is internal and should
     /// not be advertised in `contract-info.json` as queryable.
     /// Default for a ledger field is `exported = true`.
     Private,
 }
 
-const KNOWN_ATTRS: &str =
-    "ledger, witnesses, circuit, constructor, query, event, state_type, private";
+const KNOWN_ATTRS: &str = "ledger, witnesses, circuit, constructor, query, event, private";
 
 impl MidnightAttr {
     /// Try to parse a midnight attribute from a `#[nocturne(...)]`
@@ -84,7 +82,6 @@ impl MidnightAttr {
             "constructor" => Some(Self::Constructor),
             "query" => Some(Self::Query),
             "event" => Some(Self::Event),
-            "state_type" => Some(Self::StateType),
             "private" => Some(Self::Private),
             _ => None,
         }

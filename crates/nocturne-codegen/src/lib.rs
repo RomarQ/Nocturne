@@ -5,7 +5,6 @@
 //! the prover's private computation is consistent with the public transcript.
 
 mod aligned;
-pub mod bundle;
 pub mod codegen;
 pub mod deploy_codegen;
 pub mod enum_helpers;

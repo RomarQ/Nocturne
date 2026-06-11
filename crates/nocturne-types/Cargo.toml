@@ -4,5 +4,9 @@ description = "Primitive ZK-compatible types for nocturne contracts."
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]

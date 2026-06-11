@@ -4,6 +4,10 @@ description = "Contract metadata serialization (contract-info.json) for nocturne
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 nocturne-ir = { workspace = true }
