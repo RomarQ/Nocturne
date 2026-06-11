@@ -23,6 +23,8 @@ Also fixed here: the guard in `Uint::new` was the tautology `N <= 128 || value <
 ## Implications
 
 - Off-chain `Add`/`Sub`/`Mul` for `Uint<N>` panic with "Uint<N> overflow/underflow; the circuit would not constrain this — restructure". Contract authors must restructure (e.g. guard with a comparison) instead of relying on wraparound.
+- The panic is conservative for INTERMEDIATE values: `(max + b) - b` is circuit-valid (field elements don't wrap at `2^N`; only constrained entry points matter) but panics off-chain on the `max + b` step. The workaround there is to reorder the expression or widen the type for the intermediate; a comparison guard doesn't cover this case.
+- `Uint<N>` now const-asserts `1 <= N <= 128` in `new()`/`zero()`, so a `Uint<200>` fails at monomorphization instead of silently saturating to 128 bits.
 - This is a deliberate divergence from Compact, which has checked arithmetic semantics in-circuit. Nocturne does not yet emit overflow constraints; whether to emit a checked-constrain (range-check the result of each `Uint` op in ZKIR) is an **open decision**. Until that lands, the divergence is documented (here and in the `Uint` rustdoc), not silent.
 - `Uint<N>` is backed by `u128`; widths above 128 are not representable. Don't reintroduce doc claims of `Uint<256>`.
 - Tests that want wraparound must do it on raw integers (`x.value().wrapping_mul(2)`) before re-wrapping in `Uint`, and stay within `2^N`.

@@ -11,13 +11,22 @@ use std::ops::{Add, Mul, Sub};
 /// Test-mode arithmetic (`+`, `-`, `*`) panics on overflow/underflow
 /// past `2^N` instead of wrapping: the circuit lowers these operators to
 /// unconstrained field arithmetic, so a silent off-chain wrap would mask
-/// a divergence the proof never catches. See
+/// a divergence the proof never catches. Note this panic is conservative
+/// for intermediates: `(max + b) - b` is circuit-valid (field elements
+/// don't wrap at `2^N`) but panics off-chain on the `max + b` step —
+/// reorder the expression or widen the type. See
 /// `memories/uint-arithmetic-semantics.md`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Uint<const N: u32>(u128);
 
 impl<const N: u32> Uint<N> {
     pub fn new(value: u128) -> Self {
+        // Compile-time width bound: the backing store is a u128, so a
+        // Uint<200> would otherwise silently behave as Uint<128>
+        // (max_value saturates). Every value-producing path goes through
+        // new()/zero(), so asserting here catches the bad width at
+        // monomorphization.
+        const { assert!(N >= 1 && N <= 128, "Uint<N> requires 1 <= N <= 128") }
         debug_assert!(
             N >= 128 || value <= Self::max_value(),
             "value {value} exceeds Uint<{N}> max"
@@ -26,6 +35,7 @@ impl<const N: u32> Uint<N> {
     }
 
     pub fn zero() -> Self {
+        const { assert!(N >= 1 && N <= 128, "Uint<N> requires 1 <= N <= 128") }
         Self(0)
     }
 
