@@ -54,7 +54,7 @@ The eDSL is plain Rust syntax. The following types are recognised in witness fie
 | `Boolean` | `Bytes<1>` | Conditions use `.value()` to unwrap to native `bool`. |
 | `Field` | one Fr (low 128 bits) | Field element, lossy for the full 254-bit range. |
 | `Uint<N>` for `N ≤ 128` | `Bytes<ceil(N/8)>` | Maps to `u8`/`u16`/`u32`/`u64`/`u128` for primitive casts. |
-| `Bytes<N>` for `N ≤ 32` | `Bytes<N>` | Fixed-size byte arrays. |
+| `Bytes<N>` | `Bytes<N>`, chunked into ceil(N/31) Frs when `N > 31` | Fixed-size byte arrays. Multi-Fr shapes (e.g. `Bytes<48>` Map keys, `Bytes<64>` Merkle leaves) are prove-tested. |
 | `Option<T>` | `(Bytes<1>, T)` | Same wire shape as Compact's `Maybe<T>`. `None` synthesises `T::default()` for the payload slot. |
 | `[T; N]` for `1 ≤ N ≤ 11` | N-tuple of `T` | Same wire shape as Compact's `Vector<N, T>`. Index reads (`arr[i]`) accept compile-time integer literals; use `for i in 0..N { ... arr[i] ... }` to unroll a const range to literal indices. |
 | `MerkleTreeDigest`, `MerkleTreePath<H, T>` | Field-aligned | See `memories/merkle-tree-encoding.md`. |
@@ -97,7 +97,7 @@ Contract 'counter_contract/counter':
   zkir/increment.zkir
   compiler/contract-info.json
 
-Artifacts at: ./target/nocturne/
+Artifacts at: /path/to/workspace/target/nocturne
 
 Generating keys for 1 circuit(s) with missing/stale prover/verifier files...
   Compiling circuit 'increment'...

@@ -123,12 +123,12 @@ mod ballot {
     pub struct Ballot {
         votes_for: Counter,
         votes_against: Counter,
-        voters: MerkleTree<32>,
+        voters: MerkleTree<32, Bytes<32>>,
     }
 
     #[nocturne(witnesses)]
     pub struct BallotWitnesses {
-        pub voter_secret: Field,
+        pub membership_path: MerkleTreePath<32, Bytes<32>>,
         pub vote_choice: Boolean,
     }
 
@@ -144,9 +144,9 @@ mod ballot {
 
         #[nocturne(circuit)]
         pub fn cast_vote(&mut self, witnesses: &BallotWitnesses) {
-            let commitment = persistent_hash(&witnesses.voter_secret);
-            assert_member(&self.voters, &commitment);
-            if witnesses.vote_choice.into() {
+            let root = merkle_tree_path_root(&witnesses.membership_path);
+            let _in_tree = self.voters.check_root(&root);
+            if witnesses.vote_choice.value() {
                 self.votes_for.increment();
             } else {
                 self.votes_against.increment();
@@ -180,7 +180,7 @@ mod ballot {
 | `#[nocturne(circuit)]` | `fn` in impl | Transition function (generates proof) |
 | `#[nocturne(constructor)]` | `fn` in impl | Contract deployment initializer |
 | `#[nocturne(query)]` | `fn` in impl | Read-only view (no proof) |
-| `#[nocturne(state_type)]` | `struct`/`enum` | Custom ADT for ledger/circuits |
+| `#[nocturne(private)]` | ledger field | Excluded from `contract-info.json`'s queryable surface |
 
 ### 3.2 Validation Rules
 
@@ -191,7 +191,7 @@ mod ballot {
 5. Ledger fields must use `nocturne::types` types.
 6. Witness fields must be ZK-representable.
 7. Queries take `&self` only.
-8. Constructors return `Self`.
+8. Constructors return `Self` or the ledger struct name.
 
 ---
 
@@ -213,8 +213,8 @@ mod ballot {
 | `Cell<T>` | `Cell(AlignedValue)` | `Idx`, `Ins` |
 | `Counter` | `Cell(AlignedValue)` | `Idx`, `Addi`, `Ins` |
 | `Map<K, V>` | `Map(HashMap)` | `Idx`, `Ins`, `Member` |
-| `MerkleTree<D>` | `BoundedMerkleTree` | `Root`, `Ins`, `Idx` |
-| `Array<T, N>` | `Array(Vec)` | `Idx`, `Ins` |
+| `Set<T>` | `Map(HashMap)` with `Null` values | `Idx`, `Ins`, `Member`, `Rem` |
+| `MerkleTree<HEIGHT, T>` | `BoundedMerkleTree` | `Root`, `Ins`, `Idx` |
 
 ### 4.3 Constraints
 
@@ -240,12 +240,14 @@ The `#[nocturne::contract]` macro:
 ### 5.2 Artifacts
 
 ```
-target/nocturne/<contract>/
+target/nocturne/<crate>/<contract>/
   zkir/
     <circuit>.zkir              # ZKIR v2 JSON (IrSource)
   compiler/
     contract-info.json          # Metadata (circuit signatures, witness types)
 ```
+
+`<crate>` is the `CARGO_CRATE_NAME` of the compilation target the macro expanded in; keying by crate and contract keeps equally named contract modules in different crates from clobbering each other.
 
 After `cargo nocturne keygen`:
 ```
@@ -284,7 +286,7 @@ IrSource {
 | Public argument | `PublicInput { guard }` | 1 (public value) |
 | `persistent_hash(&x)` | `PersistentHash { alignment, inputs }` | 1 (hash) |
 | `transient_hash(&x)` | `TransientHash { inputs }` | 1 (hash) |
-| `nocturne::disclose(v)` | `DeclarePubInput { var }` + `PiSkip` | 0 |
+| `nocturne::disclose(v)` | none (marker; the value's wire passes through) | 1 (the value) |
 | `Uint<N>` constraint | `ConstrainBits { var, bits: N }` | 0 |
 | `Boolean` constraint | `ConstrainToBoolean { var }` | 0 |
 | Circuit output | `Output { var }` | 0 (adds to comm. commitment) |
@@ -338,13 +340,24 @@ Format:
   ],
   "witnesses": [
     {
-      "name": "voter_secret",
+      "name": "private$voter_secret",
       "arguments": [],
-      "result type": { "type-name": "Field" }
+      "result-type": { "type-name": "Field" }
     }
-  ]
+  ],
+  "ledger": [
+    {
+      "name": "count",
+      "index": 0,
+      "exported": true,
+      "type": { "type-name": "Counter" }
+    }
+  ],
+  "contracts": []
 }
 ```
+
+`ledger[]` carries one entry per `#[nocturne(ledger)]` struct field in declaration order; `index` is the on-chain slot index and `exported` is `false` for fields marked `#[nocturne(private)]`.
 
 ---
 
@@ -364,7 +377,7 @@ Format:
 
 ### 6.3 Selective Disclosure
 
-`nocturne::disclose(value)` emits `DeclarePubInput` + `PiSkip`, making a computed value part of the public inputs that validators can see.
+`nocturne::disclose(value)` is a marker, not an emission: the value's wire passes through unchanged, and the value becomes publicly visible through the transcript operation that consumes it (a ledger write, a circuit output). Disclosure-analysis enforcement (rejecting undisclosed witness flows into public positions, as compactc does) is future work.
 
 ### 6.4 Hashing
 
@@ -378,19 +391,15 @@ Format:
 ```
 nocturne/
   crates/
-    midnight/              # Umbrella (re-exports)
+    nocturne/              # Umbrella (re-exports)
     nocturne-macro/        # #[nocturne::contract], #[nocturne::test]
     nocturne-ir/           # Internal IR (parse + validate)
     nocturne-codegen/      # ZKIR emitter, transcript builder codegen, metadata
     nocturne-types/        # Field, Boolean, Bytes<N>, Uint<N>
-    midnight-storage/      # Cell, Counter, Map, MerkleTree
-    nocturne-env/          # Environment context (block height, caller)
+    nocturne-storage/      # Cell, Counter, Map, Set, MerkleTree
     nocturne-metadata/     # contract-info.json generation
-    nocturne-engine/       # Off-chain test engine
-    nocturne-e2e/          # E2E tests against Midnight node
-    nocturne-primitives/   # Field arithmetic, hashing (wraps transient-crypto)
   tools/
-    cargo-nocturne/        # Build/keygen/deploy CLI
+    cargo-nocturne/        # Build/keygen/test CLI
 ```
 
 ### 7.1 Key Crate: nocturne-codegen
@@ -405,7 +414,7 @@ nocturne/
 nocturne-codegen → midnight-zkir (IrSource, Instruction)
 nocturne-codegen → midnight-transient-crypto (Fr)
 nocturne-codegen → midnight-base-crypto (Alignment)
-nocturne-primitives → midnight-transient-crypto (field arithmetic, hashing)
+nocturne-storage → midnight-transient-crypto (hashing for Merkle trees)
 ```
 
 ---

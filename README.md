@@ -14,8 +14,9 @@ Alpha. The codegen is being driven by translating real contracts; expect rough e
 What's in:
 
 - Ledger types: `Counter`, `Cell<T>`, `Map<K, V>`, `Set<T>`, `MerkleTree<H, T>`
-- Value types: `Boolean`, `Field`, `Uint<N>` for N ≤ 128, `Bytes<N>` for N ≤ 32, `Option<T>`, `[T; N]` for N ≤ 11, tuples up to arity 11, user structs, homogeneous-payload enums
+- Value types: `Boolean`, `Field`, `Uint<N>` for N ≤ 128, `Bytes<N>` (values wider than one field element are chunked into ceil(N/31) Frs; 48- and 64-byte shapes are prove-tested), `Option<T>`, `[T; N]` for N ≤ 11, tuples up to arity 11, user structs, homogeneous-payload enums
 - Control flow: `if`/`else`, `match` on user enums and `Option`, const-bounded `for` loops, `assert!` / `assert_eq!`, `if`-as-expression with `cond_select` multiplex
+- Composition: free `fn` helpers in the contract module inlined into circuits (compactc's no-annotation lowering rule), parametric witness methods (`witnesses.foo(args)`) alongside plain witness fields
 - Cross-circuit: parameterized constructors with `deploy::initial_state(...)`, witness reads inside `let` bindings, `disclose(_)`, `merkle_tree_path_root(_)`
 - Tooling: `cargo nocturne build` (auto-keygens stale circuits), `cargo nocturne keygen`, `cargo nocturne test`
 
@@ -67,7 +68,7 @@ cd examples/counter-contract
 cargo nocturne build
 ```
 
-You'll get this under `target/nocturne/counter/`:
+`cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace. Artifacts land in the workspace target dir, keyed by crate and contract module — for the counter example that's `target/nocturne/counter_contract/counter/`:
 
 ```
 zkir/increment.zkir
@@ -78,7 +79,7 @@ compiler/contract-info.json
 
 `zkir/*.zkir` is the circuit definition (one per `#[nocturne(circuit)]`). `keys/*.{prover,verifier}` are Plonk keys derived from the ZKIR. `contract-info.json` describes the contract's surface (circuit signatures, witness types) for indexers and code generators.
 
-See [`docs/compiling.md`](docs/compiling.md) for the full build flow, [`docs/artifacts.md`](docs/artifacts.md) for what each file is for and who consumes it, and [`docs/compactc-vs-nocturne.md`](docs/compactc-vs-nocturne.md) if you're coming from Compact and want a reference of where the two diverge.
+See [`docs/compiling.md`](docs/compiling.md) for the full build flow, [`docs/artifacts.md`](docs/artifacts.md) for what each file is for and who consumes it, [`docs/compactc-vs-nocturne.md`](docs/compactc-vs-nocturne.md) if you're coming from Compact and want a reference of where the two diverge, and [`docs/compactc-ir-mapping.md`](docs/compactc-ir-mapping.md) for a construct-by-construct comparison of compactc's internal IR with Nocturne's `ExprIR`.
 
 ## Repo layout
 
@@ -90,17 +91,13 @@ crates/
   nocturne-codegen          ZKIR + transcript + deploy emitters
   nocturne-types            user-facing types (Counter, Cell<T>, Map<...>, ...)
   nocturne-storage          storage primitives mirroring the ledger crate
-  nocturne-primitives       crypto + hash primitives
-  nocturne-engine           thin layer over the upstream onchain VM
-  nocturne-env              runtime stubs used in generated transcript code
   nocturne-metadata         contract-info.json schema
-  nocturne-e2e              shared test infrastructure
 tools/
   cargo-nocturne            cargo subcommand for build/keygen/test
 examples/
   counter-contract          minimal example
   kitchen-sink              exercises every supported primitive
-docs/                       compiling.md, artifacts.md, compactc-vs-nocturne.md
+docs/                       compiling.md, artifacts.md, compactc-vs-nocturne.md, compactc-ir-mapping.md
 ```
 
 ## Truth source

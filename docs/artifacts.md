@@ -92,12 +92,21 @@ Human-readable JSON describing the contract's external surface. One file per con
     }
   ],
   "witnesses": [],
+  "ledger": [
+    {
+      "name": "count",
+      "index": 0,
+      "exported": true,
+      "type": { "type-name": "Counter" }
+    }
+  ],
   "contracts": []
 }
 ```
 
 - `circuits[]` — one entry per `#[nocturne(circuit)]`. `pure` is `false` for state-mutating circuits (`&mut self`), `true` for read-only (`&self`). `proof: true` means a ZK proof is required to invoke (the default; the false case is reserved for future "no-proof" circuit shapes).
-- `witnesses[]` — declared witness parameter types per circuit. Used by code generators to produce client-side types that match the prover's expected layout.
+- `witnesses[]` — declared witness fields and parametric witness methods, named with a `private$` prefix (`private$voter_secret`). Used by code generators to produce client-side types that match the prover's expected layout.
+- `ledger[]` — one entry per `#[nocturne(ledger)]` struct field, in declaration order. `index` is the field's slot index in the on-chain state array; `exported` tells downstream tools whether to advertise the field as queryable. Mark a field `#[nocturne(private)]` to set `exported: false` — the field still lives on-chain (all ledger state is public on Midnight), it's just dropped from the advertised query surface.
 - `contracts[]` — reserved for cross-contract call metadata.
 
 **Schema**: matches Compact's `contract-info.json` schema. The same downstream type generators, indexers, and deploy scripts that consume compactc output also work with Nocturne's. Compactc is the reference for the schema; this file deliberately mirrors it.
