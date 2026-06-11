@@ -68,7 +68,7 @@ cd examples/counter-contract
 cargo nocturne build
 ```
 
-`cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace. Artifacts land in the workspace target dir, keyed by crate and contract module — for the counter example that's `target/nocturne/counter_contract/counter/`:
+`cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace. Artifacts land in the workspace target dir, keyed by crate and contract module. For the counter example that's `target/nocturne/counter_contract/counter/`:
 
 ```
 zkir/increment.zkir
