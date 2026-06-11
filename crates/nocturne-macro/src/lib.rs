@@ -248,12 +248,24 @@ fn write_artifacts(
 
     // Prune orphans: a renamed or deleted circuit must not leave its
     // old `.zkir` behind — `cargo nocturne keygen` walks the directory
-    // and would happily keygen a circuit that no longer exists.
+    // and would happily keygen a circuit that no longer exists. Also
+    // sweep `*.tmp<pid>` leftovers: a rustc that crashed between the
+    // `write` and `rename` in `write_if_changed` leaves its temp file
+    // behind forever otherwise. (A live concurrent writer's temp file
+    // could in principle be swept in the microseconds between its
+    // write and rename — the loser's rename fails, it prints the
+    // write-failure warning, and the next build rewrites the artifact.)
     if let Ok(entries) = std::fs::read_dir(&zkir_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.ends_with(".zkir") && !current_files.contains(&name) {
-                let _ = std::fs::remove_file(entry.path());
+            let is_orphan_zkir = name.ends_with(".zkir") && !current_files.contains(&name);
+            if (is_orphan_zkir || is_stale_tmp(&name))
+                && let Err(e) = std::fs::remove_file(entry.path())
+            {
+                eprintln!(
+                    "nocturne: warning: failed to remove stale artifact {}: {e}",
+                    entry.path().display()
+                );
             }
         }
     }
@@ -265,6 +277,18 @@ fn write_artifacts(
     )?;
 
     Ok(())
+}
+
+/// True for `write_if_changed` temp names (`<file>.tmp<pid>`). These
+/// only persist when a writer died between `write` and `rename` — our
+/// own temp files are always renamed away before the prune loop runs,
+/// so anything matching here is a leftover from a crashed process.
+fn is_stale_tmp(name: &str) -> bool {
+    let Some(idx) = name.rfind(".tmp") else {
+        return false;
+    };
+    let pid_suffix = &name[idx + ".tmp".len()..];
+    !pid_suffix.is_empty() && pid_suffix.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Write `content` to `path` only when the existing content differs.
@@ -297,7 +321,7 @@ fn write_if_changed(path: &std::path::Path, content: &[u8]) -> std::io::Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::workspace_target_from_out_dir;
+    use super::{is_stale_tmp, workspace_target_from_out_dir};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -307,6 +331,36 @@ mod tests {
             workspace_target_from_out_dir(out),
             Some(PathBuf::from("/ws/target"))
         );
+    }
+
+    #[test]
+    fn out_dir_walk_handles_cross_compile_depth() {
+        // Cross-compiled OUT_DIR has an extra <triple> component:
+        // <target>/<triple>/<profile>/build/<crate>-<hash>/out. The
+        // old fixed `ancestors().nth(4)` hop lands on the <triple>
+        // dir here, so this fixture only passes with the structural
+        // walk — guard that the fixture actually discriminates.
+        let out = Path::new("/ws/target/aarch64-unknown-linux-gnu/debug/build/my-crate-abc123/out");
+        assert_ne!(
+            out.ancestors().nth(4),
+            Some(Path::new("/ws/target")),
+            "fixture no longer discriminates against the old fixed-depth logic"
+        );
+        assert_eq!(
+            workspace_target_from_out_dir(out),
+            Some(PathBuf::from("/ws/target"))
+        );
+    }
+
+    #[test]
+    fn stale_tmp_matches_pid_suffixed_names_only() {
+        assert!(is_stale_tmp("increment.zkir.tmp12345"));
+        assert!(is_stale_tmp("contract-info.json.tmp7"));
+        // Real artifacts and near-misses must survive the sweep.
+        assert!(!is_stale_tmp("increment.zkir"));
+        assert!(!is_stale_tmp("increment.tmp")); // no pid digits
+        assert!(!is_stale_tmp("increment.tmpfile")); // non-digit suffix
+        assert!(!is_stale_tmp("increment.tmp12a")); // mixed suffix
     }
 
     #[test]

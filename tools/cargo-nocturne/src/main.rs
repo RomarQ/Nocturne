@@ -17,7 +17,17 @@ fn main() {
 
     match subcommand {
         Some("build") => cmd_build(extra_args),
-        Some("keygen") => cmd_keygen(),
+        Some("keygen") => {
+            // Unlike build/test, keygen runs no underlying cargo
+            // command — silently dropping forwarded args would let
+            // `cargo nocturne keygen --release` lie about doing
+            // something different.
+            if !extra_args.is_empty() {
+                eprintln!("cargo-nocturne: keygen takes no arguments");
+                std::process::exit(1);
+            }
+            cmd_keygen()
+        }
         Some("test") => cmd_test(extra_args),
         Some(other) => {
             eprintln!("cargo-nocturne: unknown subcommand '{other}'");
@@ -289,8 +299,9 @@ fn load_and_keygen(path: &Path) -> Result<(u8, usize), Box<dyn std::error::Error
 
         let (pk, vk) = ir.keygen(&pp).await?;
 
-        // Write key files to a sibling `keys/` directory, matching the
-        // compactc layout (`target/nocturne/<contract>/{zkir,compiler,keys}/`).
+        // Write key files to a sibling `keys/` directory
+        // (`target/nocturne/<crate>/<contract>/{zkir,compiler,keys}/`),
+        // mirroring compactc's zkir/compiler/keys split.
         // Downstream tooling expects prover/verifier files separated from
         // the ZKIR sources, not interleaved with them.
         let zkir_dir = path.parent().unwrap();
@@ -354,7 +365,12 @@ fn find_zkir_files(dir: &Path, files: &mut Vec<PathBuf>) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // `file_type()` doesn't follow symlinks, so a symlinked
+            // dir is reported as a symlink, not a dir: a cycle can't
+            // recurse forever and an out-of-tree link can't pull the
+            // walk outside target/nocturne/.
+            let is_real_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_real_dir {
                 find_zkir_files(&path, files);
             } else if path.extension().map(|e| e == "zkir").unwrap_or(false) {
                 files.push(path);
@@ -383,9 +399,13 @@ fn collect_contract_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
     }
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_contract_dirs(&path, out);
+            // Same symlink guard as `find_zkir_files`: don't follow
+            // symlinked dirs. A cycle would overflow the stack, and an
+            // out-of-tree link would hand `prune_orphan_keys` a dir
+            // outside target/nocturne/ to delete key files from.
+            let is_real_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_real_dir {
+                collect_contract_dirs(&entry.path(), out);
             }
         }
     }
@@ -468,6 +488,26 @@ mod tests {
 
         let dirs = find_contract_dirs(tmp.path());
         assert_eq!(dirs, vec![a, b]);
+    }
+
+    /// A symlink cycle inside target/nocturne/ must not recurse
+    /// forever (pre-fix this stack-overflowed), and a symlinked dir
+    /// must not be reported as a contract dir of its own.
+    #[cfg(unix)]
+    #[test]
+    fn find_contract_dirs_skips_symlinked_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("nocturne");
+        let a = make_contract_dir(&root, "crate_a", "counter", &["increment"]);
+        // Cycle: <root>/crate_a/loop -> <root>.
+        std::os::unix::fs::symlink(&root, root.join("crate_a").join("loop")).unwrap();
+        // Contract dir outside the searched root, reachable only via symlink.
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(outside.join("other").join("zkir")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("crate_b")).unwrap();
+
+        let dirs = find_contract_dirs(&root);
+        assert_eq!(dirs, vec![a]);
     }
 
     #[test]
