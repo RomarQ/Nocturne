@@ -54,5 +54,5 @@ Do not stop at "needs investigation," "TODO," "unclear," or "worth a deeper look
 
 ## Common gotchas
 
-- The proc macro writes `target/nocturne/<contract>/{zkir,compiler}/` from the workspace target dir (walks up 4 levels from `OUT_DIR`). To regenerate artifacts after a code change, you may need `cargo clean -p <contract_crate>` first — incremental builds don't re-run the macro.
+- The proc macro writes `target/nocturne/<crate>/<contract>/{zkir,compiler}/` from the workspace target dir, keyed by `CARGO_CRATE_NAME` + contract module name. To regenerate artifacts after a code change, you may need `cargo clean -p <contract_crate>` first — incremental builds don't re-run the macro.
 - `cargo-nocturne build` looks for `./target/nocturne/` relative to CWD. Run it from the workspace root, not from an example crate's directory.

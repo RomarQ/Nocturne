@@ -173,6 +173,12 @@ fn is_midnight_attr(attr: &syn::Attribute) -> bool {
     attr.path().is_ident("nocturne")
 }
 
+/// `target/nocturne/<crate>/<contract>/` — keyed by `CARGO_CRATE_NAME`
+/// *and* the contract module name. The crate level matters: every
+/// compilation target gets a distinct `CARGO_CRATE_NAME` (integration
+/// tests get the test file's name), so seven test crates that all
+/// define `mod counter` with different circuit sets no longer clobber
+/// each other's artifacts during parallel compilation.
 fn find_artifact_dir(contract_name: &str) -> std::path::PathBuf {
     // Try CARGO_TARGET_DIR, then OUT_DIR, then default to ./target.
     let target = std::env::var("CARGO_TARGET_DIR")
@@ -189,8 +195,11 @@ fn find_artifact_dir(contract_name: &str) -> std::path::PathBuf {
             })
         })
         .unwrap_or_else(|_| "target".to_string());
+    let crate_name =
+        std::env::var("CARGO_CRATE_NAME").unwrap_or_else(|_| "unknown_crate".to_string());
     std::path::PathBuf::from(target)
         .join("nocturne")
+        .join(crate_name)
         .join(contract_name)
 }
 
@@ -206,6 +215,7 @@ fn write_artifacts(
 
     // Write ZKIR circuits (one per circuit function).
     // IrSource::load() expects a "version" field, so we wrap the serialization.
+    let mut current_files = std::collections::HashSet::new();
     for circuit in &artifacts.zkir.circuits {
         let mut value = serde_json::to_value(&circuit.ir_source).map_err(std::io::Error::other)?;
         if let serde_json::Value::Object(ref mut map) = value {
@@ -215,10 +225,21 @@ fn write_artifacts(
             );
         }
         let json = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
-        write_if_changed(
-            &zkir_dir.join(format!("{}.zkir", circuit.circuit_name)),
-            json.as_bytes(),
-        )?;
+        let file_name = format!("{}.zkir", circuit.circuit_name);
+        write_if_changed(&zkir_dir.join(&file_name), json.as_bytes())?;
+        current_files.insert(file_name);
+    }
+
+    // Prune orphans: a renamed or deleted circuit must not leave its
+    // old `.zkir` behind — `cargo nocturne keygen` walks the directory
+    // and would happily keygen a circuit that no longer exists.
+    if let Ok(entries) = std::fs::read_dir(&zkir_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".zkir") && !current_files.contains(&name) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     // Write contract metadata.
@@ -236,11 +257,24 @@ fn write_artifacts(
 /// mtimes (e.g. `cargo nocturne build`'s "is this circuit's keygen
 /// stale?" check) would re-run on every invocation even when nothing
 /// actually changed.
+///
+/// The write itself is atomic: content goes to a temp file in the same
+/// directory and is `rename`d over the destination, so a reader never
+/// observes a half-written artifact even if two rustc processes race.
 fn write_if_changed(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
     if let Ok(existing) = std::fs::read(path)
         && existing == content
     {
         return Ok(());
     }
-    std::fs::write(path, content)
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("artifact path has no file name"))?
+        .to_string_lossy()
+        .into_owned();
+    // Pid suffix keeps concurrent writers (parallel rustc invocations)
+    // from stomping each other's temp file before the rename.
+    let tmp = path.with_file_name(format!("{file_name}.tmp{}", std::process::id()));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
 }

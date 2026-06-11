@@ -59,50 +59,50 @@ fn cmd_build() {
     let target_dir = find_target_dir();
     let nocturne_dir = target_dir.join("nocturne");
 
-    if !nocturne_dir.exists() {
-        println!("Build succeeded. No contract artifacts found.");
+    let contract_dirs = find_contract_dirs(&nocturne_dir);
+    if contract_dirs.is_empty() {
+        println!("Build succeeded, but no contract artifacts found.");
         println!("Tip: artifacts are generated when a crate uses #[nocturne::contract].");
+        println!(
+            "Tip: the macro only re-runs on recompile — if the contract crate is \
+             cached, force a re-expansion with `cargo clean -p <crate>` first."
+        );
         return;
     }
 
-    let mut found = false;
     let mut needs_keygen: Vec<PathBuf> = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&nocturne_dir) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            found = true;
-            let name = entry.file_name().to_string_lossy().to_string();
-            println!("Contract '{name}':");
+    for contract_dir in &contract_dirs {
+        // Label as `<crate>/<contract>` relative to target/nocturne/.
+        let label = contract_dir
+            .strip_prefix(&nocturne_dir)
+            .unwrap_or(contract_dir)
+            .display();
+        println!("Contract '{label}':");
 
-            let zkir_dir = entry.path().join("zkir");
-            if zkir_dir.exists()
-                && let Ok(files) = std::fs::read_dir(&zkir_dir)
-            {
-                for f in files.flatten() {
-                    let fname = f.file_name().to_string_lossy().to_string();
-                    if !fname.ends_with(".zkir") {
-                        continue;
-                    }
-                    println!("  zkir/{fname}");
-                    let zkir_path = f.path();
-                    if keys_need_update(&zkir_path) {
-                        needs_keygen.push(zkir_path);
-                    }
+        prune_orphan_keys(contract_dir);
+
+        let zkir_dir = contract_dir.join("zkir");
+        if let Ok(files) = std::fs::read_dir(&zkir_dir) {
+            let mut zkir_paths: Vec<PathBuf> = files
+                .flatten()
+                .map(|f| f.path())
+                .filter(|p| p.extension().map(|e| e == "zkir").unwrap_or(false))
+                .collect();
+            zkir_paths.sort();
+            for zkir_path in zkir_paths {
+                if let Some(fname) = zkir_path.file_name() {
+                    println!("  zkir/{}", fname.to_string_lossy());
+                }
+                if keys_need_update(&zkir_path) {
+                    needs_keygen.push(zkir_path);
                 }
             }
-
-            let info = entry.path().join("compiler").join("contract-info.json");
-            if info.exists() {
-                println!("  compiler/contract-info.json");
-            }
         }
-    }
 
-    if !found {
-        println!("Build succeeded, but no contract artifacts found.");
-        return;
+        let info = contract_dir.join("compiler").join("contract-info.json");
+        if info.exists() {
+            println!("  compiler/contract-info.json");
+        }
     }
 
     println!("\nArtifacts at: {}", nocturne_dir.display());
@@ -168,8 +168,15 @@ fn cmd_keygen() {
         std::process::exit(1);
     }
 
+    let contract_dirs = find_contract_dirs(&nocturne_dir);
     let mut zkir_files = Vec::new();
-    find_zkir_files(&nocturne_dir, &mut zkir_files);
+    for contract_dir in &contract_dirs {
+        // Drop key pairs whose circuit no longer exists before
+        // keygenning the ones that do.
+        prune_orphan_keys(contract_dir);
+        find_zkir_files(&contract_dir.join("zkir"), &mut zkir_files);
+    }
+    zkir_files.sort();
 
     if zkir_files.is_empty() {
         eprintln!("No .zkir files found in {}", nocturne_dir.display());
@@ -314,5 +321,183 @@ fn find_zkir_files(dir: &Path, files: &mut Vec<PathBuf>) {
                 files.push(path);
             }
         }
+    }
+}
+
+/// Recursively find contract artifact dirs under `target/nocturne/` —
+/// any directory containing a `zkir/` subdirectory. The macro writes
+/// `target/nocturne/<crate>/<contract>/{zkir,compiler,keys}/`, but a
+/// structural search keeps the tool independent of the exact nesting
+/// depth. Results are sorted for deterministic output.
+fn find_contract_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    collect_contract_dirs(root, &mut dirs);
+    dirs.sort();
+    dirs
+}
+
+fn collect_contract_dirs(dir: &Path, out: &mut Vec<PathBuf>) {
+    if dir.join("zkir").is_dir() {
+        // Contract dirs don't nest; no need to descend further.
+        out.push(dir.to_path_buf());
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_contract_dirs(&path, out);
+            }
+        }
+    }
+}
+
+/// Remove `.prover`/`.verifier` files in `<contract_dir>/keys/` whose
+/// circuit's `.zkir` is gone (circuit renamed or deleted). The macro
+/// prunes orphan `.zkir` files itself, so a key pair without a
+/// matching `.zkir` is dead weight that would otherwise persist —
+/// and mislead anything that registers verifier keys by globbing.
+fn prune_orphan_keys(contract_dir: &Path) {
+    let zkir_stems = zkir_stems(&contract_dir.join("zkir"));
+    let keys_dir = contract_dir.join("keys");
+    let Ok(entries) = std::fs::read_dir(&keys_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_key = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("prover" | "verifier")
+        );
+        if !is_key {
+            continue;
+        }
+        let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+            continue;
+        };
+        if !zkir_stems.contains(&stem) {
+            match std::fs::remove_file(&path) {
+                Ok(()) => println!(
+                    "  Removed orphan key {} (no matching .zkir)",
+                    path.display()
+                ),
+                Err(e) => eprintln!("  Failed to remove orphan key {}: {e}", path.display()),
+            }
+        }
+    }
+}
+
+/// Circuit names (file stems) of every `.zkir` in `zkir_dir`.
+fn zkir_stems(zkir_dir: &Path) -> std::collections::HashSet<String> {
+    let mut stems = std::collections::HashSet::new();
+    if let Ok(entries) = std::fs::read_dir(zkir_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "zkir").unwrap_or(false)
+                && let Some(stem) = path.file_stem()
+            {
+                stems.insert(stem.to_string_lossy().into_owned());
+            }
+        }
+    }
+    stems
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scaffold `<root>/<crate>/<contract>/zkir/` with the given
+    /// circuit files, returning the contract dir.
+    fn make_contract_dir(root: &Path, krate: &str, contract: &str, circuits: &[&str]) -> PathBuf {
+        let contract_dir = root.join(krate).join(contract);
+        let zkir_dir = contract_dir.join("zkir");
+        std::fs::create_dir_all(&zkir_dir).unwrap();
+        for c in circuits {
+            std::fs::write(zkir_dir.join(format!("{c}.zkir")), b"{}").unwrap();
+        }
+        contract_dir
+    }
+
+    #[test]
+    fn find_contract_dirs_two_level_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = make_contract_dir(tmp.path(), "crate_a", "counter", &["increment"]);
+        let b = make_contract_dir(tmp.path(), "crate_b", "counter", &["increment", "reset"]);
+        // A stray non-contract dir must not be reported.
+        std::fs::create_dir_all(tmp.path().join("crate_c").join("not_a_contract")).unwrap();
+
+        let dirs = find_contract_dirs(tmp.path());
+        assert_eq!(dirs, vec![a, b]);
+    }
+
+    #[test]
+    fn find_contract_dirs_missing_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = find_contract_dirs(&tmp.path().join("does_not_exist"));
+        assert!(dirs.is_empty());
+    }
+
+    #[test]
+    fn prune_orphan_keys_removes_stale_pairs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contract_dir = make_contract_dir(tmp.path(), "crate_a", "counter", &["increment"]);
+        let keys_dir = contract_dir.join("keys");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        for name in [
+            "increment.prover",
+            "increment.verifier",
+            "old_circuit.prover",
+            "old_circuit.verifier",
+        ] {
+            std::fs::write(keys_dir.join(name), b"key").unwrap();
+        }
+
+        prune_orphan_keys(&contract_dir);
+
+        assert!(keys_dir.join("increment.prover").exists());
+        assert!(keys_dir.join("increment.verifier").exists());
+        assert!(!keys_dir.join("old_circuit.prover").exists());
+        assert!(!keys_dir.join("old_circuit.verifier").exists());
+    }
+
+    #[test]
+    fn prune_orphan_keys_no_keys_dir_is_noop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contract_dir = make_contract_dir(tmp.path(), "crate_a", "counter", &["increment"]);
+        // No keys/ dir at all — must not panic or create one.
+        prune_orphan_keys(&contract_dir);
+        assert!(!contract_dir.join("keys").exists());
+    }
+
+    #[test]
+    fn keys_need_update_missing_and_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let contract_dir = make_contract_dir(tmp.path(), "crate_a", "counter", &["increment"]);
+        let zkir = contract_dir.join("zkir").join("increment.zkir");
+
+        // No keys at all -> stale.
+        assert!(keys_need_update(&zkir));
+
+        // Both keys newer than zkir -> fresh.
+        let keys_dir = contract_dir.join("keys");
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("increment.prover"), b"pk").unwrap();
+        std::fs::write(keys_dir.join("increment.verifier"), b"vk").unwrap();
+        assert!(!keys_need_update(&zkir));
+
+        // zkir newer than keys -> stale again.
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&zkir)
+            .unwrap()
+            .set_modified(future)
+            .unwrap();
+        assert!(keys_need_update(&zkir));
+
+        // Only one key present -> stale.
+        std::fs::remove_file(keys_dir.join("increment.verifier")).unwrap();
+        assert!(keys_need_update(&zkir));
     }
 }

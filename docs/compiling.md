@@ -93,7 +93,7 @@ This runs `cargo build` (which fires the proc macro), lists the artifacts, and r
 
 ```
 Building contract...
-Contract 'counter':
+Contract 'counter_contract/counter':
   zkir/increment.zkir
   compiler/contract-info.json
 
@@ -101,10 +101,10 @@ Artifacts at: ./target/nocturne/
 
 Generating keys for 1 circuit(s) with missing/stale prover/verifier files...
   Compiling circuit 'increment'...
-    → target/nocturne/counter/keys/increment.prover
-    → target/nocturne/counter/keys/increment.verifier
+    → target/nocturne/counter_contract/counter/keys/increment.prover
+    → target/nocturne/counter_contract/counter/keys/increment.verifier
     k=5, rows=24
-    Keys written to target/nocturne/counter/keys
+    Keys written to target/nocturne/counter_contract/counter/keys
 ```
 
 The keygen step is skipped on subsequent builds when nothing has changed — the proc macro writes ZKIR with `write_if_changed` semantics, so a contract whose source didn't change leaves its `.zkir` mtime untouched and its keys are considered up to date.
@@ -117,7 +117,7 @@ If `cargo nocturne build` reports "No contract artifacts found," the macro didn'
 ## 3. Inspect the artifacts
 
 ```
-target/nocturne/<contract_name>/
+target/nocturne/<crate_name>/<contract_name>/
 ├── zkir/
 │   └── <circuit_name>.zkir       # one per circuit function
 ├── compiler/
@@ -126,6 +126,8 @@ target/nocturne/<contract_name>/
     ├── <circuit_name>.prover
     └── <circuit_name>.verifier
 ```
+
+`<crate_name>` is the `CARGO_CRATE_NAME` of the crate the contract module lives in (hyphens become underscores), so the counter example lands at `target/nocturne/counter_contract/counter/`. Keying by crate *and* contract keeps two crates that define equally named contract modules from overwriting each other.
 
 `keys/` is empty until you run keygen — `cargo nocturne build` only emits `zkir/` and `compiler/`. The layout mirrors compactc's so downstream tooling sees the same shape from either compiler.
 
@@ -164,9 +166,11 @@ cargo nocturne keygen
 For every `.zkir` under `target/nocturne/`, this writes:
 
 ```
-target/nocturne/<contract_name>/keys/<circuit_name>.prover     # binary prover key
-target/nocturne/<contract_name>/keys/<circuit_name>.verifier   # binary verifier key
+target/nocturne/<crate_name>/<contract_name>/keys/<circuit_name>.prover     # binary prover key
+target/nocturne/<crate_name>/<contract_name>/keys/<circuit_name>.verifier   # binary verifier key
 ```
+
+Key pairs whose `.zkir` is gone (circuit renamed or deleted) are removed before keygen runs, so `keys/` always mirrors the current circuit set.
 
 The verifier key is what gets registered on-chain when you deploy. Keys are tagged with `midnight-serialize` so downstream tools recognise them.
 

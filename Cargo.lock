@@ -201,6 +201,7 @@ dependencies = [
  "midnight-transient-crypto",
  "midnight-zkir",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

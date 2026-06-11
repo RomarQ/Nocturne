@@ -78,13 +78,13 @@ jobs:
 
       - name: Verify counter build artifacts
         run: |
-          test -f target/nocturne/counter/zkir/increment.zkir
-          test -f target/nocturne/counter/compiler/contract-info.json
+          test -f target/nocturne/counter_contract/counter/zkir/increment.zkir
+          test -f target/nocturne/counter_contract/counter/compiler/contract-info.json
 
       - name: Verify kitchen-sink build artifacts
         run: |
-          test -f target/nocturne/kitchen_sink/compiler/contract-info.json
-          zkir_count=$(find target/nocturne/kitchen_sink/zkir -name '*.zkir' | wc -l)
+          test -f target/nocturne/kitchen_sink/kitchen_sink/compiler/contract-info.json
+          zkir_count=$(find target/nocturne/kitchen_sink/kitchen_sink/zkir -name '*.zkir' | wc -l)
           echo "kitchen-sink emitted ${zkir_count} ZKIR circuit(s)"
           test "$zkir_count" -gt 0
 
@@ -93,20 +93,20 @@ jobs:
 
       - name: Verify counter keygen outputs
         run: |
-          test -f target/nocturne/counter/keys/increment.prover
-          test -f target/nocturne/counter/keys/increment.verifier
+          test -f target/nocturne/counter_contract/counter/keys/increment.prover
+          test -f target/nocturne/counter_contract/counter/keys/increment.verifier
 
       - name: Verify kitchen-sink keygen outputs
         run: |
-          zkir_count=$(find target/nocturne/kitchen_sink/zkir -name '*.zkir' | wc -l)
-          prover_count=$(find target/nocturne/kitchen_sink/keys -name '*.prover' | wc -l)
-          verifier_count=$(find target/nocturne/kitchen_sink/keys -name '*.verifier' | wc -l)
+          zkir_count=$(find target/nocturne/kitchen_sink/kitchen_sink/zkir -name '*.zkir' | wc -l)
+          prover_count=$(find target/nocturne/kitchen_sink/kitchen_sink/keys -name '*.prover' | wc -l)
+          verifier_count=$(find target/nocturne/kitchen_sink/kitchen_sink/keys -name '*.verifier' | wc -l)
           echo "zkir: ${zkir_count}, prover: ${prover_count}, verifier: ${verifier_count}"
           test "$prover_count" -eq "$zkir_count"
           test "$verifier_count" -eq "$zkir_count"
 
       - name: Verifier key matches compactc golden (counter)
         run: |
-          cmp target/nocturne/counter/keys/increment.verifier \
+          cmp target/nocturne/counter_contract/counter/keys/increment.verifier \
               tests/golden/counter-increment.verifier
           echo "Verifier key is byte-identical to compactc output."
