@@ -15,7 +15,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-license = "Apache-2.0"
+license = "MIT"
 repository = "https://github.com/RomarQ/Nocturne"
 version = "0.1.0"
 # Bounded by the dependency tree (konst 0.4 requires 1.89.0); the

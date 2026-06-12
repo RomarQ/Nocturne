@@ -1,7 +1,7 @@
 # Nocturne
 
 [![CI](https://github.com/RomarQ/Nocturne/actions/workflows/ci.yml/badge.svg)](https://github.com/RomarQ/Nocturne/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > [!WARNING]
 > Alpha software, under active development and **not production ready**. APIs may change without notice.
@@ -51,6 +51,8 @@ cd examples/counter-contract
 cargo nocturne build
 ```
 
+The first build downloads Midnight's universal setup parameters (network access required once; cached under `~/.cache/midnight/zk-params`). Rust 1.89 or newer is required.
+
 `cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace. Artifacts land in the workspace target dir, keyed by crate and contract module. For the counter example that's `target/nocturne/counter_contract/counter/`:
 
 ```
@@ -78,7 +80,7 @@ The circuit and its transcript builder must agree on the exact order of private 
 What's in:
 
 - Ledger types: `Counter`, `Cell<T>`, `Map<K, V>`, `Set<T>`, `MerkleTree<H, T>`
-- Value types: `Boolean`, `Field`, `Uint<N>` for N ≤ 128, `Bytes<N>` (values wider than one field element are chunked into ceil(N/31) Frs; 48- and 64-byte shapes are prove-tested), `Option<T>`, `[T; N]` for N ≤ 11, tuples up to arity 11, user structs, homogeneous-payload enums
+- Value types: `Boolean`, `Field`, `Uint<N>` for N ≤ 128, `Bytes<N>` (values wider than one field element (Fr) are chunked into ceil(N/31) field elements; 48- and 64-byte shapes are prove-tested), `Option<T>`, `[T; N]` for N ≤ 11, tuples up to arity 11, user structs, homogeneous-payload enums
 - Control flow: `if`/`else`, `match` on user enums and `Option`, const-bounded `for` loops, `assert!` / `assert_eq!`, `if`-as-expression with `cond_select` multiplex
 - Composition: free `fn` helpers in the contract module inlined into circuits (compactc's no-annotation lowering rule), parametric witness methods (`witnesses.foo(args)`) alongside plain witness fields
 - Cross-circuit: parameterized constructors with `deploy::initial_state(...)`, witness reads inside `let` bindings, `disclose(_)`, `merkle_tree_path_root(_)`
@@ -106,8 +108,8 @@ crates/
   nocturne-macro            #[nocturne::contract] proc macro
   nocturne-ir               typed IR the macro emits
   nocturne-codegen          ZKIR + transcript + deploy emitters
-  nocturne-types            user-facing types (Counter, Cell<T>, Map<...>, ...)
-  nocturne-storage          storage primitives mirroring the ledger crate
+  nocturne-types            value types (Field, Uint<N>, Bytes<N>, Boolean, ...)
+  nocturne-storage          ledger types (Counter, Cell<T>, Map<K, V>, Set<T>, MerkleTree<H, T>)
   nocturne-metadata         contract-info.json schema
 tools/
   cargo-nocturne            cargo subcommand for build/keygen/test
@@ -125,4 +127,4 @@ When upstream protocol behavior matters, the canonical reference is [`midnight-l
 
 ## License
 
-Licensed under [Apache-2.0](LICENSE).
+Licensed under [MIT](LICENSE).

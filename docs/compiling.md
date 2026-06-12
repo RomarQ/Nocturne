@@ -118,14 +118,14 @@ target/nocturne/<crate_name>/<contract_name>/
 │   └── <circuit_name>.zkir       # one per circuit function
 ├── compiler/
 │   └── contract-info.json        # circuit signatures + witness types
-└── keys/                         # populated by `cargo nocturne keygen`
+└── keys/                         # populated by `cargo nocturne build`/`keygen`
     ├── <circuit_name>.prover
     └── <circuit_name>.verifier
 ```
 
 `<crate_name>` is the `CARGO_CRATE_NAME` of the crate the contract module lives in (hyphens become underscores), so the counter example lands at `target/nocturne/counter_contract/counter/`. Keying by crate *and* contract keeps two crates that define equally named contract modules from overwriting each other.
 
-`keys/` is empty until you run keygen — `cargo nocturne build` only emits `zkir/` and `compiler/`. The layout mirrors compactc's so downstream tooling sees the same shape from either compiler.
+`keys/` is empty after a plain `cargo build` (the macro only emits `zkir/` and `compiler/`); `cargo nocturne build` and `cargo nocturne keygen` populate it. The layout mirrors compactc's so downstream tooling sees the same shape from either compiler.
 
 **`*.zkir`** is a JSON-serialised `IrSource` — the ZK circuit definition. One file per `#[nocturne(circuit)]` method. Consumed by `IrSource::load()` downstream for keygen, proving, and verification.
 
@@ -140,6 +140,9 @@ target/nocturne/<crate_name>/<contract_name>/
     { "name": "increment", "pure": false, "proof": true, "arguments": [], "result-type": { "type-name": "Tuple", "types": [] } }
   ],
   "witnesses": [],
+  "ledger": [
+    { "name": "count", "index": 0, "exported": true, "type": { "type-name": "Counter" } }
+  ],
   "contracts": []
 }
 ```
