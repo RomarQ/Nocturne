@@ -1,9 +1,3 @@
-# Development tasks for the Nocturne workspace.
-# Run `make` (or `make help`) to list targets. The targets mirror what
-# .github/workflows/ci.yml runs, so local and CI stay in sync.
-
-CARGO ?= cargo
-
 # Compiled by `make build-examples`; the golden comparison reads the
 # counter artifact from here.
 COUNTER_VERIFIER := target/nocturne/counter_contract/counter/keys/increment.verifier
@@ -35,31 +29,31 @@ help:
 	@echo "    regen-golden   regenerate the golden with compactc (see tests/golden/README.md)"
 
 # ============================================================
-# Lint / build / test  (mirrors .github/workflows/ci.yml)
+# Lint / build / test  (the CI workflow calls these targets)
 # ============================================================
 
 fmt:
-	$(CARGO) fmt --all
+	cargo fmt --all
 
 fmt-check:
-	$(CARGO) fmt --all --check
+	cargo fmt --all --check
 
 clippy:
-	$(CARGO) clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --locked -- -D warnings
 
 check:
-	$(CARGO) check --workspace
+	cargo check --workspace --all-targets --locked
 
 test:
-	$(CARGO) test --workspace
+	cargo test --workspace --locked
 
 build:
-	$(CARGO) build --workspace
+	cargo build --workspace --locked
 
 # cargo audit checks Cargo.lock against the RustSec advisory database.
 # Not yet a CI gate; run it before releases.
 audit:
-	$(CARGO) audit
+	cargo audit
 
 ci: fmt-check clippy check test
 	@echo "OK: local CI gates passed"
@@ -72,7 +66,7 @@ ci: fmt-check clippy check test
 # target dir via cargo metadata, so this works from the repo root as-is.
 # The first run downloads Midnight's universal setup params (network).
 build-examples:
-	$(CARGO) run -p cargo-nocturne -- nocturne build
+	cargo run --locked -p cargo-nocturne -- nocturne build
 
 golden-check:
 	@test -f $(COUNTER_VERIFIER) || { echo "missing $(COUNTER_VERIFIER); run 'make build-examples' first"; exit 1; }
