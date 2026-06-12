@@ -1107,9 +1107,13 @@ mod tests {
     ///     instruction stream alone can't recover branch extents (a
     ///     branch whose condition was hoisted to a `let` and whose body
     ///     only reads a witness leaves no other trace), so the spans
-    ///     are the ground truth. See
-    ///     `memories/conditional-io-guards.md` for why a missing guard
-    ///     desynchronizes transcript consumption.
+    ///     are the ground truth. A missing guard desynchronizes
+    ///     transcript consumption: the zkir VM would consume a
+    ///     transcript entry the runtime builder only produces for the
+    ///     active branch (a guard of 0 pushes 0 without advancing the
+    ///     transcript index; midnight-ledger ledger-8,
+    ///     zkir/src/ir_vm.rs:325-355), and prove fails with "Ran out
+    ///     of transcript outputs" or "Transcripts not fully consumed".
     fn assert_structural_invariants(
         name: &str,
         ir: &IrSource,

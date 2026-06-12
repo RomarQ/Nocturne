@@ -750,9 +750,10 @@ async fn counter_ledger_constructed_preimage_proves_and_verifies() {
 /// the proof with them.
 ///
 /// For the fix to be correct, the IR must arrange for `DeclarePubInput`
-/// values inside an inactive branch to be zero — matching `Op::Noop`'s
-/// zero-padding `field_repr`. See
-/// `memories/conditional-branch-cond-select-zeroing.md`.
+/// values inside an inactive branch to be zero — `Op::Noop { n }`
+/// field_reprs as `n` zeros (onchain-vm/src/ops.rs:403), and the
+/// emitter guarantees the match by routing every branch-body declare
+/// through `cond_select(guard, value, 0)`.
 #[tokio::test]
 async fn voting_verifies_with_ledger_shape_pis() {
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
@@ -826,8 +827,11 @@ async fn voting_verifies_with_ledger_shape_pis() {
 /// path, and the verifier accepts ledger-shape PIs built as
 /// `[binding_input, comm, ..field_repr(transcript)]`.
 ///
-/// Exercises the Push+Push+Ins encoding for storage writes
-/// (see `memories/storage-cell-encoding-gap.md`).
+/// Exercises the Push+Push+Ins encoding for storage writes: a weak
+/// `Push { storage: false }` for the key, a strong `Push { storage: true }`
+/// for the value, then `Ins { n: 1 }` — matching compactc 0.30.0's
+/// emission for `Cell::set` (storage-strength tagging per
+/// midnight-ledger ledger-8, onchain-vm/src/vm.rs:631).
 #[tokio::test]
 async fn flag_raise_proves_and_verifies() {
     use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
@@ -10549,8 +10553,9 @@ async fn assert_contains_with_state_proves_and_verifies() {
 // Branch-body private-push PLACEMENT. The transcript builder must emit a
 // branch body's witness pushes INSIDE the runtime `if` (the circuit's
 // PrivateInput for the branch is guarded, so the zkir VM skips its
-// transcript slot on the inactive path — see
-// memories/conditional-io-guards.md). If the builder hoisted branch-body
+// transcript slot on the inactive path — a guard of 0 pushes 0 without
+// advancing the transcript index; midnight-ledger ledger-8,
+// zkir/src/ir_vm.rs:325-355). If the builder hoisted branch-body
 // pushes out of the runtime `if`, the INACTIVE case below would push an
 // entry the circuit never consumes and prove would fail with
 // "Transcripts not fully consumed".

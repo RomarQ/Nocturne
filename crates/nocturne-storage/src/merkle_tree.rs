@@ -34,9 +34,12 @@ impl<const N: usize> MerkleLeaf for Bytes<N> {
 /// the height and `T` is the leaf type). On-chain this maps to a
 /// 2-element `StateValue::Array` of `[BoundedMerkleTree<()>,
 /// Cell<u64>]` — the tree stores leaf hashes at u64 indices, and the
-/// Cell tracks the next insertion slot. See
-/// [`merkle-tree-encoding`](../../../memories/merkle-tree-encoding.md)
-/// for the full on-chain encoding and the staged implementation plan.
+/// Cell tracks the next insertion slot. Shape verified against compactc
+/// 0.30.0's generated runtime; the `StateValue::BoundedMerkleTree`
+/// variant lives in midnight-ledger ledger-8,
+/// onchain-state/src/state.rs:79-98. The leaf type `T` only ever
+/// reaches the chain as a leaf hash (a Field element), so `T`'s
+/// alignment is irrelevant to the on-chain encoding.
 ///
 /// `HEIGHT` is the tree height (must be `1..=32` per the on-chain VM
 /// invariant on `BoundedMerkleTree`).
@@ -198,10 +201,11 @@ impl<'a> midnight_base_crypto::repr::BinaryHashRepr for LeafBytes<'a> {
 
 impl<const HEIGHT: usize, T> LedgerType for MerkleTree<HEIGHT, T> {
     /// MerkleTree is the first ledger primitive that requires explicit
-    /// constructor emission — its initial state is a non-Null Array, not
-    /// a default-Null cell. See the staged plan in
-    /// `memories/merkle-tree-encoding.md` (Phase B notes the requirement
-    /// here; Phase D will emit the constructor IR).
+    /// constructor emission — its initial state is a non-Null Array
+    /// carrying the tree height, not a default-Null cell.
+    /// `deploy_codegen` honors this by emitting the 2-element
+    /// `StateValue::Array { [BoundedMerkleTree(blank(H)), Cell(0u64)] }`
+    /// for MerkleTree fields.
     fn requires_init() -> bool {
         true
     }

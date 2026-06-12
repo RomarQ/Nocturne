@@ -60,9 +60,10 @@ pub struct ZkirOutput {
     /// structural-invariant tests: an instruction is "inside a
     /// conditional" iff its position falls in one of these spans, so
     /// the tests can assert every `PrivateInput`/`PublicInput` emitted
-    /// there carries `guard: Some(_)` (see
-    /// `memories/conditional-io-guards.md`). Not part of the `.zkir`
-    /// artifact.
+    /// there carries `guard: Some(_)` (an unguarded read inside a branch
+    /// would consume a transcript entry the runtime builder never
+    /// produces on the inactive path; midnight-ledger ledger-8,
+    /// zkir/src/ir_vm.rs:325-355). Not part of the `.zkir` artifact.
     pub branch_spans: Vec<std::ops::Range<usize>>,
 }
 
@@ -166,8 +167,12 @@ struct ZkirEmitter {
     /// True when emitting inside a conditional branch. `DeclarePubInput`
     /// values must be multiplexed against zero via `CondSelect(guard, value, 0)`
     /// so the inactive-branch slot is zero — matching `Op::Noop`'s zero
-    /// `field_repr` that the ledger interleaves at verify time. See
-    /// `memories/conditional-branch-cond-select-zeroing.md`.
+    /// `field_repr` that the ledger interleaves at verify time
+    /// (midnight-ledger ledger-8: `ContractCall::prove` splices
+    /// `Op::Noop { n }` over inactive segments, ledger/src/prove.rs:263-289,
+    /// and Noop field_reprs as `n` zeros, onchain-vm/src/ops.rs:403).
+    /// The zeroing must happen at emit time because `DeclarePubInput`
+    /// pushes `memory[var]` unconditionally (zkir/src/ir_vm.rs:339-342).
     in_conditional: bool,
     /// Cached `LoadImm 0` to avoid re-emitting for every guarded declare.
     zero_var: Option<Index>,
@@ -682,8 +687,10 @@ impl ZkirEmitter {
                     // First touch inside a branch: guarded wire, no cache.
                     // The runtime builder pushes this field's value inside
                     // the same runtime branch; the guard makes the zkir VM
-                    // skip the transcript read on the inactive path. See
-                    // `memories/conditional-io-guards.md`.
+                    // skip the transcript read on the inactive path
+                    // (guard 0 pushes 0 without advancing the transcript
+                    // index; midnight-ledger ledger-8,
+                    // zkir/src/ir_vm.rs:325-355).
                     self.guarded_witness_fields.insert(field_str);
                 } else {
                     self.variables.insert(key, first);
@@ -1099,10 +1106,11 @@ impl ZkirEmitter {
             // value reaches the public view through whatever ledger op
             // consumes it (Cell::set, Map::insert, ...). Emitting a
             // DeclarePubInput + PiSkip here would create a PI group that
-            // no transcript op backs — the ledger reconstructs verifier
-            // PIs exclusively from transcript ops (see
-            // `memories/ledger-pi-layout.md`), so any active-path
-            // disclose would fail at prove time.
+            // no transcript op backs — the ledger builds verifier PIs
+            // exclusively as `[binding_input, comm,
+            // ..field_repr(transcript ops)]` (midnight-ledger ledger-8,
+            // ledger/src/verify.rs:1869), so any active-path disclose
+            // would fail at prove time.
             ExprIR::Disclose { value, .. } => self.emit_expr(value),
 
             ExprIR::MethodCall { receiver, args, .. } => {
@@ -1522,7 +1530,9 @@ impl ZkirEmitter {
     /// the parent Array on the stack (so the second `Ins` can put the
     /// modified Map back). The first `Ins` pops `[value, key, map]` and
     /// inserts. The second `Ins` pops `[modified_map, path, array]` and
-    /// restores the field. See `memories/map-ledger-field-encoding.md`.
+    /// restores the field. Sequence matches compactc 0.30.0's emission
+    /// for `Map::insert`; opcode field_reprs per midnight-ledger
+    /// ledger-8, onchain-vm/src/ops.rs:400-462.
     fn emit_map_insert(
         &mut self,
         field_idx: u8,
@@ -1571,9 +1581,8 @@ impl ZkirEmitter {
     /// Emit ZKIR for `Map::contains(k) -> Boolean` at `field_idx`.
     ///
     /// On-chain encoding (verified empirically against compactc 0.30.0 for
-    /// `Map<Bytes<32>, Uint<64>>`; see
-    /// `/tmp/cond-experiments/map_out/zkir/member.zkir` and
-    /// `memories/map-ledger-field-encoding.md`):
+    /// `Map<Bytes<32>, Uint<64>>`; opcode field_reprs per midnight-ledger
+    /// ledger-8, onchain-vm/src/ops.rs:400-462):
     ///
     /// ```text
     /// Dup  { n: 0 }                                        // [0x30]
@@ -2037,10 +2046,12 @@ impl ZkirEmitter {
         });
     }
 
-    /// Dispatch a method call on a `MerkleTree<H, T>` ledger field.
-    /// Today only `check_root` is implemented (Phase C of the staged
-    /// plan in `memories/merkle-tree-encoding.md`); `insert` lands in
-    /// Phase D.
+    /// Dispatch a method call on a `MerkleTree<H, T>` ledger field
+    /// (`check_root` and `insert`). Encodings verified against compactc
+    /// 0.30.0's emission for `MerkleTree<10, Bytes<32>>`; the
+    /// tree-specific opcodes are `Root` (0x0a, pops a BoundedMerkleTree
+    /// and pushes its root) and `Eq` (0x02) — midnight-ledger ledger-8,
+    /// onchain-vm/src/vm.rs:562-577 and vm.rs:408-413.
     fn emit_merkle_tree_method(
         &mut self,
         field_idx: u8,
@@ -2422,11 +2433,8 @@ impl ZkirEmitter {
     }
 
     /// Emit a `Push { storage, value: StateValue::Cell(AlignedValue) }` group.
-    ///
-    /// NOT YET WIRED UP: held as scaffolding for the next-stage Cell::set
-    /// and Map::insert work. See `memories/storage-cell-encoding-gap.md`
-    /// for the remaining alignment + two-Push-pattern questions.
-    #[allow(dead_code)]
+    /// Shared by Cell::set, the Map/Set primitives, and MerkleTree
+    /// (multi-Fr aware: one `DeclarePubInput` per Fr the value occupies).
     ///
     /// The on-chain transcript op encodes as
     /// `[Push opcode (0x10|0x11), Cell discriminant (1), ..alignment.field_repr,

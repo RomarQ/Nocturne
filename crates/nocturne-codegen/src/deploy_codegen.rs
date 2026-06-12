@@ -77,7 +77,11 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                 // isn't implemented yet. Until it is, fail LOUDLY at
                 // deploy-state construction instead of silently dropping
                 // the entries (which would desync on-chain state from the
-                // constructor's view). See `memories/scope-blockers.md`.
+                // constructor's view). Implementing it needs the shared
+                // resolved-type encoder (the planned `NocturneType` refactor)
+                // so each entry serializes with the same K/V AlignedValue
+                // encoding the transcript side uses — not a fourth copy of
+                // the per-type encoding stack.
                 LedgerTypeKind::Map | LedgerTypeKind::Set => {
                     let msg = format!(
                         "nocturne: constructor-populated Map/Set fields are not yet \
