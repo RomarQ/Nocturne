@@ -21,7 +21,7 @@ There's a fourth kind of "artifact" that doesn't land on disk: the proc macro al
 
 JSON serialisation of `midnight_zkir::IrSource` plus a `version` wrapper. One file per `#[nocturne(circuit)]` method.
 
-**What it contains**: a stack-based instruction list (`load_imm`, `private_input`, `public_input`, `add`, `mul`, `cond_select`, `declare_pub_input`, …) that describes the Plonk constraint system for one circuit. Also `num_inputs` and `do_communications_commitment: true` (required for on-chain compatibility — see `memories/do-communications-commitment-required.md`).
+**What it contains**: an instruction list (`load_imm`, `private_input`, `public_input`, `add`, `mul`, `cond_select`, `declare_pub_input`, …) over a linear memory model that describes the Plonk constraint system for one circuit. Also `num_inputs` and `do_communications_commitment: true`. The commitment flag is required for on-chain compatibility: the ledger's verify path (`ledger/src/verify.rs` on the `ledger-8` branch) unconditionally feeds the communication commitment as the second public input, so a circuit built without that slot fails verification with a public-input count mismatch.
 
 **Produced by**: the `#[nocturne::contract]` proc macro at compile time. Written via `write_if_changed` (atomic temp-file + rename), so unchanged source leaves the file's mtime alone. Stale `.zkir` files from renamed or deleted circuits are pruned on the next macro expansion.
 
@@ -29,7 +29,7 @@ JSON serialisation of `midnight_zkir::IrSource` plus a `version` wrapper. One fi
 - `cargo nocturne keygen` — calls `IrSource::load()` then `IrSource::keygen()` to derive prover/verifier keys.
 - Downstream tooling (e.g. midnight-rs) that needs to re-derive proofs or inspect circuit structure.
 
-**Format**: pretty-printed JSON, ~1KB for a single-instruction circuit, scales with circuit complexity. Counter's `increment.zkir` is 1.1KB.
+**Format**: pretty-printed JSON, small for simple circuits, scales with circuit complexity.
 
 **Determinism**: byte-for-byte deterministic for a given source. Two clean builds of the same contract produce identical `.zkir`.
 
@@ -47,7 +47,7 @@ Binary, tagged-serialized prover key for the Plonk circuit defined by the matchi
 
 **Consumed by**: the client building a transaction. Downstream tools like midnight-rs load the prover key, collect witness values, and call `IrSource::prove(rng, params, pk, &preimage)` to produce a `Proof`.
 
-**Format**: binary, `midnight-serialize` tagged framing. Counter's `increment.prover` is 14KB; complex circuits with Merkle or hash operations are larger.
+**Format**: binary, `midnight-serialize` tagged framing. Complex circuits with Merkle or hash operations produce larger keys.
 
 **Security**: the prover key is not secret — it can be derived from `.zkir` plus the public universal setup. Keep it bundled with the application that calls `prove`, but you don't need to treat it like a private key.
 
@@ -65,7 +65,7 @@ Binary, tagged-serialized verifier key for the same circuit.
 - The on-chain ledger — the verifier key is registered per circuit when the contract is deployed; nodes use it to check `ContractCall` proofs.
 - Off-chain verifiers (e.g. light clients, audit tooling) that want to validate a proof without proving it.
 
-**Format**: binary, `midnight-serialize` tagged framing. Counter's `increment.verifier` is 1.3KB. Verifier keys are 5–10× smaller than the matching prover keys.
+**Format**: binary, `midnight-serialize` tagged framing. Verifier keys are several times smaller than the matching prover keys.
 
 **Reproducibility**: byte-for-byte deterministic given the same `.zkir` and the same universal setup parameters. The counter contract's verifier key is byte-identical to compactc's output for the equivalent Compact contract — CI compares against `tests/golden/counter-increment.verifier` as a regression guard.
 
@@ -151,11 +151,11 @@ pub mod my_contract {
 
 ## Summary table
 
-| Artifact | Format | Size (counter) | Produced by | Consumed by |
-|---|---|---|---|---|
-| `<circuit>.zkir` | JSON | ~1 KB | proc macro at `cargo build` | `keygen`, midnight-rs |
-| `<circuit>.prover` | binary | ~14 KB | `cargo nocturne build`/`keygen` | midnight-rs (proving) |
-| `<circuit>.verifier` | binary | ~1.3 KB | `cargo nocturne build`/`keygen` | on-chain ledger, off-chain verifiers |
-| `contract-info.json` | JSON | ~300 B | proc macro at `cargo build` | type generators, indexers |
-| `transcript::build_*` | Rust | — | proc macro | midnight-rs (transcript construction) |
-| `deploy::initial_state` | Rust | — | proc macro | midnight-rs (deploy) |
+| Artifact | Format | Produced by | Consumed by |
+|---|---|---|---|
+| `<circuit>.zkir` | JSON | proc macro at `cargo build` | `keygen`, midnight-rs |
+| `<circuit>.prover` | binary | `cargo nocturne build`/`keygen` | midnight-rs (proving) |
+| `<circuit>.verifier` | binary | `cargo nocturne build`/`keygen` | on-chain ledger, off-chain verifiers |
+| `contract-info.json` | JSON | proc macro at `cargo build` | type generators, indexers |
+| `transcript::build_*` | Rust | proc macro | midnight-rs (transcript construction) |
+| `deploy::initial_state` | Rust | proc macro | midnight-rs (deploy) |

@@ -1,15 +1,8 @@
 # Golden files: equivalence with `compactc`
 
-This directory holds the artifacts compactc produces for a small contract.
-CI verifies that Nocturne's `cargo nocturne build` + `keygen` pipeline
-produces the **same verifier key** (byte-for-byte) for the same contract:
-it compares `target/nocturne/counter_contract/counter/keys/increment.verifier`
-(the counter example's artifact, keyed by crate + contract module) against
-`counter-increment.verifier` here.
+This directory holds the artifacts compactc produces for a small contract. CI verifies that Nocturne's `cargo nocturne build` + `keygen` pipeline produces the **same verifier key** (byte-for-byte) for the same contract: it compares `target/nocturne/counter_contract/counter/keys/increment.verifier` (the counter example's artifact, keyed by crate + contract module) against `counter-increment.verifier` here.
 
-If they match, the two compilers emit mathematically identical Plonk
-circuits, even though the intermediate ZKIR may differ in cosmetic ways
-(variable numbering, instruction ordering, hex case).
+If they match, the two compilers emit mathematically identical Plonk circuits, even though the intermediate ZKIR may differ in cosmetic ways (variable numbering, instruction ordering, hex case).
 
 ## Files
 

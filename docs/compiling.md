@@ -33,11 +33,7 @@ pub mod counter {
 }
 ```
 
-Minimum requirements:
-
-- A `#[nocturne(ledger)]` struct describing on-chain state.
-- At least one `#[nocturne(constructor)]` returning `Self`.
-- At least one `#[nocturne(circuit)]` method (`&self` for read-only, `&mut self` for state transitions).
+The macro requires a `#[nocturne(ledger)]` struct describing on-chain state and at least one `#[nocturne(circuit)]` or `#[nocturne(constructor)]` function. In practice a deployable contract has both: a constructor returning `Self` and one or more circuit methods (`&self` for read-only, `&mut self` for state transitions).
 
 Optional:
 
@@ -57,9 +53,9 @@ The eDSL is plain Rust syntax. The following types are recognised in witness fie
 | `Bytes<N>` | `Bytes<N>`, chunked into ceil(N/31) Frs when `N > 31` | Fixed-size byte arrays. Multi-Fr shapes (e.g. `Bytes<48>` Map keys, `Bytes<64>` Merkle leaves) are prove-tested. |
 | `Option<T>` | `(Bytes<1>, T)` | Same wire shape as Compact's `Maybe<T>`. `None` synthesises `T::default()` for the payload slot. |
 | `[T; N]` for `1 ≤ N ≤ 11` | N-tuple of `T` | Same wire shape as Compact's `Vector<N, T>`. Index reads (`arr[i]`) accept compile-time integer literals; use `for i in 0..N { ... arr[i] ... }` to unroll a const range to literal indices. |
-| `MerkleTreeDigest`, `MerkleTreePath<H, T>` | Field-aligned | See `memories/merkle-tree-encoding.md`. |
+| `MerkleTreeDigest`, `MerkleTreePath<H, T>` | Field-aligned | Digest is one full Fr (32 bytes LE); a path entry is `(sibling digest, goes_left)`. Leaves are hashed with `persistent_hash` under the `"mdn:lh"` domain separator, matching compactc. |
 | Tuples `(T1, ..., Tn)` for `n ≤ 11` | concatenated component layouts | Upstream tuple `Aligned` impl. |
-| User `struct` / homogeneous-payload `enum` | as tuple / `(Bytes<1>, T)` | See `memories/compactc-vs-nocturne-divergences.md`. |
+| User `struct` / homogeneous-payload `enum` | as tuple / `(Bytes<1>, T)` | Structs encode as the tuple of their fields; unit-only enums as a `Bytes<1>` discriminant. See [compactc-vs-nocturne.md](compactc-vs-nocturne.md) for how this compares to Compact. |
 
 `if`-as-expression is supported: `let x = if cond { a } else { b };` multiplexes the branch result wires via ZKIR `cond_select` and emits a Rust `if`-expression on the transcript side. Either branch must yield a value (no missing `else`); rustc enforces this at the macro output.
 
