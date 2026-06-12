@@ -309,8 +309,10 @@ fn generate_op_stmt(
             // before the branch guard activates (unguarded, cached).
             // Branch-body events fire inside the runtime branch: the
             // emitter allocates them guarded, and the zkir VM skips
-            // their transcript slot on the inactive path (see
-            // `memories/conditional-io-guards.md`).
+            // their transcript slot on the inactive path — a guarded
+            // `PrivateInput`/`PublicInput` whose guard is 0 pushes 0
+            // WITHOUT advancing the transcript index (midnight-ledger
+            // ledger-8, zkir/src/ir_vm.rs:325-355).
             let witness_adds = private_event_pushes(cond, ctx, tracker);
             let cond_expr = generate_runtime_cond(cond, ctx);
             let outer_in_branch = tracker.in_branch;
@@ -455,8 +457,9 @@ fn generate_op_stmt(
 /// through `private_event_pushes`'s walk would push BOTH branches'
 /// private-transcript entries unconditionally, while the circuit's
 /// guarded `PrivateInput`s consume only the active branch's slot at
-/// prove time (see `memories/conditional-io-guards.md`) — the zkir VM
-/// then bails with "Transcripts not fully consumed"
+/// prove time (a guard of 0 pushes 0 without advancing the transcript
+/// index, zkir/src/ir_vm.rs:325-355) — the zkir VM then bails with
+/// "Transcripts not fully consumed"
 /// (midnight-ledger ledger-8, zkir/src/ir_vm.rs:472).
 fn find_expression_position_if(expr: &ExprIR) -> Option<proc_macro2::Span> {
     match expr {
@@ -1035,10 +1038,12 @@ fn let_binding_value_for_ledger_read(
                 Some(quote! { __nocturne_state.#f_ident.value() })
             }
         }
-        // `let v = self.map.lookup(&k);` — the canonical
-        // `if let Some(v) = map.get(&k)` sugar rewrites to
-        // contains + lookup (see `memories/map-get-sugar.md`), so the
-        // bound name must carry the real value, not `()`.
+        // `let v = self.map.lookup(&k);` — the parser rewrites the
+        // canonical `if let Some(v) = map.get(&k)` sugar to
+        // contains + lookup, because the on-chain VM has no `Option<V>`
+        // (`Popeq.as_cell` rejects `StateValue::Null`, so a missing-key
+        // lookup aborts the proof instead of returning None). The bound
+        // name must therefore carry the real value, not `()`.
         "lookup" => {
             let key = args.first().map(arg_to_runtime_raw_expr)?;
             Some(quote! { __nocturne_state.#f_ident.lookup(&#key) })

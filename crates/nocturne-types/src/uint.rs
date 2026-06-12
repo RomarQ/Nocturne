@@ -14,8 +14,13 @@ use std::ops::{Add, Mul, Sub};
 /// a divergence the proof never catches. Note this panic is conservative
 /// for intermediates: `(max + b) - b` is circuit-valid (field elements
 /// don't wrap at `2^N`) but panics off-chain on the `max + b` step —
-/// reorder the expression or widen the type. See
-/// `memories/uint-arithmetic-semantics.md`.
+/// reorder the expression or widen the type. `ConstrainBits(N)` only
+/// applies where a `Uint<N>` ENTERS the circuit (witness/public-input
+/// declaration), never to arithmetic results, so in-circuit
+/// `Uint<8>: 255 + 1` is the field element 256 and a proof over it
+/// verifies. This is a deliberate divergence from Compact's checked
+/// in-circuit arithmetic; emitting per-op range constraints is an open
+/// decision.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Uint<const N: u32>(u128);
 

@@ -35,6 +35,8 @@ Both compilers have a typed AST of circuit bodies between the parser and the cod
 
 Nocturne's two backends (the ZKIR emitter in [`zkir_emitter.rs`](../crates/nocturne-codegen/src/zkir_emitter.rs) and the transcript emitter in [`transcript_codegen.rs`](../crates/nocturne-codegen/src/transcript_codegen.rs)) both consume `ExprIR`. Keeping a structured representation between parsing and codegen avoids re-walking `syn::Expr` twice.
 
+One structural difference is worth knowing: compactc's IR is a hybrid of AST and lowered bytecode. Its `ledger-query` nodes embed the on-chain VM ops (`dup`, `idx`, `push`, `popeq`, ...) inline in the tree, so the IR can drive a transcript builder directly. Nocturne's `ExprIR` is a pure AST; the on-chain ops are derived at lowering time, independently per backend. The trade-off: compactc's IR is a fuller snapshot of the build output, while Nocturne's stays easier to retarget. Adding another backend (say, TypeScript output) is a codegen-layer change for Nocturne, whereas a new compactc backend has to ignore or re-derive the inlined ops.
+
 ## Where the IR-level choices show up on-chain
 
 These are the cases where the two compilers produce different ZKIR or transcript output for an equivalent contract. None of them break on-chain compatibility, but they make byte-for-byte verifier-key equivalence impossible beyond the counter contract.
@@ -54,7 +56,7 @@ Both compilers wrap each branch's `DeclarePubInput` in `cond_select(guard, value
 - **Compactc** opportunistically reuses values that happen to be zero in the inactive case, saving constraints.
 - **Nocturne** always emits the `cond_select` wrap.
 
-Same on-chain transcript; different constraint counts. Detail: [`memories/conditional-branch-cond-select-zeroing.md`](../memories/conditional-branch-cond-select-zeroing.md).
+Same on-chain transcript; different constraint counts. The invariant both compilers satisfy: the ledger replaces inactive transcript segments with `Op::Noop { n }`, which contributes `n` zero field elements to the verifier's public inputs, so every public input declared inside a conditional branch must evaluate to zero when the branch is inactive.
 
 ### 3. `Maybe<T>` / `Vector<N, T>` vs `Option<T>` / `[T; N]`
 
@@ -65,9 +67,7 @@ Nocturne maps these to plain Rust `Option<T>` and `[T; N]`. The wire shape match
 - `Option<T>` ↔ `Maybe<T>` ↔ `(Bytes<1>, T)` (via upstream `impl<T: Aligned> Aligned for Option<T>`).
 - `[T; N]` ↔ `Vector<N, T>` ↔ N-tuple of T (via upstream `tuple_aligned!`).
 
-Different source surface, different IR variants (`ExprIR` has `ArrayLit` and `Index` for arrays, plus an `EnumPayload` projection that handles `Option` as a synthetic enum-like), but the bytes match.
-
-Detail: [`memories/option-and-array-encoding.md`](../memories/option-and-array-encoding.md).
+Different source surface, different IR variants (`ExprIR` has `ArrayLit` and `Index` for arrays, plus an `EnumPayload` projection that handles `Option` as a synthetic enum-like), but the bytes match. Both encodings ride on upstream `Aligned` impls in midnight-ledger's `base-crypto/src/fab/alignments.rs`; the N ≤ 11 array ceiling comes from the largest `tuple_aligned!` impl upstream provides.
 
 ### 4. Sum types
 
@@ -78,13 +78,13 @@ Nocturne has real Rust enums with two encodings shipped:
 - **Unit-only** (`enum E { A, B, C }`) → `Bytes<1>` discriminant.
 - **Homogeneous payload** (`enum E { A(T), B(T) }` where every variant carries the same `T`) → `(Bytes<1>, T)`.
 
-Heterogeneous-payload enums (`enum E { A(u64), B(Bytes<32>) }`) aren't expressible in Compact and are open in Nocturne pending an ADR on the wire shape. See [`memories/scope-blockers.md`](../memories/scope-blockers.md).
+Heterogeneous-payload enums (`enum E { A(u64), B(Bytes<32>) }`) aren't expressible in Compact and are open in Nocturne pending a decision on the wire shape (compactc-style all-variants-materialized vs a tagged union). The choice affects every downstream consumer, so it needs a written design decision before codegen targets it.
 
 ### 5. Environment context (`kernel.self()`, block height, caller)
 
 Compactc lowers these to `Idx` instructions into a designated `kernel` ledger field that the on-chain runtime pre-populates with the live values before transcript replay.
 
-The on-chain VM (`reference-repos/midnight-ledger/onchain-vm/src/ops.rs`) has no dedicated opcode; the slot layout isn't documented externally. Until upstream confirms the canonical field index and the runtime injection contract, Nocturne can't emit a matching `Idx`. Tracking: [`memories/scope-blockers.md`](../memories/scope-blockers.md).
+The on-chain VM (`onchain-vm/src/ops.rs` in midnight-ledger) has no dedicated opcode; the slot layout isn't documented externally. Until upstream confirms the canonical field index and the runtime injection contract, Nocturne can't emit a matching `Idx`.
 
 ### 6. `if`-as-expression
 
@@ -104,9 +104,6 @@ The wire boundary stays bit-for-bit upstream:
 
 Whatever IR shape either compiler chooses internally, what eventually goes on-chain is byte-comparable wherever the two compilers happen to make the same encoding choices. The counter contract is the standing proof: both compilers emit verifier keys that diff to zero. See [`tests/golden/counter-increment.verifier`](../tests/golden/counter-increment.verifier).
 
-## Further reading
+## How equivalence is tested
 
-- [`memories/compactc-vs-nocturne-divergences.md`](../memories/compactc-vs-nocturne-divergences.md) — narrower, focused on what breaks byte-level VK equivalence.
-- [`memories/conditional-branch-cond-select-zeroing.md`](../memories/conditional-branch-cond-select-zeroing.md) — the branch-zeroing invariant in detail.
-- [`memories/option-and-array-encoding.md`](../memories/option-and-array-encoding.md) — wire shape rationale for `Option` and `[T; N]`.
-- [`memories/scope-blockers.md`](../memories/scope-blockers.md) — what's still open and why.
+The golden test only scales to circuits where the two compilers happen to produce structurally equivalent ZKIR; the divergences above (boolean cells, branch-zeroing optimizations) make byte-level VK equality impossible for anything richer than the counter. Nocturne doesn't chase VK equality there. The general on-chain compatibility gate is the integration test suite in `crates/nocturne/tests/`, which drives Nocturne's artifacts through midnight-ledger's canonical prove/verify path; goldens are a sanity check on the subset where byte equality is feasible. See [`tests/golden/README.md`](../tests/golden/README.md).

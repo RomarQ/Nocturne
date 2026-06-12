@@ -13,7 +13,11 @@
 //! `Bytes<N>` is rejected at parse time today (multi-Fr witness emission
 //! not yet implemented) — covered by `bytes_witness_is_rejected` below.
 //!
-//! See `memories/conditional-branch-cond-select-zeroing.md`.
+//! The cond_select zeroing in (4) exists because the ledger replaces
+//! inactive transcript segments with `Op::Noop { n }`, whose `field_repr`
+//! is `n` zeros — so inactive-branch `DeclarePubInput` slots must be zero
+//! for on-chain verification (midnight-ledger ledger-8,
+//! ledger/src/prove.rs:263-289 and onchain-vm/src/ops.rs:403).
 
 use nocturne::types::*;
 

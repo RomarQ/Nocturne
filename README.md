@@ -1,31 +1,14 @@
 # Nocturne
 
+[![CI](https://github.com/RomarQ/Nocturne/actions/workflows/ci.yml/badge.svg)](https://github.com/RomarQ/Nocturne/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 > [!WARNING]
-> This project is under active development and is **not production ready**. APIs may change without notice.
+> Alpha software, under active development and **not production ready**. APIs may change without notice.
 
 A Rust eDSL for writing [Midnight](https://midnight.network) smart contracts.
 
 You write contracts as ordinary Rust modules annotated with `#[nocturne::contract]`, and a proc macro lowers them to ZKIR circuits, Plonk prover/verifier keys, transcript builders, and contract metadata. The only hard constraint on output is `midnight-ledger` compliance: the ZKIR must verify, the on-chain transcript ops must execute correctly, and the initial state must deserialize. Surface syntax, IR shape, and artifact format are all open to do better where Rust's type system and metaprogramming enable something better.
-
-## Status
-
-Alpha. The codegen is being driven by translating real contracts; expect rough edges and missing features. Counter and a kitchen-sink contract exercising most primitives are in `examples/`. The end-to-end pipeline (write contract, build, keygen, prove, verify on-chain ledger state) is wired up and covered by an integration test suite that runs against the `midnight-ledger` types directly.
-
-What's in:
-
-- Ledger types: `Counter`, `Cell<T>`, `Map<K, V>`, `Set<T>`, `MerkleTree<H, T>`
-- Value types: `Boolean`, `Field`, `Uint<N>` for N ≤ 128, `Bytes<N>` (values wider than one field element are chunked into ceil(N/31) Frs; 48- and 64-byte shapes are prove-tested), `Option<T>`, `[T; N]` for N ≤ 11, tuples up to arity 11, user structs, homogeneous-payload enums
-- Control flow: `if`/`else`, `match` on user enums and `Option`, const-bounded `for` loops, `assert!` / `assert_eq!`, `if`-as-expression with `cond_select` multiplex
-- Composition: free `fn` helpers in the contract module inlined into circuits (compactc's no-annotation lowering rule), parametric witness methods (`witnesses.foo(args)`) alongside plain witness fields
-- Cross-circuit: parameterized constructors with `deploy::initial_state(...)`, witness reads inside `let` bindings, `disclose(_)`, `merkle_tree_path_root(_)`
-- Tooling: `cargo nocturne build` (auto-keygens stale circuits), `cargo nocturne keygen`, `cargo nocturne test`
-
-What's not yet:
-
-- `kernel.self()`, block height, caller (needs upstream slot layout confirmation)
-- Heterogeneous-payload enums (`enum E { A(u64), B(Bytes<32>) }`)
-- ZSwap and Kernel
-- Cross-contract calls
 
 ## Example: counter contract
 
@@ -60,13 +43,15 @@ pub mod counter {
 }
 ```
 
-Build it:
+## Quickstart
 
 ```sh
 cargo install --path tools/cargo-nocturne
 cd examples/counter-contract
 cargo nocturne build
 ```
+
+The first build downloads Midnight's universal setup parameters (network access required once; cached under `~/.cache/midnight/zk-params`). Rust 1.89 or newer is required.
 
 `cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace. Artifacts land in the workspace target dir, keyed by crate and contract module. For the counter example that's `target/nocturne/counter_contract/counter/`:
 
@@ -77,9 +62,43 @@ keys/increment.verifier
 compiler/contract-info.json
 ```
 
-`zkir/*.zkir` is the circuit definition (one per `#[nocturne(circuit)]`). `keys/*.{prover,verifier}` are Plonk keys derived from the ZKIR. `contract-info.json` describes the contract's surface (circuit signatures, witness types) for indexers and code generators.
+`zkir/*.zkir` is the circuit definition (one per `#[nocturne(circuit)]`). `keys/*.{prover,verifier}` are Plonk keys derived from the ZKIR. `contract-info.json` describes the contract's surface (circuit signatures, witness types, ledger fields) for indexers and code generators.
 
-See [`docs/compiling.md`](docs/compiling.md) for the full build flow, [`docs/artifacts.md`](docs/artifacts.md) for what each file is for and who consumes it, [`docs/compactc-vs-nocturne.md`](docs/compactc-vs-nocturne.md) if you're coming from Compact and want a reference of where the two diverge, and [`docs/compactc-ir-mapping.md`](docs/compactc-ir-mapping.md) for a construct-by-construct comparison of compactc's internal IR with Nocturne's `ExprIR`.
+## How it works
+
+The `#[nocturne::contract]` macro parses the module into a typed IR (`ContractIR` with one `ExprIR` tree per circuit body), validates it, and runs two backends over the same IR:
+
+- The **ZKIR emitter** lowers each circuit body to a `midnight_zkir::IrSource` instruction list, written to `zkir/<circuit>.zkir`.
+- The **transcript codegen** injects `transcript` and `deploy` submodules into the contract module: Rust functions that build the on-chain `Op` sequence and the initial `StateValue` at runtime.
+
+The circuit and its transcript builder must agree on the exact order of private inputs, or proofs fail. Both backends derive that order from one shared walk over the IR (the private-event walk in `nocturne-codegen`), so they can't drift apart.
+
+`cargo nocturne build` wraps `cargo build` (which fires the macro) and runs keygen for any circuit whose keys are missing or older than its `.zkir`. `cargo nocturne keygen` re-derives all keys unconditionally; `cargo nocturne test` wraps `cargo test`.
+
+## What's in / what's not
+
+What's in:
+
+- Ledger types: `Counter`, `Cell<T>`, `Map<K, V>`, `Set<T>`, `MerkleTree<H, T>`
+- Value types: `Boolean`, `Field`, `Uint<N>` for N ≤ 128, `Bytes<N>` (values wider than one field element (Fr) are chunked into ceil(N/31) field elements; 48- and 64-byte shapes are prove-tested), `Option<T>`, `[T; N]` for N ≤ 11, tuples up to arity 11, user structs, homogeneous-payload enums
+- Control flow: `if`/`else`, `match` on user enums and `Option`, const-bounded `for` loops, `assert!` / `assert_eq!`, `if`-as-expression with `cond_select` multiplex
+- Composition: free `fn` helpers in the contract module inlined into circuits (compactc's no-annotation lowering rule), parametric witness methods (`witnesses.foo(args)`) alongside plain witness fields
+- Cross-circuit: parameterized constructors with `deploy::initial_state(...)`, witness reads inside `let` bindings, `disclose(_)`, `merkle_tree_path_root(_)`
+- Tooling: `cargo nocturne build` (auto-keygens stale circuits), `cargo nocturne keygen`, `cargo nocturne test`
+
+What's not yet:
+
+- `kernel.self()`, block height, caller (needs upstream slot layout confirmation)
+- Heterogeneous-payload enums (`enum E { A(u64), B(Bytes<32>) }`)
+- ZSwap and Kernel
+- Cross-contract calls
+
+## Documentation
+
+- [`docs/compiling.md`](docs/compiling.md): the full build flow, from source to keys, plus troubleshooting.
+- [`docs/artifacts.md`](docs/artifacts.md): every artifact, who produces it, who consumes it, when it changes.
+- [`docs/compactc-vs-nocturne.md`](docs/compactc-vs-nocturne.md): where the two toolchains agree and diverge, for anyone coming from Compact.
+- [`SPEC.md`](SPEC.md): the language and compiler reference (types, expression-to-ZKIR mapping, validation rules, privacy model, `contract-info.json` schema).
 
 ## Repo layout
 
@@ -89,21 +108,23 @@ crates/
   nocturne-macro            #[nocturne::contract] proc macro
   nocturne-ir               typed IR the macro emits
   nocturne-codegen          ZKIR + transcript + deploy emitters
-  nocturne-types            user-facing types (Counter, Cell<T>, Map<...>, ...)
-  nocturne-storage          storage primitives mirroring the ledger crate
+  nocturne-types            value types (Field, Uint<N>, Bytes<N>, Boolean, ...)
+  nocturne-storage          ledger types (Counter, Cell<T>, Map<K, V>, Set<T>, MerkleTree<H, T>)
   nocturne-metadata         contract-info.json schema
 tools/
   cargo-nocturne            cargo subcommand for build/keygen/test
 examples/
   counter-contract          minimal example
   kitchen-sink              exercises every supported primitive
-docs/                       compiling.md, artifacts.md, compactc-vs-nocturne.md, compactc-ir-mapping.md
+docs/                       compiling.md, artifacts.md, compactc-vs-nocturne.md
 ```
-
-## Truth source
-
-When upstream protocol behavior matters, the canonical reference is [`midnight-ledger` `ledger-8`](https://github.com/midnightntwrk/midnight-ledger/tree/ledger-8). Inferring from existing code or docs is not enough; if you're adding or changing something that touches the on-chain VM, ZKIR, or transcript layout, read the upstream source first.
 
 ## Scope
 
 Nocturne stops at producing artifacts. Deploying contracts, building transactions, talking to wallets, indexer / node RPC: those belong in downstream tools, primarily [`midnight-rs`](https://github.com/RomarQ/midnight-rs).
+
+When upstream protocol behavior matters, the canonical reference is [`midnight-ledger` `ledger-8`](https://github.com/midnightntwrk/midnight-ledger/tree/ledger-8). If you're adding or changing something that touches the on-chain VM, ZKIR, or transcript layout, read the upstream source first.
+
+## License
+
+Licensed under [MIT](LICENSE).

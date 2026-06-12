@@ -186,7 +186,12 @@ pub fn parse_contract(module: ItemMod) -> Result<ContractIR, Diagnostics> {
                 // Anything else surfaces as a parse error at the offending
                 // variant — heterogeneous payloads, named-field variants,
                 // and multi-field tuple variants all need a separate
-                // encoding ADR. See memories/scope-blockers.md.
+                // encoding decision. Compact has no true sum-of-products
+                // on-chain (its Maybe/Either materialize every field
+                // unconditionally), so any heterogeneous layout would be a
+                // Nocturne-invented wire format that every downstream tool
+                // must agree on. That's a project-level ADR, not a
+                // codegen-time call.
                 let mut variants: Vec<UserEnumVariant> = Vec::new();
                 let mut payload_ty: Option<syn::Type> = None;
                 let mut rejected: Option<(syn::Ident, String)> = None;
@@ -241,7 +246,8 @@ pub fn parse_contract(module: ItemMod) -> Result<ContractIR, Diagnostics> {
                         format!(
                             "enum `{}` variant `{}` rejected: {}. Only \
                              homogeneous single-payload or all-unit enums \
-                             are supported. See memories/scope-blockers.md.",
+                             are supported; heterogeneous payloads have no \
+                             agreed on-chain encoding yet.",
                             e.ident, bad, reason
                         ),
                     ));
