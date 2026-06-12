@@ -11,8 +11,6 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  # ---------- Lint ----------
-
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -21,7 +19,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - run: cargo fmt --all --check
+      - run: make fmt-check
 
   clippy:
     name: Clippy
@@ -32,9 +30,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  # ---------- Check + Test ----------
+      - run: make clippy
 
   check:
     name: Check
@@ -43,7 +39,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-targets --locked
+      - run: make check
 
   test:
     name: Unit + integration tests
@@ -65,9 +61,7 @@ jobs:
           key: midnight-zk-params-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             midnight-zk-params-${{ runner.os }}-
-      - run: cargo test --workspace --locked
-
-  # ---------- End-to-end: cargo nocturne build + keygen ----------
+      - run: make test
 
   example:
     name: Examples (build + keygen + golden)
@@ -77,7 +71,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
       # keygen fetches the universal setup params on demand; same cache
       # as the test job.
       - name: Cache Midnight zk params
@@ -88,48 +81,17 @@ jobs:
           restore-keys: |
             midnight-zk-params-${{ runner.os }}-
 
-      # Build the workspace so the cargo-nocturne binary and every
-      # example's proc-macro output exist on disk before keygen runs.
-      # cargo build --workspace fires the proc macro for both examples
-      # (counter-contract and kitchen-sink), so a single subsequent
-      # `cargo nocturne build` + `keygen` covers both contracts.
-      - name: Build workspace
-        run: cargo build --workspace --locked
+      - run: make build-examples
 
-      - name: cargo nocturne build
-        run: ./target/debug/cargo-nocturne build
-
-      - name: Verify counter build artifacts
+      # cargo-nocturne exits nonzero when a keygen fails, but exits 0
+      # when a contract emitted no artifacts at all; assert the macro
+      # actually produced circuits for both examples.
+      - name: Verify example artifacts exist
         run: |
-          test -f target/nocturne/counter_contract/counter/zkir/increment.zkir
           test -f target/nocturne/counter_contract/counter/compiler/contract-info.json
-
-      - name: Verify kitchen-sink build artifacts
-        run: |
           test -f target/nocturne/kitchen_sink/kitchen_sink/compiler/contract-info.json
           zkir_count=$(find target/nocturne/kitchen_sink/kitchen_sink/zkir -name '*.zkir' | wc -l)
           echo "kitchen-sink emitted ${zkir_count} ZKIR circuit(s)"
           test "$zkir_count" -gt 0
 
-      - name: cargo nocturne keygen
-        run: ./target/debug/cargo-nocturne keygen
-
-      - name: Verify counter keygen outputs
-        run: |
-          test -f target/nocturne/counter_contract/counter/keys/increment.prover
-          test -f target/nocturne/counter_contract/counter/keys/increment.verifier
-
-      - name: Verify kitchen-sink keygen outputs
-        run: |
-          zkir_count=$(find target/nocturne/kitchen_sink/kitchen_sink/zkir -name '*.zkir' | wc -l)
-          prover_count=$(find target/nocturne/kitchen_sink/kitchen_sink/keys -name '*.prover' | wc -l)
-          verifier_count=$(find target/nocturne/kitchen_sink/kitchen_sink/keys -name '*.verifier' | wc -l)
-          echo "zkir: ${zkir_count}, prover: ${prover_count}, verifier: ${verifier_count}"
-          test "$prover_count" -eq "$zkir_count"
-          test "$verifier_count" -eq "$zkir_count"
-
-      - name: Verifier key matches compactc golden (counter)
-        run: |
-          cmp target/nocturne/counter_contract/counter/keys/increment.verifier \
-              tests/golden/counter-increment.verifier
-          echo "Verifier key is byte-identical to compactc output."
+      - run: make golden-check
