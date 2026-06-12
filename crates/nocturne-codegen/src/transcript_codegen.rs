@@ -7,6 +7,9 @@
 //! - Only emits ops for the active branch (matching ZKIR's pi_skip behavior)
 //! - Converts witness values to `Fr` for the private transcript
 
+use crate::aligned::accessor_aligned_value_expr;
+use crate::private_events::{FirstTouchTracker, PrivateEvent, walk_expr_events};
+use crate::typing::{is_transparent_wrapper, parse_uint_type, uint_max_value};
 use nocturne_ir::{CircuitIR, ContractIR, ExprIR, UserEnumVariant, UserStructField, WitnessIR};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -20,6 +23,9 @@ struct TranscriptCtx<'a> {
     field_names: &'a [String],
     field_types: &'a [syn::Type],
     witness_types: &'a HashMap<String, syn::Type>,
+    /// Parametric witness method name → return type, for the per-call-site
+    /// private-transcript pushes (`WitnessCall` events).
+    witness_methods: &'a HashMap<String, syn::Type>,
     user_structs: &'a HashMap<String, Vec<UserStructField>>,
     user_enums: &'a HashMap<String, Vec<UserEnumVariant>>,
 }
@@ -47,11 +53,22 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
         .as_ref()
         .map(witness_type_map)
         .unwrap_or_default();
+    let witness_methods: HashMap<String, syn::Type> = contract
+        .witnesses
+        .as_ref()
+        .map(|w| {
+            w.methods
+                .iter()
+                .map(|m| (m.name.to_string(), m.return_type.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     let ctx = TranscriptCtx {
         field_names: &field_names,
         field_types: &field_types,
         witness_types: &witness_types,
+        witness_methods: &witness_methods,
         user_structs: &contract.user_structs,
         user_enums: &contract.user_enums,
     };
@@ -80,8 +97,18 @@ pub fn generate_transcript_module(contract: &ContractIR) -> TokenStream {
             pub struct TranscriptResult {
                 /// VM operations for the transcript.
                 pub ops: Vec<VmOp>,
-                /// Private transcript values (witnesses as field elements).
+                /// Private transcript values (witnesses as field elements),
+                /// in the circuit's `PrivateInput` allocation order. This is
+                /// exactly the `value_only_field_repr` flattening of
+                /// `private_transcript_outputs` — both are built from the
+                /// same pushes.
                 pub private_transcript: Vec<Fr>,
+                /// One `AlignedValue` per witness invocation, in IR order —
+                /// the shape `ContractCallPrototype::private_transcript_outputs`
+                /// expects (the ledger flattens it with
+                /// `value_only_field_repr` when constructing the proof
+                /// preimage; see midnight-ledger `construct.rs`).
+                pub private_transcript_outputs: Vec<AlignedValue>,
             }
 
             #(#circuit_fns)*
@@ -106,63 +133,81 @@ fn generate_circuit_transcript_fn(
     let fn_name = format_ident!("build_{}_transcript", circuit.name);
     let doc = format!("Build the transcript for the `{}` circuit.", circuit.name);
 
+    // One first-touch tracker per circuit: the generated pushes mirror
+    // the ZKIR emitter's witness-field cache, so a field pushes exactly
+    // once — at its statically-known first touch in IR walk order.
+    let mut tracker = FirstTouchTracker::default();
     let body_stmts: Vec<TokenStream> = circuit
         .body
         .iter()
-        .map(|expr| generate_op_stmt(expr, ctx))
+        .map(|expr| generate_op_stmt(expr, ctx, &mut tracker))
         .collect();
 
     let needs_state = circuit_needs_state(&circuit.body);
     let state_param = if needs_state {
-        quote! { state: &#ledger_name, }
+        quote! { __nocturne_state: &#ledger_name, }
     } else {
         quote! {}
     };
 
+    // The generated parameter is ALWAYS named `witnesses`, regardless of
+    // what the user called their circuit parameter: every helper in this
+    // module emits `witnesses.<field>` accessors, and this is a fresh
+    // generated fn whose signature is part of the documented contract —
+    // nothing requires mirroring the user's local parameter name.
     if circuit.takes_witnesses {
-        let param_name = circuit
-            .witnesses_param_name
-            .as_ref()
-            .map(|n| format_ident!("{}", n))
-            .unwrap_or_else(|| format_ident!("witnesses"));
-
         let witnesses_ty = witnesses_name
             .map(|n| quote! { &#n })
             .unwrap_or_else(|| quote! { &() });
 
         quote! {
             #[doc = #doc]
-            pub fn #fn_name(#state_param #param_name: #witnesses_ty) -> TranscriptResult {
-                let mut ops: Vec<VmOp> = Vec::new();
-                let mut private_transcript: Vec<Fr> = Vec::new();
+            pub fn #fn_name(#state_param witnesses: #witnesses_ty) -> TranscriptResult {
+                let mut __nocturne_ops: Vec<VmOp> = Vec::new();
+                let mut __nocturne_private_transcript: Vec<Fr> = Vec::new();
+                let mut __nocturne_private_transcript_outputs: Vec<AlignedValue> = Vec::new();
 
                 #(#body_stmts)*
 
-                TranscriptResult { ops, private_transcript }
+                TranscriptResult {
+                    ops: __nocturne_ops,
+                    private_transcript: __nocturne_private_transcript,
+                    private_transcript_outputs: __nocturne_private_transcript_outputs,
+                }
             }
         }
     } else if needs_state {
         quote! {
             #[doc = #doc]
-            pub fn #fn_name(state: &#ledger_name) -> TranscriptResult {
-                let mut ops: Vec<VmOp> = Vec::new();
-                let mut private_transcript: Vec<Fr> = Vec::new();
+            pub fn #fn_name(__nocturne_state: &#ledger_name) -> TranscriptResult {
+                let mut __nocturne_ops: Vec<VmOp> = Vec::new();
+                let mut __nocturne_private_transcript: Vec<Fr> = Vec::new();
+                let mut __nocturne_private_transcript_outputs: Vec<AlignedValue> = Vec::new();
 
                 #(#body_stmts)*
 
-                TranscriptResult { ops, private_transcript }
+                TranscriptResult {
+                    ops: __nocturne_ops,
+                    private_transcript: __nocturne_private_transcript,
+                    private_transcript_outputs: __nocturne_private_transcript_outputs,
+                }
             }
         }
     } else {
         quote! {
             #[doc = #doc]
             pub fn #fn_name() -> TranscriptResult {
-                let mut ops: Vec<VmOp> = Vec::new();
-                let mut private_transcript: Vec<Fr> = Vec::new();
+                let mut __nocturne_ops: Vec<VmOp> = Vec::new();
+                let mut __nocturne_private_transcript: Vec<Fr> = Vec::new();
+                let mut __nocturne_private_transcript_outputs: Vec<AlignedValue> = Vec::new();
 
                 #(#body_stmts)*
 
-                TranscriptResult { ops, private_transcript }
+                TranscriptResult {
+                    ops: __nocturne_ops,
+                    private_transcript: __nocturne_private_transcript,
+                    private_transcript_outputs: __nocturne_private_transcript_outputs,
+                }
             }
         }
     }
@@ -212,16 +257,394 @@ fn expr_needs_state(expr: &ExprIR) -> bool {
         ExprIR::UnaryOp { expr: inner, .. } => expr_needs_state(inner),
         ExprIR::Reference { expr: inner, .. } => expr_needs_state(inner),
         ExprIR::Disclose { value, .. } => expr_needs_state(value),
+        // `assert!(self.allowed.contains(&k))` bakes the contains result
+        // from `state` — without this arm the generated fn lacks the
+        // `state` param while its body references it.
+        ExprIR::Assert { kind, .. } => match kind {
+            nocturne_ir::expr::AssertKind::Assert(cond) => expr_needs_state(cond),
+            nocturne_ir::expr::AssertKind::AssertEq(a, b) => {
+                expr_needs_state(a) || expr_needs_state(b)
+            }
+        },
+        // Payload projection over a ledger read (`match self.f.get() { … }`).
+        ExprIR::EnumPayload { scrutinee, .. } => expr_needs_state(scrutinee),
+        // Arg-bearing shapes: any argument may carry a ledger read.
+        ExprIR::FnCall { args, .. } | ExprIR::WitnessCall { args, .. } => {
+            args.iter().any(expr_needs_state)
+        }
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            elements.iter().any(expr_needs_state)
+        }
+        ExprIR::StructInit { fields, .. } => fields.iter().any(|(_, e)| expr_needs_state(e)),
+        ExprIR::Index { array, .. } => expr_needs_state(array),
+        ExprIR::Return { value, .. } => value.as_deref().is_some_and(expr_needs_state),
         _ => false,
     }
 }
 
-/// Generate Rust statements that push VM Ops.
-fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
+/// Generate Rust statements for one circuit-body statement: the
+/// private-transcript pushes for every private-input event the statement
+/// carries (at the event's IR walk position), followed by / interleaved
+/// with the VM-op pushes.
+///
+/// Structural statements (`if`, `let`, blocks, asserts) are handled here
+/// because they decide WHERE the event pushes land (a condition's events
+/// fire before the runtime `if`; a branch body's events fire inside it).
+/// Everything else delegates to `private_event_pushes` (the canonical
+/// event walk) + `generate_expr_ops` (ops only).
+fn generate_op_stmt(
+    expr: &ExprIR,
+    ctx: &TranscriptCtx<'_>,
+    tracker: &mut FirstTouchTracker,
+) -> TokenStream {
+    match expr {
+        ExprIR::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            // The condition's witness events fire BEFORE the runtime
+            // `if` — mirroring the emitter, which evaluates the cond
+            // before the branch guard activates (unguarded, cached).
+            // Branch-body events fire inside the runtime branch: the
+            // emitter allocates them guarded, and the zkir VM skips
+            // their transcript slot on the inactive path (see
+            // `memories/conditional-io-guards.md`).
+            let witness_adds = private_event_pushes(cond, ctx, tracker);
+            let cond_expr = generate_runtime_cond(cond, ctx);
+            let outer_in_branch = tracker.in_branch;
+            tracker.in_branch = true;
+            let then_stmts: Vec<TokenStream> = then_branch
+                .iter()
+                .map(|e| generate_op_stmt(e, ctx, tracker))
+                .collect();
+            let else_stmts: Option<Vec<TokenStream>> = else_branch.as_ref().map(|exprs| {
+                exprs
+                    .iter()
+                    .map(|e| generate_op_stmt(e, ctx, tracker))
+                    .collect()
+            });
+            tracker.in_branch = outer_in_branch;
+
+            if let Some(else_stmts) = else_stmts {
+                quote! {
+                    #witness_adds
+                    if #cond_expr {
+                        #(#then_stmts)*
+                    } else {
+                        #(#else_stmts)*
+                    }
+                }
+            } else {
+                quote! {
+                    #witness_adds
+                    if #cond_expr {
+                        #(#then_stmts)*
+                    }
+                }
+            }
+        }
+
+        ExprIR::Let { name, value, .. } => {
+            // The block form lets the ops generator's trailing
+            // expression (e.g. `merkle_tree_path_root(arg)` for that
+            // FnCall arm) flow into the binding. Plain witness reads
+            // produce `()` because their effects are private-transcript
+            // pushes; we patch that case below so `let v = w.f; ...
+            // cell.set(v);` binds to the real witness value instead of
+            // unit.
+            let var_name = format_ident!("{}", name.to_string());
+            // RHS events fire once, at the binding — matching the
+            // emitter, which evaluates (and caches) the RHS wire here.
+            // If-shaped RHS handles its own event placement (cond
+            // outside the runtime if, branch bodies inside).
+            let val_stmt = match &**value {
+                v @ (ExprIR::If { .. } | ExprIR::Block { .. }) => generate_op_stmt(v, ctx, tracker),
+                v => {
+                    let pushes = private_event_pushes(v, ctx, tracker);
+                    let ops = generate_expr_ops(v, ctx);
+                    quote! { #pushes #ops }
+                }
+            };
+            // Pull the witness binding out separately so the block
+            // evaluates to a real value rather than `()`. Handles bare
+            // `witnesses.f` and `witnesses.f.<method>()` (most commonly
+            // `.clone()`) — both produce statement-only side effects
+            // so the let block otherwise binds unit.
+            if let Some(expr) = let_binding_runtime_value(value, ctx) {
+                return quote! {
+                    #val_stmt
+                    #[allow(non_snake_case, unused_variables)]
+                    let #var_name = #expr;
+                };
+            }
+            // Cell::get() / Counter::value() / Map::lookup() reads —
+            // bind to the live state's accessor so `let v =
+            // self.f.get(); ...; use v` works downstream. The ops side
+            // (Dup+Idx+Popeq) is already emitted via `val_stmt`.
+            if let Some(expr) = let_binding_value_for_ledger_read(value, ctx) {
+                return quote! {
+                    #val_stmt
+                    #[allow(non_snake_case, unused_variables)]
+                    let #var_name = #expr;
+                };
+            }
+            quote! {
+                #[allow(non_snake_case, unused_variables)]
+                let #var_name = {
+                    #val_stmt
+                };
+            }
+        }
+
+        ExprIR::Block { stmts, .. } => {
+            let inner: Vec<TokenStream> = stmts
+                .iter()
+                .map(|s| generate_op_stmt(s, ctx, tracker))
+                .collect();
+            quote! { #(#inner)* }
+        }
+
+        // `assert!(cond)` / `assert_eq!(a, b)` — at transcript-build
+        // time we evaluate the same condition in plain Rust so the
+        // builder fails fast when a witness violates the invariant,
+        // before the prover wastes work on an impossible proof. The
+        // ZKIR side emits the in-circuit constraint separately.
+        ExprIR::Assert { kind, .. } => match kind {
+            nocturne_ir::expr::AssertKind::Assert(cond) => {
+                let witness_pushes = private_event_pushes(cond, ctx, tracker);
+                // `generate_runtime_cond` already emits the transcript
+                // ops for ledger reads in cond position (contains/get
+                // produce side-effecting blocks), so no separate op
+                // emission here — it would double-emit.
+                let cond_expr = generate_runtime_cond(cond, ctx);
+                quote! {
+                    #witness_pushes
+                    assert!(#cond_expr, "nocturne: circuit assertion failed");
+                }
+            }
+            nocturne_ir::expr::AssertKind::AssertEq(a, b) => {
+                let wa = private_event_pushes(a, ctx, tracker);
+                let wb = private_event_pushes(b, ctx, tracker);
+                let la = generate_runtime_cond(a, ctx);
+                let lb = generate_runtime_cond(b, ctx);
+                quote! {
+                    #wa
+                    #wb
+                    assert_eq!(#la, #lb, "nocturne: circuit assert_eq! failed");
+                }
+            }
+        },
+
+        other => {
+            let pushes = private_event_pushes(other, ctx, tracker);
+            let ops = generate_expr_ops(other, ctx);
+            quote! { #pushes #ops }
+        }
+    }
+}
+
+/// Find an `ExprIR::If` nested anywhere inside an expression-position
+/// tree (an `if` whose VALUE flows into a surrounding expression, e.g.
+/// `self.value.set(if c { witnesses.a } else { witnesses.b })`).
+///
+/// Why this must be rejected: `generate_op_stmt` only places branch-body
+/// event pushes inside a runtime `if` for STATEMENT-position `if`s (and
+/// `let`-RHS `if`s, which route through the same arm). An `if` reached
+/// through `private_event_pushes`'s walk would push BOTH branches'
+/// private-transcript entries unconditionally, while the circuit's
+/// guarded `PrivateInput`s consume only the active branch's slot at
+/// prove time (see `memories/conditional-io-guards.md`) — the zkir VM
+/// then bails with "Transcripts not fully consumed"
+/// (midnight-ledger ledger-8, zkir/src/ir_vm.rs:472).
+fn find_expression_position_if(expr: &ExprIR) -> Option<proc_macro2::Span> {
+    match expr {
+        ExprIR::If { span, .. } => Some(*span),
+        ExprIR::LedgerAccess { args, .. }
+        | ExprIR::WitnessCall { args, .. }
+        | ExprIR::FnCall { args, .. } => args.iter().find_map(find_expression_position_if),
+        ExprIR::MethodCall { receiver, args, .. } => find_expression_position_if(receiver)
+            .or_else(|| args.iter().find_map(find_expression_position_if)),
+        ExprIR::BinaryOp { lhs, rhs, .. } => {
+            find_expression_position_if(lhs).or_else(|| find_expression_position_if(rhs))
+        }
+        ExprIR::UnaryOp { expr: inner, .. }
+        | ExprIR::Reference { expr: inner, .. }
+        | ExprIR::Disclose { value: inner, .. } => find_expression_position_if(inner),
+        ExprIR::Let { value, .. } => find_expression_position_if(value),
+        // A block nested inside an expression still yields its value to
+        // the surrounding expression, so an `if` anywhere inside it has
+        // the same both-branches-pushed hazard.
+        ExprIR::Block { stmts, .. } => stmts.iter().find_map(find_expression_position_if),
+        ExprIR::Assert { kind, .. } => match kind {
+            nocturne_ir::expr::AssertKind::Assert(cond) => find_expression_position_if(cond),
+            nocturne_ir::expr::AssertKind::AssertEq(a, b) => {
+                find_expression_position_if(a).or_else(|| find_expression_position_if(b))
+            }
+        },
+        ExprIR::EnumPayload { scrutinee, .. } => find_expression_position_if(scrutinee),
+        ExprIR::Index { array, .. } => find_expression_position_if(array),
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            elements.iter().find_map(find_expression_position_if)
+        }
+        ExprIR::StructInit { fields, .. } => fields
+            .iter()
+            .find_map(|(_, e)| find_expression_position_if(e)),
+        ExprIR::Return { value, .. } => value.as_deref().and_then(find_expression_position_if),
+        ExprIR::WitnessAccess { .. }
+        | ExprIR::Literal { .. }
+        | ExprIR::Var { .. }
+        | ExprIR::Path { .. }
+        | ExprIR::Unsupported { .. } => None,
+    }
+}
+
+/// Emit the private-transcript pushes for every private-input event in
+/// `expr`, in canonical IR walk order (see `crate::private_events`).
+/// Witness-field first touches push once (the tracker mirrors the
+/// emitter's cache); `WitnessCall`s push per call site.
+///
+/// Every call site hands this function an expression-position tree
+/// (statement-position `if`s are intercepted by `generate_op_stmt`), so
+/// any `ExprIR::If` found here would break private-transcript parity —
+/// reject it with a `compile_error!` instead of silently pushing both
+/// branches' events.
+fn private_event_pushes(
+    expr: &ExprIR,
+    ctx: &TranscriptCtx<'_>,
+    tracker: &mut FirstTouchTracker,
+) -> TokenStream {
+    if let Some(span) = find_expression_position_if(expr) {
+        let msg = "nocturne: `if` is not supported in expression position (e.g. \
+                   `self.x.set(if c { a } else { b })`) — the transcript builder would \
+                   push private-transcript entries for both branches while the circuit \
+                   consumes only the active branch's. Use a statement-position `if` \
+                   instead: `if c { self.x.set(a); } else { self.x.set(b); }`";
+        return quote::quote_spanned! {span=> compile_error!(#msg); };
+    }
+    let mut pushes: Vec<TokenStream> = Vec::new();
+    walk_expr_events(expr, ctx.user_structs, tracker, &mut |_, ev| {
+        pushes.push(match ev {
+            PrivateEvent::FieldTouch { field } => witness_field_push(field, ctx),
+            PrivateEvent::Call { name, args } => witness_call_push(name, args, ctx),
+        });
+    });
+    quote! { #(#pushes)* }
+}
+
+/// The push code for a witness field's first touch.
+fn witness_field_push(field: &syn::Ident, ctx: &TranscriptCtx<'_>) -> TokenStream {
+    let field_str = field.to_string();
+    let Some(ty) = ctx.witness_types.get(&field_str) else {
+        // Parse-time validation guarantees every `witnesses.<f>` names a
+        // declared field, so a missing type here is an internal bug.
+        // Guessing a single-Fr push would silently desynchronize the
+        // private transcript from the circuit's PrivateInput count.
+        let msg =
+            format!("nocturne internal error: witness field `{field_str}` has no registered type");
+        return quote! { compile_error!(#msg); };
+    };
+    // `.clone()` because the aligned-repr recursion binds the value
+    // (`let __s = <accessor>`), which would otherwise move out of the
+    // shared `&Witnesses` borrow for non-Copy types (user structs,
+    // Bytes<N>, MerkleTreePath). Same convention as
+    // `arg_to_runtime_raw_expr`'s witness arm.
+    private_value_push(ty, &quote! { witnesses.#field.clone() }, ctx)
+}
+
+/// The push code for a parametric witness call site. Evaluates the args
+/// and invokes the user's method once, binding the result so the pushes
+/// derive from a single invocation.
+///
+/// NOTE: when the same call also appears in argument position (e.g.
+/// `self.cell.set(witnesses.next_nonce())`), the op side evaluates the
+/// method again — witness methods must be deterministic for the circuit
+/// and the transcript to agree (same contract the hand-rolled test
+/// harnesses already rely on).
+fn witness_call_push(name: &syn::Ident, args: &[ExprIR], ctx: &TranscriptCtx<'_>) -> TokenStream {
+    let Some(ret_ty) = ctx.witness_methods.get(&name.to_string()) else {
+        let msg = format!(
+            "nocturne internal error: witness method `{name}` has no registered return type"
+        );
+        return quote! { compile_error!(#msg); };
+    };
+    let arg_exprs: Vec<TokenStream> = args.iter().map(arg_to_runtime_raw_expr).collect();
+    let push = private_value_push(ret_ty, &quote! { __wc }, ctx);
+    quote! {
+        {
+            let __wc = witnesses.#name(#(#arg_exprs),*);
+            #push
+        }
+    }
+}
+
+/// Push one witness invocation's value: build the typed `AlignedValue`
+/// once, append it to `private_transcript_outputs`, and flatten its
+/// value Frs into `private_transcript` via `value_only_field_repr` —
+/// the exact flattening midnight-ledger's `construct_proof` applies to
+/// `private_transcript_outputs` (construct.rs), so the two vectors agree
+/// by construction.
+///
+/// `MerkleTreePath<H, T>` is the one shape that can't be a single
+/// `AlignedValue` (its entry count exceeds the upstream tuple-Aligned
+/// cap for tall trees): it pushes leaf + per-entry sibling/goes_left as
+/// a sequence of AlignedValues, whose flattening matches the emitter's
+/// `witness_fr_layout` expansion.
+fn private_value_push(
+    ty: &syn::Type,
+    accessor: &TokenStream,
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
+    if is_merkle_tree_path(ty) {
+        let leaf_ty = extract_merkle_tree_path_leaf_type(ty);
+        let leaf_comps = accessor_aligned_value_expr(
+            leaf_ty.as_ref(),
+            &quote! { (#accessor).leaf },
+            ctx.user_enums,
+            ctx.user_structs,
+        );
+        return quote! {
+            {
+                use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
+                let __av = AlignedValue::from(#leaf_comps);
+                __av.value_only_field_repr(&mut __nocturne_private_transcript);
+                __nocturne_private_transcript_outputs.push(__av);
+                for __entry in (#accessor).path.iter() {
+                    // Full-Fr sibling: reconstruct from the digest's
+                    // 32-byte LE representation; truncating through
+                    // `.field().value()` would discard the upper bits.
+                    let __sib = AlignedValue::from(
+                        Fr::from_le_bytes(&__entry.sibling.as_le_bytes())
+                            .expect("MerkleTreeDigest bytes round-trip through Fr"),
+                    );
+                    __sib.value_only_field_repr(&mut __nocturne_private_transcript);
+                    __nocturne_private_transcript_outputs.push(__sib);
+                    let __gl = AlignedValue::from(__entry.goes_left.value());
+                    __gl.value_only_field_repr(&mut __nocturne_private_transcript);
+                    __nocturne_private_transcript_outputs.push(__gl);
+                }
+            }
+        };
+    }
+    let comps = accessor_aligned_value_expr(Some(ty), accessor, ctx.user_enums, ctx.user_structs);
+    quote! {
+        {
+            use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
+            let __av = AlignedValue::from(#comps);
+            __av.value_only_field_repr(&mut __nocturne_private_transcript);
+            __nocturne_private_transcript_outputs.push(__av);
+        }
+    }
+}
+
+/// Generate the VM-op statements for a non-structural expression. Does
+/// NOT emit private-transcript pushes — those are owned by
+/// `private_event_pushes`, which the statement-level dispatcher runs at
+/// each expression's walk position.
+fn generate_expr_ops(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
     let field_names = ctx.field_names;
     let field_types = ctx.field_types;
-    let witness_types = ctx.witness_types;
-    let user_structs = ctx.user_structs;
     match expr {
         ExprIR::LedgerAccess {
             field,
@@ -231,10 +654,19 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
         } => {
             let field_name = field.to_string();
             let method_name = method.to_string();
+            // Internal invariant: rustc rejects typos on the real ledger
+            // struct, so an unknown name here is a parser/codegen bug.
+            // Falling back to field 0 would emit a verified-but-wrong
+            // transcript write.
             let field_idx = field_names
                 .iter()
                 .position(|f| f == &field_name)
-                .unwrap_or(0) as u8;
+                .unwrap_or_else(|| {
+                    panic!(
+                        "nocturne internal error: ledger field `{field_name}` not \
+                         found among {field_names:?}"
+                    )
+                }) as u8;
             let field_ty = field_types.get(field_idx as usize);
 
             match method_name.as_str() {
@@ -260,13 +692,13 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         }
                     };
                     quote! {
-                        ops.push(Op::Idx {
+                        __nocturne_ops.push(Op::Idx {
                             cached: false,
                             push_path: true,
                             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
                         });
-                        ops.push(Op::Addi { immediate: #n });
-                        ops.push(Op::Ins { cached: true, n: 1 });
+                        __nocturne_ops.push(Op::Addi { immediate: #n });
+                        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
                     }
                 }
                 "get" | "value" | "__direct_access" => {
@@ -277,11 +709,11 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                     let field_ident = format_ident!("{}", field_name);
                     let (accessor, result_ty) = match field_ty {
                         Some(t) if is_counter_type(t) => (
-                            quote! { state.#field_ident.value() },
+                            quote! { __nocturne_state.#field_ident.value() },
                             Some(syn::parse_quote!(u64)),
                         ),
                         Some(t) if extract_cell_inner_type(t).is_some() => (
-                            quote! { state.#field_ident.get() },
+                            quote! { __nocturne_state.#field_ident.get() },
                             extract_cell_inner_type(t),
                         ),
                         // Unknown field type — emit a compile_error so the
@@ -323,7 +755,11 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                             let comps: Vec<TokenStream> = (0..n as usize)
                                 .map(|i| {
                                     let idx = syn::Index::from(i);
-                                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] })
+                                    tuple_component_aligned_repr(
+                                        &elem_ty,
+                                        &quote! { __a[#idx] },
+                                        ctx,
+                                    )
                                 })
                                 .collect();
                             let trailing = if n == 1 {
@@ -359,8 +795,11 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                                     let payload_match =
                                         enum_payload_match_expr(&quote! { __e.clone() }, t, ctx)
                                             .unwrap_or_else(|| quote! { unreachable!() });
-                                    let payload_repr =
-                                        tuple_component_aligned_repr(&p, &quote! { __payload });
+                                    let payload_repr = tuple_component_aligned_repr(
+                                        &p,
+                                        &quote! { __payload },
+                                        ctx,
+                                    );
                                     let disc = enum_like_discriminant_expr(&quote! { __e }, t);
                                     quote! {
                                         {
@@ -379,13 +818,13 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                         None => quote! { #accessor },
                     };
                     quote! {
-                        ops.push(Op::Dup { n: 0 });
-                        ops.push(Op::Idx {
+                        __nocturne_ops.push(Op::Dup { n: 0 });
+                        __nocturne_ops.push(Op::Idx {
                             cached: false,
                             push_path: false,
                             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
                         });
-                        ops.push(Op::Popeq {
+                        __nocturne_ops.push(Op::Popeq {
                             cached: true,
                             result: AlignedValue::from(#aligned_arg),
                         });
@@ -456,227 +895,32 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
             }
         }
 
-        ExprIR::If {
-            cond,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            // Collect witness values used in the condition for private_transcript.
-            let witness_adds = collect_witness_private_inputs(cond, ctx);
-            let cond_expr = generate_runtime_cond(cond, ctx);
-            let then_stmts: Vec<TokenStream> = then_branch
-                .iter()
-                .map(|e| generate_op_stmt(e, ctx))
-                .collect();
+        // Witness reads and parametric witness calls have NO op-side
+        // lowering: their effect is the private-transcript push, which
+        // `private_event_pushes` owns (first-touch for fields, per call
+        // site for calls).
+        ExprIR::WitnessAccess { .. } | ExprIR::WitnessCall { .. } => quote! {},
 
-            if let Some(else_exprs) = else_branch {
-                let else_stmts: Vec<TokenStream> = else_exprs
-                    .iter()
-                    .map(|e| generate_op_stmt(e, ctx))
-                    .collect();
-                quote! {
-                    #witness_adds
-                    if #cond_expr {
-                        #(#then_stmts)*
-                    } else {
-                        #(#else_stmts)*
-                    }
-                }
-            } else {
-                quote! {
-                    #witness_adds
-                    if #cond_expr {
-                        #(#then_stmts)*
-                    }
-                }
-            }
-        }
-
-        ExprIR::Let { name, value, .. } => {
-            // The block form lets `generate_op_stmt`'s trailing
-            // expression (e.g. `merkle_tree_path_root(arg)` for that
-            // FnCall arm) flow into the binding. Plain witness reads
-            // produce `()` because `WitnessAccess` is statement-only;
-            // we patch that single case below so `let v = w.f; ...
-            // cell.set(v);` binds to the real witness value instead of
-            // unit.
-            let var_name = format_ident!("{}", name.to_string());
-            let val_stmt = generate_op_stmt(value, ctx);
-            // Pull the witness binding out separately so the block
-            // evaluates to a real value rather than `()`. Handles bare
-            // `witnesses.f` and `witnesses.f.<method>()` (most commonly
-            // `.clone()`) — both produce statement-only side effects
-            // in `generate_op_stmt` so the let block otherwise binds
-            // unit.
-            if let Some(expr) = let_binding_runtime_value(value, ctx) {
-                return quote! {
-                    #val_stmt
-                    #[allow(non_snake_case, unused_variables)]
-                    let #var_name = #expr;
-                };
-            }
-            // Cell::get() / Counter::value() reads — bind to the live
-            // state's accessor so `let v = self.f.get(); ...; use v`
-            // works downstream. The ops side (Dup+Idx+Popeq) is
-            // already emitted via `val_stmt`.
-            if let Some(expr) = let_binding_value_for_ledger_read(value, ctx) {
-                return quote! {
-                    #val_stmt
-                    #[allow(non_snake_case, unused_variables)]
-                    let #var_name = #expr;
-                };
-            }
-            quote! {
-                #[allow(non_snake_case, unused_variables)]
-                let #var_name = {
-                    #val_stmt
-                };
-            }
-        }
-
-        ExprIR::WitnessAccess { field, .. } => {
-            // Read the witness value and add it to the private transcript.
-            // The pushed Frs must match the IR's PrivateInputs in count
-            // AND order — see `witness_fr_layout` in zkir_emitter.rs.
-            //
-            // Single-Fr witnesses (Boolean/Field/Uint) push
-            // `Fr::from(value())` directly. Multi-Fr witnesses (`Bytes<N>`)
-            // build an AlignedValue from the underlying [u8; N] and use
-            // `AlignedValueExt::value_only_field_repr`. `MerkleTreeDigest`
-            // is a newtype around `Field` so reach through `.field().value()`.
-            // `MerkleTreePath<H, T>` deconstructs into leaf + path entries.
-            let field_ident = format_ident!("{}", field.to_string());
-            let field_str = field.to_string();
-            let witness_ty = witness_types.get(&field_str);
-            if witness_ty.map(is_bytes_witness).unwrap_or(false) {
-                quote! {
-                    {
-                        use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
-                        let __av = AlignedValue::from(*witnesses.#field_ident.as_bytes());
-                        __av.value_only_field_repr(&mut private_transcript);
-                    }
-                }
-            } else if witness_ty.map(is_merkle_tree_digest).unwrap_or(false) {
-                // Reconstruct the full Fr from the digest's 32-byte LE
-                // representation. Truncating through `.field().value()`
-                // would discard the upper bits and break proof
-                // verification when the digest came from a real Merkle
-                // computation (e.g. `MerkleTree::root()`).
-                quote! {
-                    private_transcript.push(
-                        Fr::from_le_bytes(&witnesses.#field_ident.as_le_bytes())
-                            .expect("MerkleTreeDigest bytes round-trip through Fr"),
-                    );
-                }
-            } else if witness_ty.map(is_merkle_tree_path).unwrap_or(false) {
-                quote! {
-                    {
-                        use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
-                        // Leaf: same multi-Fr push as a Bytes<N> witness.
-                        let __av = AlignedValue::from(
-                            *witnesses.#field_ident.leaf.as_bytes()
-                        );
-                        __av.value_only_field_repr(&mut private_transcript);
-                        // Each entry: full-Fr sibling + 1 Fr goes_left.
-                        for __entry in witnesses.#field_ident.path.iter() {
-                            private_transcript.push(
-                                Fr::from_le_bytes(&__entry.sibling.as_le_bytes())
-                                    .expect("MerkleTreeDigest bytes round-trip through Fr"),
-                            );
-                            private_transcript.push(Fr::from(__entry.goes_left.value() as u64));
-                        }
-                    }
-                }
-            } else if let Some((_elem_ty, _n)) = witness_ty.and_then(extract_array_type) {
-                // Fixed-size array witness `[T; N]`: push N elements in
-                // index order. `component_private_push`'s Array arm
-                // handles the per-element walk; we just hand it the
-                // base accessor.
-                let ty = witness_ty.unwrap();
-                component_private_push(ty, &quote! { witnesses.#field_ident }, ctx)
-            } else if let Some(fields) =
-                witness_ty.and_then(|t| user_struct_fields(t, user_structs))
-            {
-                // User-defined struct witness: project each field by
-                // name and push its per-component Fr in declaration
-                // order. Mirrors the tuple expansion in
-                // `aligned_value_arg_expr` but for named structs.
-                let pushes: Vec<TokenStream> = fields
-                    .iter()
-                    .map(|f| {
-                        let fname = f.name.clone();
-                        let accessor = quote! { witnesses.#field_ident.#fname };
-                        component_private_push(&f.ty, &accessor, ctx)
-                    })
-                    .collect();
-                quote! { #(#pushes)* }
-            } else if witness_ty
-                .map(|t| is_enum_like(t, ctx.user_enums))
-                .unwrap_or(false)
-            {
-                // Enum-like witness (`Option<T>` or a user enum): push
-                // the discriminant first, then for homogeneous payloads
-                // also push the payload's per-component Frs. The
-                // payload is extracted via an inline `match` over the
-                // witness value — the same way user code would extract
-                // it via pattern matching.
-                let payload = witness_ty.and_then(|t| enum_like_payload_type(t, ctx.user_enums));
-                let ty = witness_ty.unwrap();
-                let disc = enum_like_discriminant_expr(&quote! { witnesses.#field_ident }, ty);
-                match payload {
-                    Some(p) => {
-                        let payload_match = enum_payload_match_expr(
-                            &quote! { witnesses.#field_ident.clone() },
-                            ty,
-                            ctx,
-                        )
-                        .unwrap_or_else(|| quote! { unreachable!() });
-                        let payload_pushes = component_private_push(&p, &quote! { __payload }, ctx);
-                        quote! {
-                            private_transcript.push(Fr::from((#disc) as u64));
-                            {
-                                let __payload = #payload_match;
-                                #payload_pushes
-                            }
-                        }
-                    }
-                    None => quote! {
-                        private_transcript.push(Fr::from((#disc) as u64));
-                    },
-                }
-            } else {
-                quote! {
-                    private_transcript.push(Fr::from(witnesses.#field_ident.value()));
-                }
-            }
-        }
-
-        ExprIR::Block { stmts, .. } => {
-            let inner: Vec<TokenStream> = stmts.iter().map(|s| generate_op_stmt(s, ctx)).collect();
-            quote! { #(#inner)* }
-        }
-
-        ExprIR::MethodCall { receiver, .. } => {
-            // Always forward to the receiver so any side-effecting
-            // sub-expressions (e.g. witness reads that push to
-            // `private_transcript`) are emitted. Method-specific runtime
-            // behavior is generated elsewhere; this arm is just about
-            // side effects on the transcript builder's state.
-            generate_op_stmt(receiver, ctx)
+        ExprIR::MethodCall { receiver, args, .. } => {
+            // Forward to the receiver (and args) so any op-bearing
+            // sub-expressions (e.g. ledger reads under a method chain)
+            // are emitted. Method-specific runtime behavior is generated
+            // elsewhere; this arm is just about transcript ops.
+            let recv = generate_expr_ops(receiver, ctx);
+            let arg_ops: Vec<TokenStream> =
+                args.iter().map(|a| generate_expr_ops(a, ctx)).collect();
+            quote! { #recv #(#arg_ops)* }
         }
 
         // Free-function calls used as RHS of `let` or as standalone
-        // statements. The transcript side must:
-        //   (a) emit private-transcript pushes for any witness args, and
-        //   (b) yield a runtime Rust expression that evaluates to the
-        //       same value the IR computes — so the resulting `let` binds
-        //       a real value the surrounding code can pass into ledger
-        //       method calls (e.g. `check_root(&computed)`).
+        // statements: yield a runtime Rust expression that evaluates to
+        // the same value the IR computes — so the resulting `let` binds
+        // a real value the surrounding code can pass into ledger
+        // method calls (e.g. `check_root(&computed)`). Witness pushes
+        // for the args are handled by the event walk, not here.
         ExprIR::FnCall { name, args, .. } => {
-            // Emit witness pushes from any path-typed args first.
-            let witness_emits: Vec<TokenStream> =
-                args.iter().map(|a| generate_op_stmt(a, ctx)).collect();
+            let arg_ops: Vec<TokenStream> =
+                args.iter().map(|a| generate_expr_ops(a, ctx)).collect();
             let name_str = name.to_string();
             let value_expr = match name_str.as_str() {
                 "merkle_tree_path_root" => {
@@ -689,84 +933,116 @@ fn generate_op_stmt(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
                 _ => quote! { () },
             };
             quote! {
-                #(#witness_emits)*
+                #(#arg_ops)*
                 #value_expr
             }
         }
 
-        // Reference (`&expr`) forwards to its inner so side effects
-        // bubble up through `&witnesses.path` etc.
-        ExprIR::Reference { expr: inner, .. } => generate_op_stmt(inner, ctx),
+        // Wrappers forward to their inner so op-bearing sub-expressions
+        // bubble up through `&expr` / `disclose(expr)` / `-expr`.
+        ExprIR::Reference { expr: inner, .. }
+        | ExprIR::Disclose { value: inner, .. }
+        | ExprIR::UnaryOp { expr: inner, .. } => generate_expr_ops(inner, ctx),
 
-        // BinaryOp at statement level only carries side effects via
-        // witness reads on either side; the arithmetic itself doesn't
-        // affect the transcript. Forward to each operand so the
-        // private-transcript pushes still get emitted in operand order.
+        // BinaryOp at statement level: the arithmetic itself doesn't
+        // produce ops, but either operand may (e.g. a ledger read).
         ExprIR::BinaryOp { lhs, rhs, .. } => {
-            let l = generate_op_stmt(lhs, ctx);
-            let r = generate_op_stmt(rhs, ctx);
+            let l = generate_expr_ops(lhs, ctx);
+            let r = generate_expr_ops(rhs, ctx);
             quote! { #l #r }
         }
-        ExprIR::UnaryOp { expr: inner, .. } => generate_op_stmt(inner, ctx),
+
+        // Payload projection: the op side is whatever the scrutinee
+        // emits (a `Cell<Option<T>>` read emits its Dup+Idx+Popeq here;
+        // a witness scrutinee emits nothing). The value side is handled
+        // by `let_binding_runtime_value`'s EnumPayload arm.
+        ExprIR::EnumPayload { scrutinee, .. } => generate_expr_ops(scrutinee, ctx),
+
+        // `arr[i]` / `return v` / composite literals: no ops of their
+        // own, but their sub-expressions may carry op-bearing reads.
+        ExprIR::Index { array, .. } => generate_expr_ops(array, ctx),
+        ExprIR::Return { value, .. } => match value {
+            Some(v) => generate_expr_ops(v, ctx),
+            None => quote! {},
+        },
+        ExprIR::Tuple { elements, .. } | ExprIR::ArrayLit { elements, .. } => {
+            let inner: Vec<TokenStream> =
+                elements.iter().map(|e| generate_expr_ops(e, ctx)).collect();
+            quote! { #(#inner)* }
+        }
+        ExprIR::StructInit { fields, .. } => {
+            let inner: Vec<TokenStream> = fields
+                .iter()
+                .map(|(_, e)| generate_expr_ops(e, ctx))
+                .collect();
+            quote! { #(#inner)* }
+        }
 
         // An expression the IR couldn't lower (e.g. a Rust pattern Nocturne
         // doesn't model yet). Emit a `compile_error!` carrying the IR's
         // description so the user gets a real diagnostic instead of a
         // silently-zero side-effect.
-        ExprIR::Unsupported { description, .. } => {
+        ExprIR::Unsupported { description, span } => {
             let msg = format!("nocturne: unsupported expression in circuit body: {description}");
-            quote! { compile_error!(#msg); }
+            // `quote_spanned!` points the diagnostic at the offending
+            // source expression instead of the macro invocation site.
+            quote::quote_spanned! {*span=> compile_error!(#msg); }
         }
 
-        // `assert!(cond)` / `assert_eq!(a, b)` — at transcript-build
-        // time we evaluate the same condition in plain Rust so the
-        // builder fails fast when a witness violates the invariant,
-        // before the prover wastes work on an impossible proof. The
-        // ZKIR side emits the in-circuit constraint separately.
-        ExprIR::Assert { kind, .. } => match kind {
-            nocturne_ir::expr::AssertKind::Assert(cond) => {
-                let witness_pushes = collect_witness_private_inputs(cond, ctx);
-                let cond_expr = generate_runtime_cond(cond, ctx);
-                quote! {
-                    #witness_pushes
-                    assert!(#cond_expr, "nocturne: circuit assertion failed");
-                }
-            }
-            nocturne_ir::expr::AssertKind::AssertEq(a, b) => {
-                let wa = collect_witness_private_inputs(a, ctx);
-                let wb = collect_witness_private_inputs(b, ctx);
-                let la = generate_runtime_cond(a, ctx);
-                let lb = generate_runtime_cond(b, ctx);
-                quote! {
-                    #wa
-                    #wb
-                    assert_eq!(#la, #lb, "nocturne: circuit assert_eq! failed");
-                }
-            }
-        },
+        // Pure value shapes: no transcript ops.
+        ExprIR::Literal { .. } | ExprIR::Var { .. } | ExprIR::Path { .. } => quote! {},
 
-        _ => quote! {},
+        // Structural statements never reach the ops-only generator —
+        // `generate_op_stmt` intercepts them so it can place each
+        // region's private-event pushes correctly. Defensively emit
+        // nothing (their sub-statements would be mis-placed here).
+        ExprIR::If { .. } | ExprIR::Let { .. } | ExprIR::Block { .. } | ExprIR::Assert { .. } => {
+            quote! {}
+        }
     }
 }
 
-/// If `value` is a `self.<field>.<get|value>()` ledger read, build the
-/// Rust expression that fetches the same value from the live `state`.
-/// Returns `None` for other shapes.
+/// If `value` is a `self.<field>.<get|value|lookup>()` ledger read,
+/// build the Rust expression that fetches the same value from the live
+/// `state`. Returns `None` for other shapes.
 fn let_binding_value_for_ledger_read(
     value: &ExprIR,
     ctx: &TranscriptCtx<'_>,
 ) -> Option<TokenStream> {
     let field_names = ctx.field_names;
-    let ExprIR::LedgerAccess { field, method, .. } = value else {
+    let ExprIR::LedgerAccess {
+        field,
+        method,
+        args,
+        ..
+    } = value
+    else {
         return None;
     };
-    if !field_names.iter().any(|f| f == &field.to_string()) {
-        return None;
-    }
+    let field_pos = field_names.iter().position(|f| f == &field.to_string())?;
+    let field_ty = ctx.field_types.get(field_pos);
     let f_ident = format_ident!("{}", field.to_string());
     match method.to_string().as_str() {
-        "get" => Some(quote! { state.#f_ident.get() }),
-        "value" | "__direct_access" => Some(quote! { state.#f_ident.value() }),
+        "get" => Some(quote! { __nocturne_state.#f_ident.get() }),
+        // `__direct_access` is the parser's marker for a bare
+        // `self.<field>` read — its accessor depends on the field kind:
+        // Cell exposes `.get()`, Counter exposes `.value()`. Routing
+        // both through `.value()` broke Cell fields (no such method).
+        "value" | "__direct_access" => {
+            if field_ty.map(|t| extract_cell_inner_type(t).is_some()) == Some(true) {
+                Some(quote! { __nocturne_state.#f_ident.get() })
+            } else {
+                Some(quote! { __nocturne_state.#f_ident.value() })
+            }
+        }
+        // `let v = self.map.lookup(&k);` — the canonical
+        // `if let Some(v) = map.get(&k)` sugar rewrites to
+        // contains + lookup (see `memories/map-get-sugar.md`), so the
+        // bound name must carry the real value, not `()`.
+        "lookup" => {
+            let key = args.first().map(arg_to_runtime_raw_expr)?;
+            Some(quote! { __nocturne_state.#f_ident.lookup(&#key) })
+        }
         _ => None,
     }
 }
@@ -802,7 +1078,11 @@ fn let_binding_runtime_value(value: &ExprIR, ctx: &TranscriptCtx<'_>) -> Option<
             enum_name,
             ..
         } => {
-            let scrutinee_expr = let_binding_runtime_value(scrutinee, ctx)?;
+            // A ledger-read scrutinee (`match self.opt_cell.get() { … }`)
+            // binds through the state accessor; everything else through
+            // the regular runtime-value recursion.
+            let scrutinee_expr = let_binding_runtime_value(scrutinee, ctx)
+                .or_else(|| let_binding_value_for_ledger_read(scrutinee, ctx))?;
             // `Option` is the synthetic marker the parser uses for
             // single-segment `Some`/`None` patterns; codegen knows the
             // arm names without a user_enums lookup.
@@ -869,10 +1149,7 @@ fn let_binding_runtime_value(value: &ExprIR, ctx: &TranscriptCtx<'_>) -> Option<
             Some(tokens)
         }
         ExprIR::Literal { value, .. } => match value {
-            nocturne_ir::expr::LiteralIR::Int(n) => {
-                let n = *n as u64;
-                Some(quote! { #n })
-            }
+            nocturne_ir::expr::LiteralIR::Int(n) => Some(int_literal_tokens(*n)),
             nocturne_ir::expr::LiteralIR::Bool(b) => Some(quote! { #b }),
             nocturne_ir::expr::LiteralIR::Str(_) => None,
         },
@@ -916,69 +1193,52 @@ fn let_binding_runtime_value(value: &ExprIR, ctx: &TranscriptCtx<'_>) -> Option<
     }
 }
 
-/// Collect witness field accesses in a condition expression and
-/// generate code to add their values to private_transcript. Type-aware
-/// so enum and Bytes/digest witnesses use the same push shape as the
-/// `WitnessAccess` arm of `generate_op_stmt`.
-fn collect_witness_private_inputs(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream {
-    let witness_types = ctx.witness_types;
-    match expr {
-        ExprIR::WitnessAccess { field, .. } => {
-            let field_ident = format_ident!("{}", field.to_string());
-            let field_str = field.to_string();
-            let witness_ty = witness_types.get(&field_str);
-            if witness_ty
-                .map(|t| is_enum_like(t, ctx.user_enums))
-                .unwrap_or(false)
-            {
-                let disc = enum_like_discriminant_expr(
-                    &quote! { witnesses.#field_ident },
-                    witness_ty.unwrap(),
-                );
-                quote! {
-                    private_transcript.push(Fr::from((#disc) as u64));
-                }
-            } else if witness_ty.and_then(extract_array_type).is_some() {
-                // Fixed-size array witness: ZKIR pre-allocated N slots
-                // on first witness touch, so the condition collector
-                // has to push the same N values.
-                let ty = witness_ty.unwrap();
-                component_private_push(ty, &quote! { witnesses.#field_ident }, ctx)
-            } else {
-                quote! {
-                    private_transcript.push(Fr::from(witnesses.#field_ident.value() as u64));
-                }
-            }
-        }
-        ExprIR::MethodCall { receiver, .. } => collect_witness_private_inputs(receiver, ctx),
-        ExprIR::Index { array, .. } => {
-            // `witnesses.arr[i]` in a condition: the WitnessAccess
-            // allocates ALL N*len(T) wires on first touch, so we must
-            // push the entire array's contents — not just the indexed
-            // element. Delegate to the inner WitnessAccess and push it
-            // as an array.
-            collect_witness_private_inputs(array, ctx)
-        }
-        ExprIR::BinaryOp { lhs, rhs, .. } => {
-            let l = collect_witness_private_inputs(lhs, ctx);
-            let r = collect_witness_private_inputs(rhs, ctx);
-            quote! { #l #r }
-        }
-        ExprIR::UnaryOp { expr: inner, .. } => collect_witness_private_inputs(inner, ctx),
-        ExprIR::Reference { expr: inner, .. } => collect_witness_private_inputs(inner, ctx),
-        ExprIR::Disclose { value: inner, .. } => collect_witness_private_inputs(inner, ctx),
-        ExprIR::FnCall { args, .. } => {
-            // `merkle_tree_path_root(&witnesses.path)` and similar
-            // builtins recurse into their args so the witness reads
-            // they carry get pushed before the condition evaluates.
-            let pushes: Vec<TokenStream> = args
-                .iter()
-                .map(|a| collect_witness_private_inputs(a, ctx))
-                .collect();
-            quote! { #(#pushes)* }
-        }
-        _ => quote! {},
+/// Tokens for an integer literal carried in the IR as `u128`. Values
+/// fitting `u64` keep the `u64`-suffixed form (existing inference
+/// behavior); larger values emit a `u128`-suffixed literal so the
+/// runtime transcript carries the full value the circuit's `LoadImm`
+/// declares — truncating through `as u64` here would make prove fail
+/// (or worse, silently disagree) for any literal above `u64::MAX`.
+fn int_literal_tokens(n: u128) -> TokenStream {
+    match u64::try_from(n) {
+        Ok(v) => quote! { #v },
+        Err(_) => quote! { #n },
     }
+}
+
+/// The compile-time integer value of an argument expression, reaching
+/// through the same transparent wrappers `arg_to_runtime_expr` forwards
+/// (`disclose(...)`, `&x`, `.into()`, `.value()`). `None` when the
+/// argument's value isn't an integer literal known at codegen time.
+fn literal_int_value(expr: &ExprIR) -> Option<u128> {
+    match expr {
+        ExprIR::Literal {
+            value: nocturne_ir::expr::LiteralIR::Int(n),
+            ..
+        } => Some(*n),
+        ExprIR::Disclose { value, .. } => literal_int_value(value),
+        ExprIR::Reference { expr: inner, .. } => literal_int_value(inner),
+        ExprIR::MethodCall {
+            receiver, method, ..
+        } if is_transparent_wrapper(&method.to_string()) => literal_int_value(receiver),
+        _ => None,
+    }
+}
+
+/// Maximum value an integer-like target type can hold (`u8`..`u128`,
+/// `Uint<N>`), `None` for non-integer types (`Field`, `Bytes<N>`,
+/// booleans, user ADTs). References unwrap so a `&Uint<32>` map-key
+/// position checks like `Uint<32>`. Uses the declared `Uint<N>` bit
+/// width, NOT the primitive `primitive_cast_for_type` snaps to: the
+/// circuit range-constrains the wire to N bits, so anything above
+/// `2^N - 1` can never prove even when it fits the runtime primitive.
+fn int_type_max(ty: &syn::Type) -> Option<u128> {
+    let mut t = ty;
+    while let syn::Type::Reference(r) = t {
+        t = &r.elem;
+    }
+    let ty_str = quote!(#t).to_string().replace(' ', "");
+    parse_uint_type(&ty_str).map(uint_max_value)
 }
 
 /// Generate a runtime Rust expression that evaluates to the value of an
@@ -991,14 +1251,7 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
     match expr {
         ExprIR::Literal { value, .. } => match value {
             nocturne_ir::expr::LiteralIR::Bool(b) => quote! { #b },
-            nocturne_ir::expr::LiteralIR::Int(n) => {
-                // u128 → u64 is safe for everything we currently support
-                // (Boolean, Uint<N> with N ≤ 64). Larger Uint values are
-                // a future-work concern tracked alongside multi-Fr value
-                // encoding.
-                let n = *n as u64;
-                quote! { #n }
-            }
+            nocturne_ir::expr::LiteralIR::Int(n) => int_literal_tokens(*n),
             nocturne_ir::expr::LiteralIR::Str(s) => quote! { #s },
         },
         ExprIR::Disclose { value, .. } => arg_to_runtime_expr(value),
@@ -1027,7 +1280,7 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             let m = method.to_string();
             match m.as_str() {
                 // `.into()` / `.value()` are transparent: forward the receiver.
-                "into" | "value" => arg_to_runtime_expr(receiver),
+                s if is_transparent_wrapper(s) => arg_to_runtime_expr(receiver),
                 _ => {
                     let r = arg_to_runtime_expr(receiver);
                     let m_ident = format_ident!("{}", m);
@@ -1118,10 +1371,58 @@ fn arg_to_runtime_expr(expr: &ExprIR) -> TokenStream {
             let arg_exprs: Vec<TokenStream> = args.iter().map(arg_to_runtime_raw_expr).collect();
             quote! { #path(#(#arg_exprs),*).value() }
         }
-        // Anything else falls back to `()` and will fail to compile with a
-        // clear "the trait `From<()>` is not implemented" message, which
-        // points the user at an unsupported argument shape.
+        // Anything else falls back to `()`. NOTE: this is NOT a
+        // compile-time guard — upstream implements `Aligned for ()`
+        // (base-crypto/src/fab/alignments.rs, `tuple_aligned!`) and
+        // `From<()> for Value` (base-crypto/src/fab/conversions.rs,
+        // `tuple_conversions!`), so `AlignedValue::from(())` compiles to
+        // an EMPTY (zero-atom) value. Shapes that would desync the
+        // transcript must be rejected explicitly before reaching here,
+        // the way `private_event_pushes` rejects expression-position
+        // `if`. `()` only fails to compile in positions that demand a
+        // concrete primitive (arithmetic, `as` casts).
         _ => quote! { () },
+    }
+}
+
+/// True when an argument expression's value is a compile-time literal
+/// (possibly behind `disclose(...)`, `&x`, or a transparent wrapper).
+/// Literal keys have no double-evaluation hazard and their raw runtime
+/// form is a bare primitive (no `.value()` accessor), so they keep the
+/// expression-based aligned path — which also carries the literal-range
+/// compile check.
+fn is_literal_arg(expr: &ExprIR) -> bool {
+    match expr {
+        ExprIR::Literal { .. } => true,
+        ExprIR::Disclose { value, .. } => is_literal_arg(value),
+        ExprIR::Reference { expr: inner, .. } => is_literal_arg(inner),
+        ExprIR::MethodCall {
+            receiver, method, ..
+        } if is_transparent_wrapper(&method.to_string()) => is_literal_arg(receiver),
+        _ => false,
+    }
+}
+
+/// The aligned-value expression for a keyed-container key, derived from
+/// the ALREADY-BOUND `__key` binding when possible so the key expression
+/// runs exactly once (a `WitnessCall` key used to run twice: once for
+/// the runtime `contains`/`lookup` call and once inside the op's
+/// AlignedValue). Literal keys (and keys whose K type is unknown) keep
+/// the expression-based path.
+fn bound_key_aligned_expr(
+    args: &[ExprIR],
+    k_ty: Option<&syn::Type>,
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
+    match (args.first(), k_ty) {
+        (Some(a), Some(kt)) if !is_literal_arg(a) => accessor_aligned_value_expr(
+            Some(kt),
+            &quote! { __key.clone() },
+            ctx.user_enums,
+            ctx.user_structs,
+        ),
+        (Some(a), _) => aligned_value_arg_expr(a, k_ty, ctx),
+        (None, _) => quote! { () },
     }
 }
 
@@ -1149,27 +1450,24 @@ fn generate_map_contains_block(
     // K-type for the AlignedValue alignment: Map<K, V> → K, Set<T> → T.
     // Both expose `.contains(&K)` so the runtime method name is shared.
     let k_ty = field_ty.and_then(extract_field_key_type);
-    let key_aligned = args
-        .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
-        .unwrap_or_else(|| quote! { () });
+    let key_aligned = bound_key_aligned_expr(args, k_ty.as_ref(), ctx);
 
     quote! {
         {
             let __key = #raw_key;
-            ops.push(Op::Dup { n: 0 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 0 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Push {
+            __nocturne_ops.push(Op::Push {
                 storage: false,
                 value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
             });
-            ops.push(Op::Member);
-            let __result: bool = state.#field_ident.contains(&__key);
-            ops.push(Op::Popeq {
+            __nocturne_ops.push(Op::Member);
+            let __result: bool = __nocturne_state.#field_ident.contains(&__key);
+            __nocturne_ops.push(Op::Popeq {
                 cached: true,
                 result: AlignedValue::from(__result),
             });
@@ -1203,15 +1501,15 @@ fn generate_cell_set(
         .map(|a| aligned_value_arg_expr(a, t_ty.as_ref(), ctx))
         .unwrap_or_else(|| quote! { () });
     quote! {
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#field_idx))),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: true,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#value_aligned))),
         });
-        ops.push(Op::Ins { cached: false, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
     }
 }
 
@@ -1384,91 +1682,6 @@ fn user_struct_fields<'a>(
     user_structs.get(&ident.to_string())
 }
 
-/// Push the per-component Fr value of a struct field (or tuple
-/// component) onto `private_transcript`. Mirrors the per-type pushes in
-/// the `WitnessAccess` arm, but takes a token accessor (e.g.
-/// `witnesses.key.a`) instead of a witness ident.
-fn component_private_push(
-    ty: &syn::Type,
-    accessor: &TokenStream,
-    ctx: &TranscriptCtx<'_>,
-) -> TokenStream {
-    let ty_str = quote!(#ty).to_string().replace(' ', "");
-    if ty_str.starts_with("Bytes<") {
-        return quote! {
-            {
-                use nocturne::runtime::transient_crypto::fab::AlignedValueExt;
-                let __av = AlignedValue::from(*(#accessor).as_bytes());
-                __av.value_only_field_repr(&mut private_transcript);
-            }
-        };
-    }
-    if ty_str == "Field" {
-        return quote! {
-            private_transcript.push(Fr::from((#accessor).value()));
-        };
-    }
-    if ty_str == "MerkleTreeDigest" {
-        return quote! {
-            private_transcript.push(
-                Fr::from_le_bytes(&(#accessor).as_le_bytes())
-                    .expect("MerkleTreeDigest bytes round-trip through Fr"),
-            );
-        };
-    }
-    if ty_str == "Boolean" || ty_str == "bool" {
-        return quote! {
-            private_transcript.push(Fr::from((#accessor).value() as u64));
-        };
-    }
-    if let Some((elem_ty, n)) = extract_array_type(ty) {
-        // Walk the array element-by-element, recursing through
-        // component_private_push so nested arrays / tuples / enums
-        // all push in declaration order. The accessor must be a
-        // place expression that supports `[i]` indexing — the
-        // callers (witnesses access, ledger Cell::get) already
-        // bind it to a Rust value of type `[T; N]`.
-        let pushes: Vec<TokenStream> = (0..n as usize)
-            .map(|i| {
-                let idx = syn::Index::from(i);
-                component_private_push(&elem_ty, &quote! { (#accessor)[#idx] }, ctx)
-            })
-            .collect();
-        return quote! { #(#pushes)* };
-    }
-    if is_enum_like(ty, ctx.user_enums) {
-        let payload = enum_like_payload_type(ty, ctx.user_enums);
-        let disc = enum_like_discriminant_expr(accessor, ty);
-        return match payload {
-            None => quote! {
-                private_transcript.push(Fr::from((#disc) as u64));
-            },
-            Some(p) => {
-                // Discriminant first, then the payload's own per-Fr
-                // pushes via the regular tuple-component path. Pull
-                // the payload out with an inline match — same shape
-                // as user-facing pattern matching, no synthetic
-                // accessor.
-                let payload_match =
-                    enum_payload_match_expr(&quote! { (#accessor).clone() }, ty, ctx)
-                        .unwrap_or_else(|| quote! { unreachable!() });
-                let payload_pushes = component_private_push(&p, &quote! { __payload }, ctx);
-                quote! {
-                    private_transcript.push(Fr::from((#disc) as u64));
-                    {
-                        let __payload = #payload_match;
-                        #payload_pushes
-                    }
-                }
-            }
-        };
-    }
-    // Uint<N> / primitive integer: cast to u64 for Fr::from.
-    quote! {
-        private_transcript.push(Fr::from((#accessor).value() as u64));
-    }
-}
-
 /// Produce a runtime Rust expression suitable for passing into
 /// `AlignedValue::from(_)` for a value of the given expected type.
 /// Handles `Bytes<N>` (unwrap to `[u8; N]`), `Field` (lift to `Fr`),
@@ -1480,6 +1693,23 @@ fn aligned_value_arg_expr(
     ctx: &TranscriptCtx<'_>,
 ) -> TokenStream {
     let user_structs = ctx.user_structs;
+    // Over-range literal: the circuit's LoadImm carries the full
+    // literal while the runtime cast at the bottom of this function
+    // would silently truncate (`(5000000000u64) as u32` for a
+    // `Cell<Uint<32>>`), so the two sides disagree and prove fails —
+    // or worse, the on-chain write holds a truncated value. Both the
+    // literal and the target width are known here (this function is
+    // the single chokepoint for Cell/Map/Set key & value positions),
+    // so reject at compile time instead.
+    if let Some(t) = ty
+        && let Some(n) = literal_int_value(expr)
+        && let Some(max) = int_type_max(t)
+        && n > max
+    {
+        let ty_str = quote!(#t).to_string().replace(' ', "");
+        let msg = format!("literal {n} exceeds {ty_str} range (max {max})");
+        return quote! { { compile_error!(#msg); 0u8 } };
+    }
     if let Some(t) = ty {
         // Tuple keys / values: build the upstream tuple shape that
         // `AlignedValue::from(_)` accepts via `Aligned for (T1, .., Tn)`.
@@ -1496,7 +1726,7 @@ fn aligned_value_arg_expr(
                 .enumerate()
                 .map(|(i, elem)| {
                     let idx = syn::Index::from(i);
-                    tuple_component_aligned_repr(elem, &quote! { __t.#idx })
+                    tuple_component_aligned_repr(elem, &quote! { __t.#idx }, ctx)
                 })
                 .collect();
             // A 1-tuple needs the trailing comma so Rust parses it as
@@ -1522,7 +1752,7 @@ fn aligned_value_arg_expr(
             let comps: Vec<TokenStream> = (0..n as usize)
                 .map(|i| {
                     let idx = syn::Index::from(i);
-                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] })
+                    tuple_component_aligned_repr(&elem_ty, &quote! { __a[#idx] }, ctx)
                 })
                 .collect();
             let trailing = if n == 1 {
@@ -1570,7 +1800,7 @@ fn aligned_value_arg_expr(
                 .iter()
                 .map(|f| {
                     let fname = f.name.clone();
-                    tuple_component_aligned_repr(&f.ty, &quote! { __t.#fname })
+                    tuple_component_aligned_repr(&f.ty, &quote! { __t.#fname }, ctx)
                 })
                 .collect();
             let trailing = if fields.len() == 1 {
@@ -1604,7 +1834,7 @@ fn aligned_value_arg_expr(
                 Some(p) => {
                     let payload_match = enum_payload_match_expr(&quote! { __e.clone() }, t, ctx)
                         .unwrap_or_else(|| quote! { unreachable!() });
-                    let payload_repr = tuple_component_aligned_repr(&p, &quote! { __payload });
+                    let payload_repr = tuple_component_aligned_repr(&p, &quote! { __payload }, ctx);
                     let disc = enum_like_discriminant_expr(&quote! { __e }, t);
                     quote! {
                         {
@@ -1643,41 +1873,21 @@ fn aligned_value_arg_expr(
 
 /// Convert a single tuple-component expression `accessor` (e.g.
 /// `__t.0`) of declared type `ty` into the form `AlignedValue::from`
-/// accepts directly. Mirrors the per-type arms of
-/// `aligned_value_arg_expr` but takes a token-tree accessor instead of
-/// an `ExprIR` because tuple elements aren't first-class IR exprs —
-/// they're field projections on a temporary binding.
-fn tuple_component_aligned_repr(ty: &syn::Type, accessor: &TokenStream) -> TokenStream {
-    let ty_str = quote!(#ty).to_string().replace(' ', "");
-    if ty_str.starts_with("Bytes<") {
-        return quote! { *(#accessor).as_bytes() };
-    }
-    if ty_str == "Field" {
-        return quote! { Fr::from((#accessor).value()) };
-    }
-    if ty_str == "MerkleTreeDigest" {
-        return quote! {
-            Fr::from_le_bytes(&(#accessor).as_le_bytes())
-                .expect("MerkleTreeDigest bytes round-trip through Fr")
-        };
-    }
-    if ty_str == "Boolean" || ty_str == "bool" {
-        return quote! { (#accessor).value() };
-    }
-    // Uint<N> / primitive integers: snap to the matching Rust primitive
-    // so the upstream Aligned-for-primitive impl picks the right Bytes<n>
-    //
-    // Note: tuple_component_aligned_repr doesn't take user_enums today,
-    // so enum-valued tuple components fall through to the integer path
-    // — fine for now since the per-component accessor's primitive cast
-    // pulls in `.discriminant()` when the type is recognized at the
-    // top-level dispatch. Nested enum-in-tuple-in-struct would need
-    // user_enums plumbed here too.
-    // alignment.
-    match primitive_cast_for_type(ty) {
-        Some(cast) => quote! { (#accessor).value() #cast },
-        None => quote! { (#accessor).value() },
-    }
+/// accepts directly. Takes a token-tree accessor instead of an `ExprIR`
+/// because tuple elements aren't first-class IR exprs — they're field
+/// projections on a temporary binding.
+///
+/// Delegates to `crate::aligned::accessor_aligned_value_expr` (the one
+/// recursion shared with the deploy codegen and the witness pushes) so
+/// the per-type dispatch can't drift from the other accessor-shaped
+/// sites. This also gives nested enum/struct/tuple components the full
+/// recursion a previous hand-rolled copy here didn't have.
+fn tuple_component_aligned_repr(
+    ty: &syn::Type,
+    accessor: &TokenStream,
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
+    accessor_aligned_value_expr(Some(ty), accessor, ctx.user_enums, ctx.user_structs)
 }
 
 /// Emit the runtime ops for `Map<K, V>::insert(k, v)`. The on-chain pattern
@@ -1711,21 +1921,21 @@ fn generate_map_insert(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: true,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#val_aligned))),
         });
-        ops.push(Op::Ins { cached: false, n: 1 });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
@@ -1755,35 +1965,35 @@ fn generate_map_lookup(
 
     // The second `Idx`'s key path needs the same Bytes-aware AlignedValue
     // build as `Push` does — multi-Fr K must use `*<raw>.as_bytes()`.
-    let key_aligned = args
-        .first()
-        .map(|a| aligned_value_arg_expr(a, k_ty.as_ref(), ctx))
-        .unwrap_or_else(|| quote! { () });
+    // Derived from the bound `__key` so the key expression runs once.
+    let key_aligned = bound_key_aligned_expr(args, k_ty.as_ref(), ctx);
 
     // Popeq result: V comes back from the runtime (a wrapper like Boolean
     // / Uint<N> / Bytes<N>). Unwrap to the form AlignedValue::from accepts.
     let val_expr = match kv.as_ref().map(|(_, v)| v) {
-        Some(v_ty) => {
-            unwrap_to_aligned_primitive(quote! { state.#field_ident.lookup(&__key) }, v_ty)
-        }
-        None => quote! { state.#field_ident.lookup(&__key) },
+        Some(v_ty) => unwrap_to_aligned_primitive(
+            quote! { __nocturne_state.#field_ident.lookup(&__key) },
+            v_ty,
+            ctx,
+        ),
+        None => quote! { __nocturne_state.#field_ident.lookup(&__key) },
     };
 
     quote! {
         {
             let __key = #raw_key;
-            ops.push(Op::Dup { n: 0 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 0 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#key_aligned))].into_iter().collect(),
             });
-            ops.push(Op::Popeq {
+            __nocturne_ops.push(Op::Popeq {
                 cached: false,
                 result: AlignedValue::from(#val_expr),
             });
@@ -1813,25 +2023,32 @@ fn generate_map_remove(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Rem { cached: false });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Rem { cached: false });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
 /// Wrap `expr` to produce a value `AlignedValue::from(_)` can accept for
 /// type `ty`. Handles wrapper types (`Boolean` → `.value()`, `Uint<N>` →
-/// `.value() as u<N>`) and raw primitives (identity cast). Returns the
-/// raw expression if the type isn't recognized.
-fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream {
+/// `.value() as u<N>`, `Field`/`MerkleTreeDigest` → full-Fr lift) and raw
+/// primitives (identity cast). Composite types (tuples, user structs,
+/// enums, Option) get a pointed `compile_error!` — their multi-Fr Popeq
+/// lowering isn't wired through this path yet, and silently passing the
+/// raw expression produced an unreadable `From` trait error at best.
+fn unwrap_to_aligned_primitive(
+    expr: TokenStream,
+    ty: &syn::Type,
+    ctx: &TranscriptCtx<'_>,
+) -> TokenStream {
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     if ty_str == "Boolean" {
         return quote! { (#expr).value() };
@@ -1841,6 +2058,19 @@ fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream
     if ty_str.starts_with("Bytes<") {
         return quote! { *(#expr).as_bytes() };
     }
+    // Field: lift to Fr via the value (mirrors the get-side read arm) so
+    // `AlignedValue::from(Fr)` picks the Field alignment atom.
+    if ty_str == "Field" {
+        return quote! { Fr::from((#expr).value()) };
+    }
+    // MerkleTreeDigest: reconstruct the full 254-bit Fr from the 32-byte
+    // LE representation — `.field().value()` would truncate to u128.
+    if ty_str == "MerkleTreeDigest" {
+        return quote! {
+            Fr::from_le_bytes(&(#expr).as_le_bytes())
+                .expect("MerkleTreeDigest bytes round-trip through Fr")
+        };
+    }
     if ty_str.starts_with("Uint<")
         && let Some(c) = primitive_cast_for_type(ty)
     {
@@ -1848,6 +2078,17 @@ fn unwrap_to_aligned_primitive(expr: TokenStream, ty: &syn::Type) -> TokenStream
     }
     if let Some(c) = primitive_cast_for_type(ty) {
         return quote! { (#expr) #c };
+    }
+    if matches!(ty, syn::Type::Tuple(_))
+        || user_struct_fields(ty, ctx.user_structs).is_some()
+        || is_enum_like(ty, ctx.user_enums)
+    {
+        let msg = format!(
+            "nocturne: `Map::lookup` with composite value type `{ty_str}` is not \
+             supported yet — store the components in separate maps or use a \
+             `Bytes<N>` encoding"
+        );
+        return quote! { { compile_error!(#msg); 0u8 } };
     }
     expr
 }
@@ -1861,27 +2102,35 @@ fn witness_type_map(w: &WitnessIR) -> HashMap<String, syn::Type> {
         .collect()
 }
 
-/// True if `ty` is `Bytes<N>` for some N (the only multi-Fr witness type
-/// we currently support).
-fn is_bytes_witness(ty: &syn::Type) -> bool {
-    let ty_str = quote!(#ty).to_string().replace(' ', "");
-    ty_str.starts_with("Bytes<")
-}
-
-/// True if `ty` is `MerkleTreeDigest`. The witness push reaches through
-/// `.as_le_bytes()` (canonical 32-byte LE Fr) so the in-circuit
-/// PrivateInput sees the full 254-bit Fr, not a u128 truncation.
-fn is_merkle_tree_digest(ty: &syn::Type) -> bool {
-    let ty_str = quote!(#ty).to_string().replace(' ', "");
-    ty_str == "MerkleTreeDigest"
-}
-
 /// True if `ty` is `MerkleTreePath<H, T>` for some H, T. The witness push
 /// deconstructs into the leaf's Fr stream followed by H × (sibling Fr +
 /// goes_left Fr) — matching the IR's `witness_fr_layout` expansion.
 fn is_merkle_tree_path(ty: &syn::Type) -> bool {
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     ty_str.starts_with("MerkleTreePath<")
+}
+
+/// If `ty` is `MerkleTreePath<H, T>`, return the leaf type `T` (the
+/// LAST type argument — the first generic is the const height `H`).
+fn extract_merkle_tree_path_leaf_type(ty: &syn::Type) -> Option<syn::Type> {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+        && seg.ident == "MerkleTreePath"
+        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+    {
+        return args
+            .args
+            .iter()
+            .filter_map(|a| {
+                if let syn::GenericArgument::Type(t) = a {
+                    Some(t.clone())
+                } else {
+                    None
+                }
+            })
+            .next_back();
+    }
+    None
 }
 
 /// Map a Rust type that flows into `AlignedValue::from(_)` to the primitive
@@ -1999,21 +2248,21 @@ fn generate_set_insert(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: true,
             value: StateValue::Null,
         });
-        ops.push(Op::Ins { cached: false, n: 1 });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
@@ -2032,17 +2281,17 @@ fn generate_set_remove(
         .unwrap_or_else(|| quote! { () });
 
     quote! {
-        ops.push(Op::Idx {
+        __nocturne_ops.push(Op::Idx {
             cached: false,
             push_path: true,
             path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
         });
-        ops.push(Op::Push {
+        __nocturne_ops.push(Op::Push {
             storage: false,
             value: StateValue::Cell(Sp::new(AlignedValue::from(#key_aligned))),
         });
-        ops.push(Op::Rem { cached: false });
-        ops.push(Op::Ins { cached: true, n: 1 });
+        __nocturne_ops.push(Op::Rem { cached: false });
+        __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
     }
 }
 
@@ -2077,25 +2326,25 @@ fn generate_merkle_tree_check_root(
             let __digest = #raw_digest;
             let __digest_fr = Fr::from_le_bytes(&(&__digest).as_le_bytes())
                 .expect("MerkleTreeDigest bytes round-trip through Fr");
-            ops.push(Op::Dup { n: 0 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 0 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(0u8))].into_iter().collect(),
             });
-            ops.push(Op::Root);
-            ops.push(Op::Push {
+            __nocturne_ops.push(Op::Root);
+            __nocturne_ops.push(Op::Push {
                 storage: false,
                 value: StateValue::Cell(Sp::new(AlignedValue::from(__digest_fr))),
             });
-            ops.push(Op::Eq);
-            let __result: bool = state.#field_ident.check_root(&__digest);
-            ops.push(Op::Popeq {
+            __nocturne_ops.push(Op::Eq);
+            let __result: bool = __nocturne_state.#field_ident.check_root(&__digest);
+            __nocturne_ops.push(Op::Popeq {
                 cached: true,
                 result: AlignedValue::from(__result),
             });
@@ -2132,35 +2381,35 @@ fn generate_merkle_tree_insert(field_idx: u8, args: &[ExprIR]) -> TokenStream {
             let __leaf_hash: [u8; 32] = nocturne::runtime::transient_crypto::merkle_tree::leaf_hash(
                 __leaf.as_bytes().as_slice()
             ).0;
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: true,
                 path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
             });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: true,
                 path: vec![Key::Value(AlignedValue::from(0u8))].into_iter().collect(),
             });
-            ops.push(Op::Dup { n: 2 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Dup { n: 2 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: false,
                 path: vec![Key::Value(AlignedValue::from(1u8))].into_iter().collect(),
             });
-            ops.push(Op::Push {
+            __nocturne_ops.push(Op::Push {
                 storage: true,
                 value: StateValue::Cell(Sp::new(AlignedValue::from(__leaf_hash))),
             });
-            ops.push(Op::Ins { cached: false, n: 1 });
-            ops.push(Op::Ins { cached: true, n: 1 });
-            ops.push(Op::Idx {
+            __nocturne_ops.push(Op::Ins { cached: false, n: 1 });
+            __nocturne_ops.push(Op::Ins { cached: true, n: 1 });
+            __nocturne_ops.push(Op::Idx {
                 cached: false,
                 push_path: true,
                 path: vec![Key::Value(AlignedValue::from(1u8))].into_iter().collect(),
             });
-            ops.push(Op::Addi { immediate: 1 });
-            ops.push(Op::Ins { cached: true, n: 2 });
+            __nocturne_ops.push(Op::Addi { immediate: 1 });
+            __nocturne_ops.push(Op::Ins { cached: true, n: 2 });
         }
     }
 }
@@ -2327,7 +2576,7 @@ fn arg_to_runtime_raw_expr(expr: &ExprIR) -> TokenStream {
         } => {
             let m = method.to_string();
             match m.as_str() {
-                "into" | "value" => arg_to_runtime_raw_expr(receiver),
+                s if is_transparent_wrapper(s) => arg_to_runtime_raw_expr(receiver),
                 _ => {
                     let r = arg_to_runtime_raw_expr(receiver);
                     let m_ident = format_ident!("{}", m);
@@ -2496,19 +2745,63 @@ fn generate_runtime_cond(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream 
         } => {
             let field_name = field.to_string();
             let method_name = method.to_string();
+            // Same internal invariant as `generate_op_stmt`: never
+            // silently fall back to field 0.
+            let field_idx = field_names
+                .iter()
+                .position(|f| f == &field_name)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "nocturne internal error: ledger field `{field_name}` not \
+                         found among {field_names:?}"
+                    )
+                }) as u8;
+            let field_ty = field_types.get(field_idx as usize);
             if matches!(method_name.as_str(), "contains" | "member") {
-                let field_idx = field_names
-                    .iter()
-                    .position(|f| f == &field_name)
-                    .unwrap_or(0) as u8;
-                let field_ty = field_types.get(field_idx as usize);
                 return generate_map_contains_block(field_idx, &field_name, args, field_ty, ctx);
             }
+            // `Cell<Boolean>` / `Cell<bool>` reads ARE bool-typed and
+            // usable as conditions: bake the live state's value into a
+            // Dup+Idx+Popeq block (the same ops the statement-position
+            // read emits) and evaluate to the bool — mirroring
+            // `generate_map_contains_block`'s shape.
+            if matches!(method_name.as_str(), "get" | "value" | "__direct_access") {
+                let inner = field_ty.and_then(extract_cell_inner_type);
+                let inner_str = inner
+                    .as_ref()
+                    .map(|t| quote!(#t).to_string().replace(' ', ""));
+                if let Some(s) = inner_str.as_deref()
+                    && matches!(s, "Boolean" | "bool")
+                {
+                    let field_ident = format_ident!("{}", field_name);
+                    let result_expr = if s == "Boolean" {
+                        quote! { __nocturne_state.#field_ident.get().value() }
+                    } else {
+                        quote! { __nocturne_state.#field_ident.get() }
+                    };
+                    return quote! {
+                        {
+                            __nocturne_ops.push(Op::Dup { n: 0 });
+                            __nocturne_ops.push(Op::Idx {
+                                cached: false,
+                                push_path: false,
+                                path: vec![Key::Value(AlignedValue::from(#field_idx))].into_iter().collect(),
+                            });
+                            let __result: bool = #result_expr;
+                            __nocturne_ops.push(Op::Popeq {
+                                cached: true,
+                                result: AlignedValue::from(__result),
+                            });
+                            __result
+                        }
+                    };
+                }
+            }
             // Other LedgerAccess methods aren't bool-typed (lookup returns V,
-            // get/value return T, increment returns nothing). The IR parser
-            // doesn't actually reject these, so a user writing
-            // `if self.cell.get() { ... }` would silently take the
-            // always-true branch. Surface it as a real diagnostic.
+            // get/value return non-bool T, increment returns nothing). The IR
+            // parser doesn't actually reject these, so a user writing
+            // `if self.cell.get() { ... }` on a non-bool cell would silently
+            // take the always-true branch. Surface it as a real diagnostic.
             let msg = format!(
                 "nocturne: ledger method `{}` on field `{}` doesn't return bool — not usable as an `if` condition",
                 method, field_name
@@ -2520,7 +2813,7 @@ fn generate_runtime_cond(expr: &ExprIR, ctx: &TranscriptCtx<'_>) -> TokenStream 
         } => {
             let method_name = method.to_string();
             match method_name.as_str() {
-                "into" | "value" => generate_runtime_cond(receiver, ctx),
+                s if is_transparent_wrapper(s) => generate_runtime_cond(receiver, ctx),
                 _ => {
                     let recv = generate_runtime_cond(receiver, ctx);
                     let m = format_ident!("{}", method_name);

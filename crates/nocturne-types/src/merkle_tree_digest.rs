@@ -67,12 +67,6 @@ impl From<Field> for MerkleTreeDigest {
     }
 }
 
-impl From<MerkleTreeDigest> for Field {
-    fn from(d: MerkleTreeDigest) -> Self {
-        d.field()
-    }
-}
-
 impl fmt::Debug for MerkleTreeDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "MerkleTreeDigest(0x")?;

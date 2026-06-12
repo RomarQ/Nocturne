@@ -6895,7 +6895,11 @@ mod init_values {
             Self {
                 limit: Cell::new(42u64),
                 phase: Cell::new(Phase::Running),
-                tag: Cell::new(Bytes::<32>::from_slice("nocturne:v1".as_bytes())),
+                // `from_slice` requires exactly 32 bytes, so the tag is
+                // padded with explicit NULs up front.
+                tag: Cell::new(Bytes::<32>::from_slice(
+                    "nocturne:v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".as_bytes(),
+                )),
                 seen: Counter::zero(),
             }
         }
@@ -6935,7 +6939,9 @@ fn constructor_initial_values_flow_into_state_value() {
     );
 
     // Field 2: Cell<Bytes<32>>("nocturne:v1" padded with zeros)
-    let expected_tag = nocturne::types::Bytes::<32>::from_slice("nocturne:v1".as_bytes());
+    let expected_tag = nocturne::types::Bytes::<32>::from_slice(
+        "nocturne:v1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".as_bytes(),
+    );
     assert_eq!(
         collected[2],
         StateValue::Cell(Sp::new(AlignedValue::from(*expected_tag.as_bytes()))),
@@ -6984,7 +6990,9 @@ fn constructor_params_flow_into_initial_state() {
     use nocturne::runtime::onchain_state::state::StateValue;
     use nocturne::runtime::storage::arena::Sp;
 
-    let admin = nocturne::types::Bytes::<32>::from_slice("admin@example".as_bytes());
+    let admin = nocturne::types::Bytes::<32>::from_slice(
+        "admin@example\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0".as_bytes(),
+    );
     let state = parametric_init::deploy::initial_state(admin.clone(), 250u64);
     let StateValue::Array(ref fields) = state else {
         panic!("expected StateValue::Array");
@@ -9901,4 +9909,1023 @@ async fn helper_inline_chained_proves_and_verifies() {
 
     vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
         .expect("on-chain verify must succeed for chained helper call");
+}
+
+// ---------------------------------------------------------------------------
+// Disclose pass-through (review H3 / plan Task 2.3): `disclose(_)` is a
+// marker, not an emission. Before the fix the emitter created a
+// DeclarePubInput + PiSkip group with no backing transcript op, so any
+// active-path disclose failed at prove with a PI-shape mismatch. This is
+// the smallest disclose shape: disclose a witness and store it.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod discloser {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct DiscloserState {
+        pub revealed: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct DiscloserWitnesses {
+        pub secret: Uint<64>,
+    }
+
+    impl DiscloserState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                revealed: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn reveal(&mut self, witnesses: &DiscloserWitnesses) {
+            self.revealed.set(nocturne::disclose(witnesses.secret));
+        }
+    }
+}
+
+fn build_reveal_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod discloser {
+            #[nocturne(ledger)]
+            pub struct DiscloserState { pub revealed: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct DiscloserWitnesses { pub secret: Uint<64> }
+            impl DiscloserState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { revealed: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn reveal(&mut self, witnesses: &DiscloserWitnesses) {
+                    self.revealed.set(nocturne::disclose(witnesses.secret));
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    assert!(
+        output.errors.is_empty(),
+        "emission errors: {:?}",
+        output.errors
+    );
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "reveal")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn disclose_witness_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::base_crypto::fab::AlignedValue;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_reveal_ir();
+    let witnesses = discloser::DiscloserWitnesses {
+        secret: Uint::<64>::from(7u64),
+    };
+    let nocturne_transcript = discloser::transcript::build_reveal_transcript(&witnesses);
+
+    let private_outputs: Vec<AlignedValue> = vec![AlignedValue::from(7u64)];
+    let preimage = canonical_preimage("reveal", nocturne_transcript.ops.clone(), private_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "disclose must add no PI group of its own — the Cell::set ops are the \
+         only transcript-backed PIs"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for disclose(witness) → Cell::set");
+}
+
+// ---------------------------------------------------------------------------
+// u128 literals end-to-end (review M3/M6 / plan Task 2.5): a literal above
+// u64::MAX must LoadImm its full 128-bit value in the circuit AND reach the
+// runtime transcript untruncated (the builder previously cast `as u64`).
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod big_cell {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct BigCellState {
+        pub big: Cell<Uint<128>>,
+    }
+
+    impl BigCellState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                big: Cell::new(Uint::<128>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn set_big(&mut self) {
+            // 2^64 + 1: truncation through u64 would store 1.
+            self.big.set(18446744073709551617u128.into());
+        }
+    }
+}
+
+fn build_set_big_ir() -> midnight_zkir::IrSource {
+    use nocturne_codegen::zkir_emitter;
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod big_cell {
+            #[nocturne(ledger)]
+            pub struct BigCellState { pub big: Cell<Uint<128>> }
+            impl BigCellState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { big: Cell::new(Uint::<128>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn set_big(&mut self) {
+                    self.big.set(18446744073709551617u128.into());
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = zkir_emitter::emit_contract(&contract);
+    assert!(
+        output.errors.is_empty(),
+        "emission errors: {:?}",
+        output.errors
+    );
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "set_big")
+        .unwrap()
+        .ir_source
+}
+
+#[tokio::test]
+async fn cell_u128_literal_set_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+    use nocturne::runtime::transient_crypto::repr::FieldRepr;
+
+    let ir = build_set_big_ir();
+    let nocturne_transcript = big_cell::transcript::build_set_big_transcript();
+
+    // No witnesses: the literal lives in both the circuit (LoadImm) and
+    // the transcript (Push Cell(AlignedValue::from(u128))).
+    let preimage = canonical_preimage("set_big", nocturne_transcript.ops.clone(), vec![]);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, prove_pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    let (comm, _opening) = preimage
+        .communications_commitment
+        .expect("circuit must opt in to communications commitment");
+    let mut ledger_pis: Vec<Fr> = vec![preimage.binding_input, comm];
+    for op in &nocturne_transcript.ops {
+        op.field_repr(&mut ledger_pis);
+    }
+
+    // The full 2^64 + 1 value must appear in the PI stream — if either
+    // side truncated to u64, prove/verify would disagree.
+    let big = Fr::from(18446744073709551617u128);
+    assert!(
+        ledger_pis.contains(&big),
+        "transcript PIs must carry the untruncated 128-bit literal"
+    );
+
+    assert_eq!(
+        prove_pis, ledger_pis,
+        "prove's PIs must match the on-chain ledger-shape PIs for a u128 literal \
+         Cell::set"
+    );
+
+    vk.verify(&PARAMS_VERIFIER, &proof, ledger_pis.into_iter())
+        .expect("on-chain verify must succeed for Cell<Uint<128>>::set(u128 literal)");
+}
+
+// ---------------------------------------------------------------------------
+// Private-transcript emission parity (Task: transcript codegen derives all
+// private pushes from the canonical event walk; `private_transcript_outputs`
+// comes straight from the generated builder instead of being hand-rolled).
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod direct_arg {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct DirectArgState {
+        pub value: Cell<Uint<64>>,
+    }
+
+    // The circuit param is deliberately NOT named `witnesses`: the
+    // generated transcript builder must normalize its own parameter name
+    // (its body always references `witnesses.<field>`).
+    #[nocturne(witnesses)]
+    pub struct DirectArgWitnesses {
+        pub v: Uint<64>,
+    }
+
+    impl DirectArgState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                value: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn store(&mut self, my_witnesses: &DirectArgWitnesses) {
+            self.value.set(my_witnesses.v);
+        }
+    }
+}
+
+fn build_direct_arg_store_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod direct_arg {
+            #[nocturne(ledger)]
+            pub struct DirectArgState { pub value: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct DirectArgWitnesses { pub v: Uint<64> }
+            impl DirectArgState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { value: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn store(&mut self, my_witnesses: &DirectArgWitnesses) {
+                    self.value.set(my_witnesses.v);
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "store")
+        .unwrap()
+        .ir_source
+}
+
+/// A witness used DIRECTLY as a ledger-method argument
+/// (`self.value.set(witnesses.v)`) must push exactly one private-transcript
+/// entry — the shape the old per-occurrence push logic missed entirely.
+/// Uses the GENERATED `private_transcript_outputs` end to end (no
+/// hand-rolling), and a user-chosen witnesses param name (`my_witnesses`).
+#[tokio::test]
+async fn direct_arg_witness_set_proves_and_verifies_with_generated_private_transcript() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use midnight_zkir::Instruction;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_direct_arg_store_ir();
+    let witnesses = direct_arg::DirectArgWitnesses {
+        v: Uint::<64>::new(42),
+    };
+    let t = direct_arg::transcript::build_store_transcript(&witnesses);
+
+    // Builder/circuit parity: the generated private transcript must have
+    // exactly as many Frs as the circuit has PrivateInputs.
+    let private_input_count = ir
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::PrivateInput { .. }))
+        .count();
+    assert_eq!(
+        t.private_transcript.len(),
+        private_input_count,
+        "generated private_transcript length must match the circuit's PrivateInput count"
+    );
+    assert_eq!(
+        t.private_transcript_outputs.len(),
+        1,
+        "one AlignedValue per witness invocation"
+    );
+
+    let preimage = canonical_preimage("store", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("direct-arg witness set must prove+verify with the generated private transcript");
+}
+
+#[nocturne::contract]
+mod cond_flag {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct CondFlagState {
+        pub flag_cell: Cell<Boolean>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct CondFlagWitnesses {
+        pub flag: Boolean,
+    }
+
+    impl CondFlagState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                flag_cell: Cell::new(Boolean::from(false)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn maybe_store(&mut self, witnesses: &CondFlagWitnesses) {
+            if witnesses.flag.value() {
+                self.flag_cell.set(witnesses.flag);
+            }
+        }
+    }
+}
+
+fn build_cond_flag_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod cond_flag {
+            #[nocturne(ledger)]
+            pub struct CondFlagState { pub flag_cell: Cell<Boolean> }
+            #[nocturne(witnesses)]
+            pub struct CondFlagWitnesses { pub flag: Boolean }
+            impl CondFlagState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { flag_cell: Cell::new(Boolean::from(false)) } }
+                #[nocturne(circuit)]
+                pub fn maybe_store(&mut self, witnesses: &CondFlagWitnesses) {
+                    if witnesses.flag.value() {
+                        self.flag_cell.set(witnesses.flag);
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "maybe_store")
+        .unwrap()
+        .ir_source
+}
+
+/// The exact shape from the review finding: the same witness field in the
+/// `if` condition (unguarded first touch, cached) AND in the branch body
+/// (cache hit). The old builder pushed per syntactic occurrence
+/// (double-push); the event-walk builder pushes exactly once, matching the
+/// circuit's single PrivateInput. Proves+verifies with the generated
+/// private transcript for both branch outcomes.
+#[tokio::test]
+async fn cond_flag_same_field_in_cond_and_body_pushes_once_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use midnight_zkir::Instruction;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_cond_flag_ir();
+    let private_input_count = ir
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::PrivateInput { .. }))
+        .count();
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    for flag in [true, false] {
+        let witnesses = cond_flag::CondFlagWitnesses {
+            flag: Boolean::from(flag),
+        };
+        let t = cond_flag::transcript::build_maybe_store_transcript(&witnesses);
+
+        assert_eq!(
+            t.private_transcript.len(),
+            private_input_count,
+            "flag={flag}: generated private_transcript must match the circuit's \
+             PrivateInput count (the field pushes ONCE — at the condition's \
+             unguarded first touch — not per occurrence)"
+        );
+
+        let preimage = canonical_preimage("maybe_store", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (flag={flag}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (flag={flag}): {e}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lowering completeness: let-bound lookup values, assert-with-state, and
+// Cell<Boolean> reads in `if` conditions.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod lookup_bind {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct LookupBindState {
+        pub scores: Map<Uint<64>, Uint<64>>,
+        pub total: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct LookupBindWitnesses {
+        pub k: Uint<64>,
+    }
+
+    impl LookupBindState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                scores: Map::empty(),
+                total: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn copy_score(&mut self, witnesses: &LookupBindWitnesses) {
+            let v = self.scores.lookup(&witnesses.k);
+            self.total.set(v);
+        }
+    }
+}
+
+fn build_lookup_bind_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod lookup_bind {
+            #[nocturne(ledger)]
+            pub struct LookupBindState {
+                pub scores: Map<Uint<64>, Uint<64>>,
+                pub total: Cell<Uint<64>>,
+            }
+            #[nocturne(witnesses)]
+            pub struct LookupBindWitnesses { pub k: Uint<64> }
+            impl LookupBindState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self { scores: Map::empty(), total: Cell::new(Uint::<64>::from(0u64)) }
+                }
+                #[nocturne(circuit)]
+                pub fn copy_score(&mut self, witnesses: &LookupBindWitnesses) {
+                    let v = self.scores.lookup(&witnesses.k);
+                    self.total.set(v);
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "copy_score")
+        .unwrap()
+        .ir_source
+}
+
+/// `let v = self.map.lookup(&k); self.total.set(v);` — the bound value
+/// must be the real looked-up value (consumed in a typed position), not
+/// `()` from the block-wrapped op emission. This is the canonical
+/// `if let Some(v) = map.get(&k)` sugar's binding shape.
+#[tokio::test]
+async fn let_bound_lookup_value_consumed_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_lookup_bind_ir();
+    let mut state = lookup_bind::LookupBindState::new();
+    state.scores.insert(Uint::<64>::new(7), Uint::<64>::new(99));
+    let witnesses = lookup_bind::LookupBindWitnesses {
+        k: Uint::<64>::new(7),
+    };
+    let t = lookup_bind::transcript::build_copy_score_transcript(&state, &witnesses);
+
+    let preimage = canonical_preimage("copy_score", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("let-bound lookup consumed in a typed position must prove+verify");
+}
+
+#[nocturne::contract]
+mod assert_member {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct AssertMemberState {
+        pub allowed: Set<Uint<64>>,
+        pub hits: Counter,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct AssertMemberWitnesses {
+        pub k: Uint<64>,
+    }
+
+    impl AssertMemberState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                allowed: Set::empty(),
+                hits: Counter::zero(),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn gated_bump(&mut self, witnesses: &AssertMemberWitnesses) {
+            assert!(self.allowed.contains(&witnesses.k));
+            self.hits.increment();
+        }
+    }
+}
+
+fn build_assert_member_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod assert_member {
+            #[nocturne(ledger)]
+            pub struct AssertMemberState {
+                pub allowed: Set<Uint<64>>,
+                pub hits: Counter,
+            }
+            #[nocturne(witnesses)]
+            pub struct AssertMemberWitnesses { pub k: Uint<64> }
+            impl AssertMemberState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self { allowed: Set::empty(), hits: Counter::zero() }
+                }
+                #[nocturne(circuit)]
+                pub fn gated_bump(&mut self, witnesses: &AssertMemberWitnesses) {
+                    assert!(self.allowed.contains(&witnesses.k));
+                    self.hits.increment();
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "gated_bump")
+        .unwrap()
+        .ir_source
+}
+
+/// `assert!(self.allowed.contains(&witnesses.k))` — the assert condition
+/// carries a state-baked ledger read, so the generated builder must take
+/// the `state` param (expr_needs_state's Assert arm) and the contains
+/// ops/pushes must land exactly once.
+#[tokio::test]
+async fn assert_contains_with_state_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_assert_member_ir();
+    let mut state = assert_member::AssertMemberState::new();
+    state.allowed.insert(Uint::<64>::new(42));
+    let witnesses = assert_member::AssertMemberWitnesses {
+        k: Uint::<64>::new(42),
+    };
+    let t = assert_member::transcript::build_gated_bump_transcript(&state, &witnesses);
+
+    let preimage = canonical_preimage("gated_bump", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("assert!(contains) circuit must prove+verify");
+}
+
+// ---------------------------------------------------------------------------
+// Branch-body private-push PLACEMENT. The transcript builder must emit a
+// branch body's witness pushes INSIDE the runtime `if` (the circuit's
+// PrivateInput for the branch is guarded, so the zkir VM skips its
+// transcript slot on the inactive path — see
+// memories/conditional-io-guards.md). If the builder hoisted branch-body
+// pushes out of the runtime `if`, the INACTIVE case below would push an
+// entry the circuit never consumes and prove would fail with
+// "Transcripts not fully consumed".
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod branch_witness_call {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct BranchCallState {
+        pub stored: Cell<Uint<64>>,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct BranchCallWitnesses {
+        pub flag: Boolean,
+    }
+
+    impl BranchCallWitnesses {
+        pub fn secret(&self) -> Uint<64> {
+            Uint::<64>::from(99u64)
+        }
+    }
+
+    impl BranchCallState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                stored: Cell::new(Uint::<64>::from(0u64)),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn gated_store(&mut self, witnesses: &BranchCallWitnesses) {
+            if witnesses.flag.value() {
+                self.stored.set(witnesses.secret());
+            }
+        }
+    }
+}
+
+fn build_branch_witness_call_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod branch_witness_call {
+            #[nocturne(ledger)]
+            pub struct BranchCallState { pub stored: Cell<Uint<64>> }
+            #[nocturne(witnesses)]
+            pub struct BranchCallWitnesses { pub flag: Boolean }
+            impl BranchCallWitnesses {
+                pub fn secret(&self) -> Uint<64> { Uint::<64>::from(99u64) }
+            }
+            impl BranchCallState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { stored: Cell::new(Uint::<64>::from(0u64)) } }
+                #[nocturne(circuit)]
+                pub fn gated_store(&mut self, witnesses: &BranchCallWitnesses) {
+                    if witnesses.flag.value() {
+                        self.stored.set(witnesses.secret());
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "gated_store")
+        .unwrap()
+        .ir_source
+}
+
+/// A parametric witness CALL inside a conditional branch, with the branch
+/// INACTIVE (flag=false): the generated builder must push only the cond's
+/// flag entry, not the branch body's `witnesses.secret()` entry. This is
+/// the placement-sensitive case — it fails if branch-body pushes move
+/// outside the runtime `if`. The active case is proven too so both
+/// transcript shapes verify against the same vk.
+#[tokio::test]
+async fn witness_call_in_inactive_branch_proves_and_verifies_with_generated_outputs() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_branch_witness_call_ir();
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    // false FIRST: the inactive branch is the case that catches a
+    // misplaced (unconditionally emitted) branch-body push.
+    for flag in [false, true] {
+        let witnesses = branch_witness_call::BranchCallWitnesses {
+            flag: Boolean::from(flag),
+        };
+        let t = branch_witness_call::transcript::build_gated_store_transcript(&witnesses);
+
+        let expected_outputs = if flag { 2 } else { 1 };
+        assert_eq!(
+            t.private_transcript_outputs.len(),
+            expected_outputs,
+            "flag={flag}: the branch body's witness-call push must fire only \
+             when the branch is active (cond flag push is unconditional)"
+        );
+
+        let preimage = canonical_preimage("gated_store", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (flag={flag}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (flag={flag}): {e}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Keyed-container key bind-once (commit 3668e51): a parametric witness
+// call used as a Map key must be evaluated exactly once per contains
+// block (the op's Push AlignedValue derives from the bound `__key`).
+// The token-level shape is asserted in nocturne-codegen's
+// `map_contains_key_binds_once_and_push_derives_from_key`; this is the
+// end-to-end prove+verify of the same shape with the GENERATED outputs.
+// ---------------------------------------------------------------------------
+
+#[nocturne::contract]
+mod map_witness_key {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct MapKeyState {
+        pub scores: Map<Uint<64>, Uint<64>>,
+        pub hits: Counter,
+    }
+
+    #[nocturne(witnesses)]
+    pub struct MapKeyWitnesses;
+
+    impl MapKeyWitnesses {
+        pub fn pick(&self) -> Uint<64> {
+            Uint::<64>::from(7u64)
+        }
+    }
+
+    impl MapKeyState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                scores: Map::empty(),
+                hits: Counter::zero(),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn gate(&mut self, witnesses: &MapKeyWitnesses) {
+            if self.scores.contains(&witnesses.pick()) {
+                self.hits.increment();
+            }
+        }
+    }
+}
+
+fn build_map_witness_key_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod map_witness_key {
+            #[nocturne(ledger)]
+            pub struct MapKeyState {
+                pub scores: Map<Uint<64>, Uint<64>>,
+                pub hits: Counter,
+            }
+            #[nocturne(witnesses)]
+            pub struct MapKeyWitnesses;
+            impl MapKeyWitnesses {
+                pub fn pick(&self) -> Uint<64> { Uint::<64>::from(7u64) }
+            }
+            impl MapKeyState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self { Self { scores: Map::empty(), hits: Counter::zero() } }
+                #[nocturne(circuit)]
+                pub fn gate(&mut self, witnesses: &MapKeyWitnesses) {
+                    if self.scores.contains(&witnesses.pick()) {
+                        self.hits.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "gate")
+        .unwrap()
+        .ir_source
+}
+
+/// A witness METHOD as a Map key: `self.scores.contains(&witnesses.pick())`
+/// in cond position. Proves+verifies with the generated outputs for both
+/// the key-present and key-absent states.
+#[tokio::test]
+async fn witness_method_map_key_proves_and_verifies_with_generated_outputs() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_map_witness_key_ir();
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    for present in [true, false] {
+        let mut state = map_witness_key::MapKeyState::new();
+        if present {
+            state.scores.insert(Uint::<64>::new(7), Uint::<64>::new(1));
+        }
+        let witnesses = map_witness_key::MapKeyWitnesses;
+        let t = map_witness_key::transcript::build_gate_transcript(&state, &witnesses);
+
+        // One witness invocation per contains block: the bound __key.
+        // A key re-evaluation bug wouldn't change this count (the value
+        // is deterministic) but the prove below pins the full shape.
+        assert_eq!(
+            t.private_transcript_outputs.len(),
+            1,
+            "present={present}: exactly one private push for the witness-call key"
+        );
+
+        let preimage = canonical_preimage("gate", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (present={present}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (present={present}): {e}"));
+    }
+}
+
+/// A `Bytes<32>` witness (multi-Fr: 2 private_transcript Frs from one
+/// AlignedValue) flowing into `Cell<Bytes<32>>::set`, proved with the
+/// GENERATED `private_transcript_outputs` (the older
+/// `cell_bytes32_set_proves_and_verifies` hand-rolls them).
+#[tokio::test]
+async fn bytes32_witness_set_proves_and_verifies_with_generated_outputs() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use midnight_zkir::Instruction;
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_rotate_digest_ir();
+    let witnesses = bytes_cell::BytesCellWitnesses {
+        new_digest: Bytes::<32>::from([0x55u8; 32]),
+    };
+    let t = bytes_cell::transcript::build_rotate_digest_transcript(&witnesses);
+
+    // One AlignedValue per witness invocation; its value_only_field_repr
+    // flattening must match the circuit's PrivateInput count (2 Frs for
+    // Bytes<32>).
+    let private_input_count = ir
+        .instructions
+        .iter()
+        .filter(|i| matches!(i, Instruction::PrivateInput { .. }))
+        .count();
+    assert_eq!(
+        t.private_transcript_outputs.len(),
+        1,
+        "one AlignedValue for the Bytes<32> witness"
+    );
+    assert_eq!(
+        t.private_transcript.len(),
+        private_input_count,
+        "generated private_transcript must carry one Fr per circuit PrivateInput \
+         (multi-Fr Bytes<32> flattening)"
+    );
+
+    let preimage = canonical_preimage("rotate_digest", t.ops, t.private_transcript_outputs);
+
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+    let rng = rand::thread_rng();
+    let (proof, pis, _skips) = ir.prove(rng, &pp, pk, &preimage).await.expect("prove");
+
+    vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+        .expect("Bytes<32> witness set must prove+verify with the generated outputs");
+}
+
+#[nocturne::contract]
+mod pausable {
+    use super::*;
+
+    #[nocturne(ledger)]
+    pub struct PausableState {
+        pub paused: Cell<Boolean>,
+        pub count: Counter,
+    }
+
+    impl PausableState {
+        #[nocturne(constructor)]
+        pub fn new() -> Self {
+            Self {
+                paused: Cell::new(Boolean::from(true)),
+                count: Counter::zero(),
+            }
+        }
+
+        #[nocturne(circuit)]
+        pub fn tick(&mut self) {
+            if self.paused.get().value() {
+                self.count.increment();
+            }
+        }
+    }
+}
+
+fn build_pausable_tick_ir() -> midnight_zkir::IrSource {
+    let module: syn::ItemMod = syn::parse_quote! {
+        mod pausable {
+            #[nocturne(ledger)]
+            pub struct PausableState {
+                pub paused: Cell<Boolean>,
+                pub count: Counter,
+            }
+            impl PausableState {
+                #[nocturne(constructor)]
+                pub fn new() -> Self {
+                    Self { paused: Cell::new(Boolean::from(true)), count: Counter::zero() }
+                }
+                #[nocturne(circuit)]
+                pub fn tick(&mut self) {
+                    if self.paused.get().value() {
+                        self.count.increment();
+                    }
+                }
+            }
+        }
+    };
+    let contract = nocturne_ir::parse_contract(module).expect("parse");
+    let output = nocturne_codegen::zkir_emitter::emit_contract(&contract);
+    assert!(output.errors.is_empty(), "emit errors: {:?}", output.errors);
+    output
+        .circuits
+        .into_iter()
+        .find(|c| c.circuit_name == "tick")
+        .unwrap()
+        .ir_source
+}
+
+/// `if self.paused.get() { ... }` on a `Cell<Boolean>` — the condition is
+/// a state-baked Dup+Idx+Popeq block (mirroring contains-in-cond), not a
+/// compile_error. Proves+verifies on both branch outcomes.
+#[tokio::test]
+async fn cell_boolean_condition_proves_and_verifies() {
+    use midnight_base_crypto::data_provider::{FetchMode, MidnightDataProvider, OutputMode};
+    use nocturne::runtime::transient_crypto::proofs::PARAMS_VERIFIER;
+
+    let ir = build_pausable_tick_ir();
+    let pp = MidnightDataProvider::new(FetchMode::OnDemand, OutputMode::Log, vec![])
+        .expect("data provider");
+    let (pk, vk) = ir.keygen(&pp).await.expect("keygen");
+
+    for paused in [true, false] {
+        let mut state = pausable::PausableState::new();
+        state.paused.set(Boolean::from(paused));
+        let t = pausable::transcript::build_tick_transcript(&state);
+
+        let preimage = canonical_preimage("tick", t.ops, t.private_transcript_outputs);
+        let rng = rand::thread_rng();
+        let (proof, pis, _skips) = ir
+            .prove(rng, &pp, pk.clone(), &preimage)
+            .await
+            .unwrap_or_else(|e| panic!("prove (paused={paused}): {e}"));
+        vk.verify(&PARAMS_VERIFIER, &proof, pis.into_iter())
+            .unwrap_or_else(|e| panic!("verify (paused={paused}): {e}"));
+    }
 }

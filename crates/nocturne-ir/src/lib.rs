@@ -12,6 +12,6 @@ mod parse;
 mod parse_tests;
 
 pub use contract::*;
-pub use error::{MidnightError, MidnightResult};
+pub use error::{Diagnostics, MidnightError, MidnightResult};
 pub use expr::ExprIR;
 pub use parse::parse_contract;

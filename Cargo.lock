@@ -201,6 +201,7 @@ dependencies = [
  "midnight-transient-crypto",
  "midnight-zkir",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -1794,25 +1795,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nocturne-e2e"
-version = "0.1.0"
-
-[[package]]
-name = "nocturne-engine"
-version = "0.1.0"
-dependencies = [
- "nocturne-storage",
- "nocturne-types",
-]
-
-[[package]]
-name = "nocturne-env"
-version = "0.1.0"
-dependencies = [
- "nocturne-types",
-]
-
-[[package]]
 name = "nocturne-ir"
 version = "0.1.0"
 dependencies = [
@@ -1844,14 +1826,6 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "nocturne-primitives"
-version = "0.1.0"
-dependencies = [
- "midnight-base-crypto",
- "midnight-transient-crypto",
 ]
 
 [[package]]

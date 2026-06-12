@@ -21,8 +21,36 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     match nocturne_ir::parse_contract(module.clone()) {
         Ok(contract_ir) => {
-            // Generate all artifacts (ZKIR, VM, metadata).
-            let artifacts = nocturne_codegen::codegen::generate_artifacts(&contract_ir);
+            // Generate all artifacts (ZKIR, VM, metadata). Circuit
+            // emission errors are hard compile errors — NOT warnings:
+            // a silently incomplete circuit can verify proofs that
+            // enforce less than the contract source says.
+            let artifacts = match nocturne_codegen::codegen::generate_artifacts(&contract_ir) {
+                Ok(artifacts) => artifacts,
+                Err(errors) => {
+                    // The emitter can record the same message more than
+                    // once for a single construct (e.g. the return-
+                    // position check). Each `compile_error!` is one
+                    // diagnostic, so dedup here — keeping first-
+                    // occurrence order — to surface each distinct
+                    // message exactly once.
+                    let mut seen = std::collections::HashSet::new();
+                    let error_tokens: Vec<proc_macro2::TokenStream> = errors
+                        .iter()
+                        .filter(|msg| seen.insert(msg.as_str()))
+                        .map(|msg| {
+                            let msg = format!("nocturne: {msg}");
+                            quote::quote! { compile_error!(#msg); }
+                        })
+                        .collect();
+                    let cleaned = strip_midnight_attrs_from_module(module);
+                    return quote::quote! {
+                        #cleaned
+                        #(#error_tokens)*
+                    }
+                    .into();
+                }
+            };
 
             // Write artifacts to the target/nocturne/ directory.
             let contract_name = contract_ir.name.to_string();
@@ -66,19 +94,26 @@ pub fn contract(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
             .into()
         }
-        Err(e) => {
-            let error = e.to_compile_error();
+        Err(diagnostics) => {
+            // Emit EVERY collected diagnostic, not just the first —
+            // the user fixes all of them in one build instead of
+            // playing whack-a-mole.
+            let errors = diagnostics.to_compile_errors();
             let cleaned = strip_midnight_attrs_from_module(module);
             let output = quote::quote! {
                 #cleaned
-                #error
+                #errors
             };
             output.into()
         }
     }
 }
 
-/// Sets up a simulated Midnight environment for unit testing.
+/// Marks a contract test function.
+///
+/// Currently equivalent to `#[test]` — it adds no behavior of its own.
+/// Reserved for future environment setup (e.g. wiring up a simulated
+/// Midnight ledger before the test body runs).
 #[proc_macro_attribute]
 pub fn test(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let item: proc_macro2::TokenStream = item.into();
@@ -142,25 +177,45 @@ fn is_midnight_attr(attr: &syn::Attribute) -> bool {
     attr.path().is_ident("nocturne")
 }
 
+/// `target/nocturne/<crate>/<contract>/` — keyed by `CARGO_CRATE_NAME`
+/// *and* the contract module name. The crate level matters: every
+/// compilation target gets a distinct `CARGO_CRATE_NAME` (integration
+/// tests get the test file's name), so seven test crates that all
+/// define `mod counter` with different circuit sets no longer clobber
+/// each other's artifacts during parallel compilation.
 fn find_artifact_dir(contract_name: &str) -> std::path::PathBuf {
     // Try CARGO_TARGET_DIR, then OUT_DIR, then default to ./target.
+    // The bare-"target" fallback is relative, so it resolves against
+    // rustc's CWD — under cargo that's the workspace root, which is
+    // where ./target lives.
     let target = std::env::var("CARGO_TARGET_DIR")
-        .or_else(|_| {
-            std::env::var("OUT_DIR").map(|d| {
-                // OUT_DIR is like target/debug/build/<crate>/out -- walk up to target/
-                let p = std::path::PathBuf::from(d);
-                p.ancestors()
-                    .nth(4)
-                    .unwrap_or(&p)
-                    .to_path_buf()
-                    .to_string_lossy()
-                    .into_owned()
-            })
+        .ok()
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("OUT_DIR")
+                .ok()
+                .and_then(|d| workspace_target_from_out_dir(std::path::Path::new(&d)))
         })
-        .unwrap_or_else(|_| "target".to_string());
-    std::path::PathBuf::from(target)
-        .join("nocturne")
-        .join(contract_name)
+        .unwrap_or_else(|| std::path::PathBuf::from("target"));
+    let crate_name =
+        std::env::var("CARGO_CRATE_NAME").unwrap_or_else(|_| "unknown_crate".to_string());
+    target.join("nocturne").join(crate_name).join(contract_name)
+}
+
+/// Ascend from `OUT_DIR` (`<target>/<profile>/build/<crate>-<hash>/out`)
+/// to the enclosing cargo target directory. Structural, not a fixed
+/// `nth(4)` hop: a renamed target dir (`CARGO_TARGET_DIR=mytarget`) or
+/// a custom layout still resolves, because cargo drops a `CACHEDIR.TAG`
+/// marker at the target dir root. The name check is the fast path for
+/// the conventional `target/` name; the marker check covers the rest.
+fn workspace_target_from_out_dir(out_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    out_dir
+        .ancestors()
+        .find(|a| {
+            a.file_name().map(|n| n == "target").unwrap_or(false)
+                || a.join("CACHEDIR.TAG").is_file()
+        })
+        .map(std::path::Path::to_path_buf)
 }
 
 fn write_artifacts(
@@ -175,19 +230,44 @@ fn write_artifacts(
 
     // Write ZKIR circuits (one per circuit function).
     // IrSource::load() expects a "version" field, so we wrap the serialization.
+    let mut current_files = std::collections::HashSet::new();
     for circuit in &artifacts.zkir.circuits {
         let mut value = serde_json::to_value(&circuit.ir_source).map_err(std::io::Error::other)?;
         if let serde_json::Value::Object(ref mut map) = value {
+            let (major, minor) = nocturne_codegen::zkir_emitter::ZKIR_VERSION;
             map.insert(
                 "version".to_string(),
-                serde_json::json!({ "major": 2, "minor": 0 }),
+                serde_json::json!({ "major": major, "minor": minor }),
             );
         }
         let json = serde_json::to_string_pretty(&value).map_err(std::io::Error::other)?;
-        write_if_changed(
-            &zkir_dir.join(format!("{}.zkir", circuit.circuit_name)),
-            json.as_bytes(),
-        )?;
+        let file_name = format!("{}.zkir", circuit.circuit_name);
+        write_if_changed(&zkir_dir.join(&file_name), json.as_bytes())?;
+        current_files.insert(file_name);
+    }
+
+    // Prune orphans: a renamed or deleted circuit must not leave its
+    // old `.zkir` behind — `cargo nocturne keygen` walks the directory
+    // and would happily keygen a circuit that no longer exists. Also
+    // sweep `*.tmp<pid>` leftovers: a rustc that crashed between the
+    // `write` and `rename` in `write_if_changed` leaves its temp file
+    // behind forever otherwise. (A live concurrent writer's temp file
+    // could in principle be swept in the microseconds between its
+    // write and rename — the loser's rename fails, it prints the
+    // write-failure warning, and the next build rewrites the artifact.)
+    if let Ok(entries) = std::fs::read_dir(&zkir_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_orphan_zkir = name.ends_with(".zkir") && !current_files.contains(&name);
+            if (is_orphan_zkir || is_stale_tmp(&name))
+                && let Err(e) = std::fs::remove_file(entry.path())
+            {
+                eprintln!(
+                    "nocturne: warning: failed to remove stale artifact {}: {e}",
+                    entry.path().display()
+                );
+            }
+        }
     }
 
     // Write contract metadata.
@@ -199,17 +279,117 @@ fn write_artifacts(
     Ok(())
 }
 
+/// True for `write_if_changed` temp names (`<file>.tmp<pid>`). These
+/// only persist when a writer died between `write` and `rename` — our
+/// own temp files are always renamed away before the prune loop runs,
+/// so anything matching here is a leftover from a crashed process.
+fn is_stale_tmp(name: &str) -> bool {
+    let Some(idx) = name.rfind(".tmp") else {
+        return false;
+    };
+    let pid_suffix = &name[idx + ".tmp".len()..];
+    !pid_suffix.is_empty() && pid_suffix.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Write `content` to `path` only when the existing content differs.
 /// Stops the proc macro from touching `.zkir` and `contract-info.json`
 /// on every build — without this, downstream tools that key off file
 /// mtimes (e.g. `cargo nocturne build`'s "is this circuit's keygen
 /// stale?" check) would re-run on every invocation even when nothing
 /// actually changed.
+///
+/// The write itself is atomic: content goes to a temp file in the same
+/// directory and is `rename`d over the destination, so a reader never
+/// observes a half-written artifact even if two rustc processes race.
 fn write_if_changed(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
     if let Ok(existing) = std::fs::read(path)
         && existing == content
     {
         return Ok(());
     }
-    std::fs::write(path, content)
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("artifact path has no file name"))?
+        .to_string_lossy()
+        .into_owned();
+    // Pid suffix keeps concurrent writers (parallel rustc invocations)
+    // from stomping each other's temp file before the rename.
+    let tmp = path.with_file_name(format!("{file_name}.tmp{}", std::process::id()));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_stale_tmp, workspace_target_from_out_dir};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn out_dir_walk_finds_conventional_target_by_name() {
+        let out = Path::new("/ws/target/debug/build/my-crate-abc123/out");
+        assert_eq!(
+            workspace_target_from_out_dir(out),
+            Some(PathBuf::from("/ws/target"))
+        );
+    }
+
+    #[test]
+    fn out_dir_walk_handles_cross_compile_depth() {
+        // Cross-compiled OUT_DIR has an extra <triple> component:
+        // <target>/<triple>/<profile>/build/<crate>-<hash>/out. The
+        // old fixed `ancestors().nth(4)` hop lands on the <triple>
+        // dir here, so this fixture only passes with the structural
+        // walk — guard that the fixture actually discriminates.
+        let out = Path::new("/ws/target/aarch64-unknown-linux-gnu/debug/build/my-crate-abc123/out");
+        assert_ne!(
+            out.ancestors().nth(4),
+            Some(Path::new("/ws/target")),
+            "fixture no longer discriminates against the old fixed-depth logic"
+        );
+        assert_eq!(
+            workspace_target_from_out_dir(out),
+            Some(PathBuf::from("/ws/target"))
+        );
+    }
+
+    #[test]
+    fn stale_tmp_matches_pid_suffixed_names_only() {
+        assert!(is_stale_tmp("increment.zkir.tmp12345"));
+        assert!(is_stale_tmp("contract-info.json.tmp7"));
+        // Real artifacts and near-misses must survive the sweep.
+        assert!(!is_stale_tmp("increment.zkir"));
+        assert!(!is_stale_tmp("increment.tmp")); // no pid digits
+        assert!(!is_stale_tmp("increment.tmpfile")); // non-digit suffix
+        assert!(!is_stale_tmp("increment.tmp12a")); // mixed suffix
+    }
+
+    #[test]
+    fn out_dir_walk_finds_renamed_target_via_cachedir_tag() {
+        // A renamed target dir has no "target" path component; the walk
+        // must fall back to cargo's CACHEDIR.TAG marker.
+        let root = std::env::temp_dir().join(format!(
+            "nocturne-macro-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let target = root.join("mytarget");
+        let out = target.join("debug/build/my-crate-abc123/out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55",
+        )
+        .unwrap();
+
+        assert_eq!(workspace_target_from_out_dir(&out), Some(target));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn out_dir_walk_returns_none_when_unrecognizable() {
+        assert_eq!(
+            workspace_target_from_out_dir(Path::new("/nonexistent/a/b/c")),
+            None
+        );
+    }
 }

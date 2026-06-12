@@ -71,6 +71,26 @@ ships, optimization passes have no stable target.
 
 **Unblocker**: midnight-zkir v3 release notes + upgrade guide.
 
+## Deploy-time encoding of constructor-populated Map/Set/Array
+
+**Status (2026-06-10)**: loud guard landed in `deploy_codegen.rs` —
+`initial_state` asserts `is_empty()` on every Map/Set/Array field after
+running the constructor, so constructor-inserted entries panic at
+deploy-state construction instead of being silently dropped.
+
+**Blocker**: the deploy codegen encodes Map/Set fields as
+`StateValue::Map(Default::default())` (and Array as an empty
+`StateValue::Array`) regardless of constructor contents. Encoding
+populated containers requires walking the runtime container and
+serializing each entry into the StateValue tree with the same K/V
+AlignedValue encoding the transcript side uses — doable, but it needs
+the shared `NocturneType` encoding refactor (see the review-fixes plan's
+deferred list) to avoid a fourth copy of the per-type encoding stack.
+
+**Unblocker**: the `NocturneType` resolved-type enum unifying the
+encoding stacks; then `initial_state` can fold container entries through
+one shared encoder.
+
 ## What's NOT a blocker (recently shipped)
 
 These were on prior "remaining items" lists and were resolved in-tree:

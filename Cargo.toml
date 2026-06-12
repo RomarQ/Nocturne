@@ -7,11 +7,7 @@ members = [
     "crates/nocturne-codegen",
     "crates/nocturne-types",
     "crates/nocturne-storage",
-    "crates/nocturne-env",
     "crates/nocturne-metadata",
-    "crates/nocturne-engine",
-    "crates/nocturne-e2e",
-    "crates/nocturne-primitives",
     "tools/cargo-nocturne",
     "examples/counter-contract",
     "examples/kitchen-sink",
@@ -22,6 +18,16 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/RomarQ/Nocturne"
 version = "0.1.0"
+# Bounded by the dependency tree (konst 0.4 requires 1.89.0); the
+# workspace itself needs 1.88+ for let-chains under edition 2024.
+rust-version = "1.89"
+
+# Mirrors CI's `-D warnings` posture so local builds fail where CI would.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
 
 [workspace.dependencies]
 # Internal crates.
@@ -31,11 +37,7 @@ nocturne-ir = { path = "crates/nocturne-ir", version = "0.1.0" }
 nocturne-codegen = { path = "crates/nocturne-codegen", version = "0.1.0" }
 nocturne-types = { path = "crates/nocturne-types", version = "0.1.0" }
 nocturne-storage = { path = "crates/nocturne-storage", version = "0.1.0" }
-nocturne-env = { path = "crates/nocturne-env", version = "0.1.0" }
 nocturne-metadata = { path = "crates/nocturne-metadata", version = "0.1.0" }
-nocturne-engine = { path = "crates/nocturne-engine", version = "0.1.0" }
-nocturne-e2e = { path = "crates/nocturne-e2e", version = "0.1.0" }
-nocturne-primitives = { path = "crates/nocturne-primitives", version = "0.1.0" }
 
 # Midnight ledger crates (from crates.io). With our internal storage
 # crate renamed to `nocturne-storage`, the upstream `midnight-storage`
@@ -62,3 +64,6 @@ serde_json = "1"
 
 # Misc
 thiserror = "2"
+anyhow = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+rand = "0.8"

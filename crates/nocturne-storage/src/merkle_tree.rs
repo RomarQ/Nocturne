@@ -64,6 +64,15 @@ impl<const HEIGHT: usize, T> MerkleTree<HEIGHT, T> {
     /// blank tree is already rehashed (no leaves), so `root()` works
     /// immediately.
     pub fn empty() -> Self {
+        // Compile-time bound check: the on-chain VM's BoundedMerkleTree
+        // only accepts heights 1..=32, and `insert`'s fullness check
+        // computes `1u64 << HEIGHT`.
+        const {
+            assert!(
+                HEIGHT >= 1 && HEIGHT <= 32,
+                "MerkleTree HEIGHT must be in 1..=32"
+            )
+        }
         let inner = upstream::MerkleTree::blank(HEIGHT as u8).rehash();
         Self {
             inner,
@@ -112,7 +121,13 @@ impl<const HEIGHT: usize, T: MerkleLeaf> MerkleTree<HEIGHT, T> {
     /// `&self`. The cost is O(n+h) per insert vs. O(1) amortized — fine
     /// for the small trees the test suite exercises and avoids interior
     /// mutability in the storage type.
+    ///
+    /// Panics when the tree is full (`2^HEIGHT` leaves already inserted).
     pub fn insert(&mut self, leaf: &T) {
+        assert!(
+            self.next_index < (1u64 << HEIGHT),
+            "MerkleTree<{HEIGHT}> is full (2^{HEIGHT} leaves)"
+        );
         let leaf_hash = upstream::leaf_hash(leaf.leaf_bytes());
         self.inner = self
             .inner
@@ -249,6 +264,32 @@ mod tests {
         let r2 = tree.root();
         assert_ne!(r1, r2, "inserting a second leaf must change the root");
         assert_eq!(tree.len(), 2);
+    }
+
+    #[test]
+    fn insert_up_to_capacity_succeeds() {
+        // HEIGHT = 1 means exactly 2 leaf slots.
+        let mut tree = MerkleTree::<1, [u8; 32]>::empty();
+        tree.insert(&[0x01u8; 32]);
+        tree.insert(&[0x02u8; 32]);
+        assert_eq!(tree.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "MerkleTree<1> is full (2^1 leaves)")]
+    fn insert_into_full_tree_panics() {
+        let mut tree = MerkleTree::<1, [u8; 32]>::empty();
+        tree.insert(&[0x01u8; 32]);
+        tree.insert(&[0x02u8; 32]);
+        tree.insert(&[0x03u8; 32]); // 2^1 = 2 slots; third insert must panic
+    }
+
+    #[test]
+    fn height_bounds_compile_for_valid_heights() {
+        // The const block in `empty()` must not fire for the boundary
+        // heights the on-chain VM accepts (1..=32).
+        let _ = MerkleTree::<1, [u8; 32]>::empty();
+        let _ = MerkleTree::<32, [u8; 32]>::empty();
     }
 
     #[test]

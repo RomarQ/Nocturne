@@ -1,7 +1,7 @@
 # `Cell::set` on-chain encoding — closed for typed primitives
 
 **Discovered**: 2026-05-18 (during Stage 0 of Map work)
-**Status**: closed for `Cell<bool>` and `Cell<UintN/u8..u128>` via the Push+Push+Ins pattern. Multi-Fr value types (`Bytes<N>`, `Field`, custom ADTs) still fall back to the legacy 2-declare emission.
+**Status** (updated 2026-06-11): closed for typed primitives (`Cell<bool>`, `Cell<UintN/u8..u128>`), `Bytes<N>` including multi-Fr (Push + Popeq), `Field` (see [[field-alignment-encoding]]), and `Map`/`Set` ops including multi-Fr `Bytes<N>` K/V. Custom ADTs (multi-field structs) remain on the non-compatible 2-declare fallback.
 
 ## What landed
 
@@ -120,11 +120,7 @@ lookup,remove}_proves_and_verifies` for `Map<Bytes<32>, Uint<64>>`.
 
 ## What still needs work
 
-1. **Custom ADTs**: structs with multiple typed fields fall back to 2-declare emission. They are NOT on-chain compatible. Multi-Fr `Bytes<N>` landed via Phase B (see below). `Cell<Field>` landed via [[field-alignment-encoding]] (Phase A of the MerkleTree staged plan).
-
-2. **Map::insert** (next stage): reuses the same Push pattern, twice — once for the K-typed key (so the generic `emit_push_cell` already covers it), once for the V-typed value. Just needs the dispatcher to route `insert` to the same emit path with K, V types resolved from the `Map<K, V>` field type. See `map-ledger-field-encoding.md`.
-
-3. **Map::remove / Cell::clear**: uses `Rem` (0x19/0x1a) instead of `Ins`. Smaller surface area.
+1. **Custom ADTs**: structs with multiple typed fields fall back to 2-declare emission. They are NOT on-chain compatible. Everything else listed in the original gap has landed: multi-Fr `Bytes<N>`, `Cell<Field>` ([[field-alignment-encoding]]), and all four Map primitives including insert/remove (`map-ledger-field-encoding.md`).
 
 ## Files
 

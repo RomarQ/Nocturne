@@ -3,7 +3,7 @@
 `#[nocturne::contract]` produces three kinds of output, each consumed by a different downstream tool. This document describes what each file is for, how it's generated, what consumes it, and when you should expect it to change.
 
 ```
-target/nocturne/<contract_name>/
+target/nocturne/<crate_name>/<contract_name>/
 ├── zkir/
 │   └── <circuit_name>.zkir       # circuit definition (JSON)
 ├── keys/
@@ -13,6 +13,8 @@ target/nocturne/<contract_name>/
     └── contract-info.json        # contract metadata (JSON)
 ```
 
+`<crate_name>` is the `CARGO_CRATE_NAME` of the compilation target the macro expanded in (hyphens become underscores; an integration test target uses the test file's name). The extra level keeps two crates that both define a `mod counter` from clobbering each other's artifacts. For the counter example that's `target/nocturne/counter_contract/counter/`.
+
 There's a fourth kind of "artifact" that doesn't land on disk: the proc macro also injects `pub mod transcript { ... }` and `pub mod deploy { ... }` submodules into the user's contract module. Those are generated Rust, not files; covered at the bottom.
 
 ## `<circuit_name>.zkir` — circuit definition
@@ -21,7 +23,7 @@ JSON serialisation of `midnight_zkir::IrSource` plus a `version` wrapper. One fi
 
 **What it contains**: a stack-based instruction list (`load_imm`, `private_input`, `public_input`, `add`, `mul`, `cond_select`, `declare_pub_input`, …) that describes the Plonk constraint system for one circuit. Also `num_inputs` and `do_communications_commitment: true` (required for on-chain compatibility — see `memories/do-communications-commitment-required.md`).
 
-**Produced by**: the `#[nocturne::contract]` proc macro at compile time. Written via `write_if_changed`, so unchanged source leaves the file's mtime alone.
+**Produced by**: the `#[nocturne::contract]` proc macro at compile time. Written via `write_if_changed` (atomic temp-file + rename), so unchanged source leaves the file's mtime alone. Stale `.zkir` files from renamed or deleted circuits are pruned on the next macro expansion.
 
 **Consumed by**:
 - `cargo nocturne keygen` — calls `IrSource::load()` then `IrSource::keygen()` to derive prover/verifier keys.
@@ -90,12 +92,21 @@ Human-readable JSON describing the contract's external surface. One file per con
     }
   ],
   "witnesses": [],
+  "ledger": [
+    {
+      "name": "count",
+      "index": 0,
+      "exported": true,
+      "type": { "type-name": "Counter" }
+    }
+  ],
   "contracts": []
 }
 ```
 
 - `circuits[]` — one entry per `#[nocturne(circuit)]`. `pure` is `false` for state-mutating circuits (`&mut self`), `true` for read-only (`&self`). `proof: true` means a ZK proof is required to invoke (the default; the false case is reserved for future "no-proof" circuit shapes).
-- `witnesses[]` — declared witness parameter types per circuit. Used by code generators to produce client-side types that match the prover's expected layout.
+- `witnesses[]` — declared witness fields and parametric witness methods, named with a `private$` prefix (`private$voter_secret`). Used by code generators to produce client-side types that match the prover's expected layout.
+- `ledger[]` — one entry per `#[nocturne(ledger)]` struct field, in declaration order. `index` is the field's slot index in the on-chain state array; `exported` tells downstream tools whether to advertise the field as queryable. Mark a field `#[nocturne(private)]` to set `exported: false`; the field still lives on-chain (all ledger state is public on Midnight), it's just dropped from the advertised query surface.
 - `contracts[]` — reserved for cross-contract call metadata.
 
 **Schema**: matches Compact's `contract-info.json` schema. The same downstream type generators, indexers, and deploy scripts that consume compactc output also work with Nocturne's. Compactc is the reference for the schema; this file deliberately mirrors it.

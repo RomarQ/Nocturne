@@ -54,7 +54,7 @@ The eDSL is plain Rust syntax. The following types are recognised in witness fie
 | `Boolean` | `Bytes<1>` | Conditions use `.value()` to unwrap to native `bool`. |
 | `Field` | one Fr (low 128 bits) | Field element, lossy for the full 254-bit range. |
 | `Uint<N>` for `N ≤ 128` | `Bytes<ceil(N/8)>` | Maps to `u8`/`u16`/`u32`/`u64`/`u128` for primitive casts. |
-| `Bytes<N>` for `N ≤ 32` | `Bytes<N>` | Fixed-size byte arrays. |
+| `Bytes<N>` | `Bytes<N>`, chunked into ceil(N/31) Frs when `N > 31` | Fixed-size byte arrays. Multi-Fr shapes (e.g. `Bytes<48>` Map keys, `Bytes<64>` Merkle leaves) are prove-tested. |
 | `Option<T>` | `(Bytes<1>, T)` | Same wire shape as Compact's `Maybe<T>`. `None` synthesises `T::default()` for the payload slot. |
 | `[T; N]` for `1 ≤ N ≤ 11` | N-tuple of `T` | Same wire shape as Compact's `Vector<N, T>`. Index reads (`arr[i]`) accept compile-time integer literals; use `for i in 0..N { ... arr[i] ... }` to unroll a const range to literal indices. |
 | `MerkleTreeDigest`, `MerkleTreePath<H, T>` | Field-aligned | See `memories/merkle-tree-encoding.md`. |
@@ -93,18 +93,18 @@ This runs `cargo build` (which fires the proc macro), lists the artifacts, and r
 
 ```
 Building contract...
-Contract 'counter':
+Contract 'counter_contract/counter':
   zkir/increment.zkir
   compiler/contract-info.json
 
-Artifacts at: ./target/nocturne/
+Artifacts at: /path/to/workspace/target/nocturne
 
 Generating keys for 1 circuit(s) with missing/stale prover/verifier files...
   Compiling circuit 'increment'...
-    → target/nocturne/counter/keys/increment.prover
-    → target/nocturne/counter/keys/increment.verifier
+    → target/nocturne/counter_contract/counter/keys/increment.prover
+    → target/nocturne/counter_contract/counter/keys/increment.verifier
     k=5, rows=24
-    Keys written to target/nocturne/counter/keys
+    Keys written to target/nocturne/counter_contract/counter/keys
 ```
 
 The keygen step is skipped on subsequent builds when nothing has changed — the proc macro writes ZKIR with `write_if_changed` semantics, so a contract whose source didn't change leaves its `.zkir` mtime untouched and its keys are considered up to date.
@@ -117,7 +117,7 @@ If `cargo nocturne build` reports "No contract artifacts found," the macro didn'
 ## 3. Inspect the artifacts
 
 ```
-target/nocturne/<contract_name>/
+target/nocturne/<crate_name>/<contract_name>/
 ├── zkir/
 │   └── <circuit_name>.zkir       # one per circuit function
 ├── compiler/
@@ -126,6 +126,8 @@ target/nocturne/<contract_name>/
     ├── <circuit_name>.prover
     └── <circuit_name>.verifier
 ```
+
+`<crate_name>` is the `CARGO_CRATE_NAME` of the crate the contract module lives in (hyphens become underscores), so the counter example lands at `target/nocturne/counter_contract/counter/`. Keying by crate *and* contract keeps two crates that define equally named contract modules from overwriting each other.
 
 `keys/` is empty until you run keygen — `cargo nocturne build` only emits `zkir/` and `compiler/`. The layout mirrors compactc's so downstream tooling sees the same shape from either compiler.
 
@@ -164,9 +166,11 @@ cargo nocturne keygen
 For every `.zkir` under `target/nocturne/`, this writes:
 
 ```
-target/nocturne/<contract_name>/keys/<circuit_name>.prover     # binary prover key
-target/nocturne/<contract_name>/keys/<circuit_name>.verifier   # binary verifier key
+target/nocturne/<crate_name>/<contract_name>/keys/<circuit_name>.prover     # binary prover key
+target/nocturne/<crate_name>/<contract_name>/keys/<circuit_name>.verifier   # binary verifier key
 ```
+
+Key pairs whose `.zkir` is gone (circuit renamed or deleted) are removed before keygen runs, so `keys/` always mirrors the current circuit set.
 
 The verifier key is what gets registered on-chain when you deploy. Keys are tagged with `midnight-serialize` so downstream tools recognise them.
 
@@ -210,10 +214,10 @@ cargo nocturne keygen        →  prover + verifier keys
 
 **"No contract artifacts found"** — The macro didn't fire. Run `cargo clean -p <crate>` and rebuild.
 
-**Artifacts in the wrong place** — `cargo nocturne` looks for `./target/nocturne/` relative to the current directory. Run from the workspace root, not from inside an example crate's directory.
+**Artifacts in the wrong place** — `cargo nocturne` resolves the target directory via `cargo metadata`, so it works from any directory inside the workspace (a member crate's directory included). If you're outside a cargo project entirely, it falls back to `CARGO_TARGET_DIR` and then `./target` relative to the current directory.
 
-**`Bytes::<32>::from_slice(...)` panics at deploy time** — `from_slice` zero-pads, so it never panics. If you're seeing a panic, the constructor body itself is panicking; check that the user types referenced in initializers (e.g. enum variants in `Cell::new(Status::Open)`) are imported into scope.
+**`Bytes::<32>::from_slice(...)` panics at deploy time** — `from_slice` debug-asserts that the slice is exactly `N` bytes, so a wrong-length slice panics in debug builds (release builds keep the historical truncate/zero-pad leniency). Pass an exact-length slice, pad explicitly, or use `Bytes::try_from_slice` when the length isn't statically known. If the length is right and you still see a panic, the constructor body itself is panicking; check that the user types referenced in initializers (e.g. enum variants in `Cell::new(Status::Open)`) are imported into scope.
 
 **ZKIR file is missing for a circuit you wrote** — Check that the method has `#[nocturne(circuit)]` (not `#[nocturne(query)]` — queries don't emit ZKIR, they're plain off-chain Rust).
 
-**`cargo nocturne` reports build success but no artifact path** — The macro write only fires when `OUT_DIR` is reachable from the workspace target. If you set a custom `CARGO_TARGET_DIR`, the artifacts land there; the tool walks both locations.
+**`cargo nocturne` reports build success but no artifact path** — The macro only re-runs when the contract crate actually recompiles; a fully cached build leaves a cleaned `target/nocturne/` empty. Run `cargo clean -p <crate>` to force a re-expansion. If you set a custom `CARGO_TARGET_DIR`, both the macro and the tool resolve it, so artifacts and lookup stay in sync.
