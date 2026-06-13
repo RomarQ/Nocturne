@@ -41,6 +41,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: make check
 
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Prebuilt cargo-audit binary; building it from source would dwarf the
+      # scan itself. `make audit` then checks Cargo.lock against the RustSec
+      # advisory database and fails on vulnerabilities (the unmaintained /
+      # soundness warnings on transitive deps we don't control are allowed).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: make audit
+
   test:
     name: Unit + integration tests
     runs-on: ubuntu-latest
