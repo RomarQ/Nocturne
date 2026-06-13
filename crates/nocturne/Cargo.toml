@@ -27,7 +27,10 @@ nocturne-codegen = { workspace = true }
 nocturne-ir = { workspace = true }
 nocturne-metadata = { workspace = true }
 midnight-base-crypto = { workspace = true }
-midnight-ledger = { workspace = true }
+# test-utilities pulls TestState / test_intents / assert_apply, used by
+# tests/ledger_apply_test.rs to apply deploy + call transactions to an
+# in-memory LedgerState.
+midnight-ledger = { workspace = true, features = ["test-utilities"] }
 midnight-onchain-runtime = { workspace = true }
 midnight-coin-structure = { workspace = true }
 midnight-storage = { workspace = true }
