@@ -31,6 +31,10 @@
 //! pi_skip guard:G count:4   // group marker
 //! ```
 
+use crate::nocturne_type::{
+    AlignedEncoding as AlignedValueEncoding, FR_BYTES_STORED, FrLayout, TypeCtx, bytes_n_layout,
+    resolve,
+};
 use crate::typing::{is_transparent_wrapper, parse_uint_type};
 use midnight_transient_crypto::curve::Fr;
 use midnight_zkir::{Instruction, IrSource};
@@ -2615,31 +2619,6 @@ impl ZkirEmitter {
     }
 }
 
-/// Encoding parameters for an `AlignedValue<T>` of a known Rust type.
-///
-/// Mirrors `AlignedValue::field_repr` (`transient-crypto/src/fab.rs:381`):
-/// alignment metadata first, then the value's field elements.
-///
-/// - `alignment_atoms`: the LoadImm-able sequence emitted for
-///   `alignment.field_repr` (`fab.rs:368-374`). For a single-atom alignment
-///   `[AlignmentSegment::Atom(AlignmentAtom::Bytes{N})]`, this is `[1, N]`
-///   (one segment, then the atom's encoded length).
-/// - `value_field_count`: number of `Fr` elements occupied by the value
-///   itself. Today we only encode single-Fr value types — multi-Fr
-///   (e.g., `Bytes<N>` for N giving > 1 Fr) is unsupported and falls
-///   through to the legacy emission.
-#[derive(Debug, Clone)]
-struct AlignedValueEncoding {
-    /// Each entry is a signed Fr atom (i32 in the IR, but materialized via
-    /// `Fr::from(i32)` which routes through `derive_signed!` to handle
-    /// negative atoms). Positive values are the segment count (1) and
-    /// `Bytes{N}` length; `-2` is the on-chain encoding of
-    /// `AlignmentAtom::Field` (`transient-crypto/src/fab.rs:605`).
-    /// `-1` would be `AlignmentAtom::Compress` but we don't use it yet.
-    alignment_atoms: Vec<i32>,
-    value_field_count: usize,
-}
-
 /// Encoding for `AlignedValue<Bytes<N>>`: alignment `[1, N]`, value width 1 Fr
 /// (callers must ensure `N * 8 ≤ 253` for the value to fit in one Fr).
 fn aligned_value_encoding_bytes(n: u32) -> AlignedValueEncoding {
@@ -2654,198 +2633,19 @@ fn aligned_value_encoding_bytes(n: u32) -> AlignedValueEncoding {
 /// Returns `None` for types not yet handled (multi-Fr value layouts like
 /// large `Bytes<N>`, custom ADTs). Callers fall back to the legacy
 /// 2-declare emission path.
+///
+/// Derives entirely from the shared `NocturneType` resolver: walk the
+/// `syn::Type` once, then compute the encoding from the resolved variant
+/// (`crate::nocturne_type::resolve` + `aligned_encoding`). The precedence
+/// (Option, enum, tuple, array, struct, primitives) and the `None` guards
+/// (Uint > 253, witness-only types) live in that one place so this and
+/// `witness_fr_layout` cannot drift on a composite type's Fr count.
 fn aligned_value_encoding(
     ty: &syn::Type,
     user_structs: &HashMap<String, Vec<nocturne_ir::UserStructField>>,
     user_enums: &HashMap<String, Vec<nocturne_ir::UserEnumVariant>>,
 ) -> Option<AlignedValueEncoding> {
-    // Stdlib `Option<T>` — same wire shape as a homogeneous-payload
-    // user enum: `(Bytes<1>, T)`. Mirrors upstream
-    // `impl<T: Aligned> Aligned for Option<T>` which concats
-    // `bool::alignment()` (= `Bytes<1>`) with T's alignment.
-    if let Some(payload_ty) = option_payload_type_zkir(ty) {
-        let inner = aligned_value_encoding(&payload_ty, user_structs, user_enums)?;
-        let mut atoms: Vec<i32> = vec![1 + (inner.alignment_atoms.len() as i32 - 1)];
-        atoms.push(1);
-        atoms.extend(inner.alignment_atoms.iter().skip(1));
-        return Some(AlignedValueEncoding {
-            alignment_atoms: atoms,
-            value_field_count: 1 + inner.value_field_count,
-        });
-    }
-    // User-defined enum:
-    //   - All-unit variants → `Bytes<1>` discriminant only.
-    //   - Homogeneous payload variants → `(Bytes<1>, T)` tuple composing
-    //     the discriminant atom with the shared payload type's atoms.
-    if let syn::Type::Path(tp) = ty
-        && tp.qself.is_none()
-        && let Some(seg) = tp.path.segments.last()
-        && let Some(variants) = user_enums.get(&seg.ident.to_string())
-    {
-        let payload = variants.first().and_then(|v| v.payload.clone());
-        match payload {
-            None => {
-                return Some(AlignedValueEncoding {
-                    alignment_atoms: vec![1, 1],
-                    value_field_count: 1,
-                });
-            }
-            Some(p) => {
-                // Compose `(Bytes<1>, T)` — the discriminant's lone atom
-                // followed by T's own atoms.
-                let inner = aligned_value_encoding(&p, user_structs, user_enums)?;
-                let mut atoms: Vec<i32> = vec![1 + (inner.alignment_atoms.len() as i32 - 1)];
-                atoms.push(1);
-                atoms.extend(inner.alignment_atoms.iter().skip(1));
-                return Some(AlignedValueEncoding {
-                    alignment_atoms: atoms,
-                    value_field_count: 1 + inner.value_field_count,
-                });
-            }
-        }
-    }
-    // Compose a flat encoding from an ordered list of component types,
-    // mirroring upstream `Aligned for (T1, ..., Tn)`. Shared between
-    // tuples and user structs (whose named fields layout identically).
-    let compose = |comps: &[syn::Type]| -> Option<AlignedValueEncoding> {
-        let mut atoms: Vec<i32> = Vec::new();
-        let mut count: usize = 0;
-        for elem in comps {
-            let inner = aligned_value_encoding(elem, user_structs, user_enums)?;
-            atoms.extend(inner.alignment_atoms.iter().skip(1));
-            count += inner.value_field_count;
-        }
-        let total = atoms.len() as i32;
-        let mut alignment_atoms = vec![total];
-        alignment_atoms.extend(atoms);
-        Some(AlignedValueEncoding {
-            alignment_atoms,
-            value_field_count: count,
-        })
-    };
-
-    if let syn::Type::Tuple(tt) = ty {
-        let comps: Vec<syn::Type> = tt.elems.iter().cloned().collect();
-        return compose(&comps);
-    }
-
-    // Fixed-size array `[T; N]`: equivalent to an N-tuple of T —
-    // upstream's tuple `Aligned` impl is what we rely on for the
-    // wire shape. The N-tuple cap (11 in `tuple_aligned!`) is what
-    // limits N here.
-    if let syn::Type::Array(arr) = ty
-        && let Some(n) = array_len_from_type(arr)
-    {
-        let comps: Vec<syn::Type> = std::iter::repeat_n((*arr.elem).clone(), n as usize).collect();
-        return compose(&comps);
-    }
-
-    // User-defined named struct: look up its fields and treat as a
-    // named tuple. Match by the outer ident on the type path; the rest
-    // of the path is ignored (this is intentional for now —
-    // `module::path::MyKey` and bare `MyKey` should both resolve when
-    // they refer to the same user struct in scope).
-    if let syn::Type::Path(tp) = ty
-        && tp.qself.is_none()
-        && let Some(seg) = tp.path.segments.last()
-        && let Some(fields) = user_structs.get(&seg.ident.to_string())
-    {
-        let comps: Vec<syn::Type> = fields.iter().map(|f| f.ty.clone()).collect();
-        return compose(&comps);
-    }
-
-    let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
-
-    // Boolean and bool: encoded as Bytes<1>.
-    if ty_str == "Boolean" || ty_str == "bool" {
-        return Some(AlignedValueEncoding {
-            alignment_atoms: vec![1, 1],
-            value_field_count: 1,
-        });
-    }
-
-    // Field: encoded with `AlignmentAtom::Field` (`-2` after field_repr).
-    // The value occupies a single Fr — no bit-width chunking.
-    //
-    // `MerkleTreeDigest` is a Field-aligned newtype (canonical 32-byte LE
-    // Fr backing); same encoding as `Field` from the on-chain VM's view.
-    if ty_str == "Field" || ty_str == "MerkleTreeDigest" {
-        return Some(AlignedValueEncoding {
-            alignment_atoms: vec![1, -2],
-            value_field_count: 1,
-        });
-    }
-
-    // Uint<N> and primitive integer types: encoded as Bytes<ceil(N/8)>.
-    // For N ≤ 64 the value fits in one Fr.
-    let int_bits = if ty_str == "u8" {
-        Some(8u32)
-    } else if ty_str == "u16" {
-        Some(16)
-    } else if ty_str == "u32" {
-        Some(32)
-    } else if ty_str == "u64" {
-        Some(64)
-    } else if ty_str == "u128" {
-        Some(128)
-    } else if let Some(n) = ty_str
-        .strip_prefix("Uint<")
-        .and_then(|s| s.strip_suffix('>'))
-    {
-        n.parse::<u32>().ok()
-    } else {
-        None
-    };
-    if let Some(bits) = int_bits {
-        let bytes = bits.div_ceil(8);
-        // The Fr field is ~253 bits — anything up to that fits in one Fr.
-        if bits > 0 && bits <= 253 {
-            return Some(AlignedValueEncoding {
-                alignment_atoms: vec![1, bytes as i32],
-                value_field_count: 1,
-            });
-        }
-    }
-
-    // Bytes<N>: alignment `[1, N]`, multi-Fr value when N > 31.
-    // `value_field_count = ceil(N / FR_BYTES_STORED)`. Compatible with
-    // single-Fr Bytes<N> (N ≤ 31) too.
-    if let Some(n) = ty_str
-        .strip_prefix("Bytes<")
-        .and_then(|s| s.strip_suffix('>'))
-        .and_then(|s| s.parse::<u32>().ok())
-        && n > 0
-    {
-        return Some(AlignedValueEncoding {
-            alignment_atoms: vec![1, n as i32],
-            value_field_count: n.div_ceil(FR_BYTES_STORED) as usize,
-        });
-    }
-
-    // Field: encoded as AlignmentAtom::Field (-2 in two's complement, but
-    // we don't yet support raw Field cells — needs the unsigned wraparound
-    // encoded into the LoadImm).
-    // Bytes<N>: similarly deferred until we add multi-Fr value emission.
-    None
-}
-
-/// Number of bytes that fit in a single Fr's field representation
-/// (must mirror `transient_crypto::curve::FR_BYTES_STORED` = `FR_BYTES - 1`).
-const FR_BYTES_STORED: u32 = 31;
-
-/// Per-Fr constraint kind for one PrivateInput in a witness's expansion.
-///
-/// Multi-Fr witnesses with non-uniform constraints (e.g.
-/// `MerkleTreePath<H, T>`) interleave these — bits for leaf bytes,
-/// nothing for sibling Fields, boolean for goes_left flags.
-#[derive(Debug, Clone, Copy)]
-enum FrLayout {
-    /// Apply `ConstrainBits { var, bits }`.
-    Bits(u32),
-    /// Apply `ConstrainToBoolean { var }`.
-    Boolean,
-    /// No constraint (native field element — `Field`, `MerkleTreeDigest`).
-    Field,
+    resolve(ty, &TypeCtx::new(user_structs, user_enums)).and_then(|t| t.aligned_encoding())
 }
 
 /// Per-Fr layout for a witness type, in the order PrivateInputs are
@@ -2878,85 +2678,20 @@ fn witness_fr_layout(
     user_structs: &HashMap<String, Vec<nocturne_ir::UserStructField>>,
     user_enums: &HashMap<String, Vec<nocturne_ir::UserEnumVariant>>,
 ) -> Vec<FrLayout> {
-    // Tuples concatenate their components' layouts in declaration order.
-    // Mirrors `Aligned for (T1, ..., Tn)` upstream
-    // (base-crypto/src/fab/alignments.rs:49-53), and lets `Map<(K1, K2), V>`
-    // work without bespoke per-shape code at every call site.
-    if let syn::Type::Tuple(tt) = ty {
-        let mut layout = Vec::new();
-        for elem in &tt.elems {
-            layout.extend(witness_fr_layout(elem, user_structs, user_enums));
-        }
-        return layout;
+    // Aligned-value types (tuples, arrays, structs, Option, enums, and
+    // the primitives) share their per-Fr layout with the on-chain
+    // encoding, so derive it from the same `NocturneType` resolver that
+    // drives `aligned_value_encoding`. `fr_layout().len()` equals the
+    // resolved type's `value_field_count` by construction (the H4
+    // invariant), so the two can no longer drift.
+    if let Some(t) = resolve(ty, &TypeCtx::new(user_structs, user_enums)) {
+        return t.fr_layout();
     }
 
-    // Fixed-size array `[T; N]`: same shape as `(T, T, …, T)` with N
-    // copies. The wire representation is contiguous; `ExprIR::Index`
-    // uses `array_first + i * len(T_layout)` to point at element i.
-    if let syn::Type::Array(arr) = ty
-        && let Some(n) = array_len_from_type(arr)
-    {
-        let elem_layout = witness_fr_layout(&arr.elem, user_structs, user_enums);
-        let mut layout = Vec::with_capacity(elem_layout.len() * n as usize);
-        for _ in 0..n {
-            layout.extend(elem_layout.iter().cloned());
-        }
-        return layout;
-    }
-
-    // User-defined struct: same shape as a tuple of its fields.
-    if let syn::Type::Path(tp) = ty
-        && tp.qself.is_none()
-        && let Some(seg) = tp.path.segments.last()
-        && let Some(fields) = user_structs.get(&seg.ident.to_string())
-    {
-        let mut layout = Vec::new();
-        for f in fields {
-            layout.extend(witness_fr_layout(&f.ty, user_structs, user_enums));
-        }
-        return layout;
-    }
-
-    // Stdlib `Option<T>`: same shape as a homogeneous-payload enum —
-    // 8-bit discriminant + T's own layout.
-    if let Some(payload_ty) = option_payload_type_zkir(ty) {
-        let mut layout = vec![FrLayout::Bits(8)];
-        layout.extend(witness_fr_layout(&payload_ty, user_structs, user_enums));
-        return layout;
-    }
-
-    // User-defined enum: discriminant is an 8-bit constrained
-    // PrivateInput, followed by the payload's own layout (empty for
-    // unit-only enums).
-    if let syn::Type::Path(tp) = ty
-        && tp.qself.is_none()
-        && let Some(seg) = tp.path.segments.last()
-        && let Some(variants) = user_enums.get(&seg.ident.to_string())
-    {
-        let mut layout = vec![FrLayout::Bits(8)];
-        if let Some(p) = variants.first().and_then(|v| v.payload.as_ref()) {
-            layout.extend(witness_fr_layout(p, user_structs, user_enums));
-        }
-        return layout;
-    }
-
+    // Witness-only types `resolve` deliberately does NOT cover (they
+    // never become an on-chain `AlignedValue`): the Merkle path shapes
+    // and the unknown-type fallback.
     let ty_str = quote::quote!(#ty).to_string().replace(' ', "");
-
-    if let Some(n) = parse_bytes_n_type(&ty_str) {
-        return bytes_n_layout(n);
-    }
-
-    if ty_str == "Boolean" || ty_str == "bool" {
-        return vec![FrLayout::Boolean];
-    }
-
-    if ty_str == "Field" || ty_str == "MerkleTreeDigest" {
-        return vec![FrLayout::Field];
-    }
-
-    if let Some(bits) = parse_uint_type(&ty_str) {
-        return vec![FrLayout::Bits(bits)];
-    }
 
     if let Some((h, t)) = parse_merkle_tree_path_type(&ty_str) {
         let mut layout = witness_fr_layout_for_leaf_type(&t);
@@ -2984,22 +2719,6 @@ fn witness_fr_layout_for_leaf_type(t_str: &str) -> Vec<FrLayout> {
     } else {
         vec![FrLayout::Field]
     }
-}
-
-fn bytes_n_layout(n: u32) -> Vec<FrLayout> {
-    let mut layout = Vec::new();
-    let chunks = n.div_ceil(FR_BYTES_STORED);
-    let first_bytes = n % FR_BYTES_STORED;
-    let first_bytes = if first_bytes == 0 {
-        FR_BYTES_STORED
-    } else {
-        first_bytes
-    };
-    layout.push(FrLayout::Bits(first_bytes * 8));
-    for _ in 1..chunks {
-        layout.push(FrLayout::Bits(FR_BYTES_STORED * 8));
-    }
-    layout
 }
 
 fn parse_bytes_n_type(ty_str: &str) -> Option<u32> {
@@ -3109,30 +2828,6 @@ fn is_counter_type(ty: &syn::Type) -> bool {
         return seg.ident == "Counter";
     }
     false
-}
-
-/// If `ty` is stdlib `Option<T>` (any path ending in `Option`), return
-/// `T`. The transcript codegen has the same helper; this one is local
-/// to avoid a cross-crate visibility shuffle for a single predicate.
-fn option_payload_type_zkir(ty: &syn::Type) -> Option<syn::Type> {
-    let syn::Type::Path(tp) = ty else { return None };
-    if tp.qself.is_some() {
-        return None;
-    }
-    let seg = tp.path.segments.last()?;
-    if seg.ident != "Option" {
-        return None;
-    }
-    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return None;
-    };
-    if args.args.len() != 1 {
-        return None;
-    }
-    match args.args.first()? {
-        syn::GenericArgument::Type(t) => Some(t.clone()),
-        _ => None,
-    }
 }
 
 /// Resolve the length `N` of a `[T; N]` type from its AST node.
