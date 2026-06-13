@@ -31,6 +31,9 @@
 //! pi_skip guard:G count:4   // group marker
 //! ```
 
+use crate::containers::{
+    extract_cell_inner_type, extract_map_kv_types, extract_merkle_tree_type, extract_set_inner_type,
+};
 use crate::nocturne_type::{
     AlignedEncoding as AlignedValueEncoding, FR_BYTES_STORED, FrLayout, TypeCtx, bytes_n_layout,
     resolve,
@@ -331,7 +334,7 @@ impl ZkirEmitter {
             // chasing `array`'s type and extracting `T` from `[T; N]`.
             ExprIR::Index { array, .. } => {
                 let arr_ty = self.infer_expr_type(array)?;
-                array_inner_type_and_len(&arr_ty).map(|(t, _)| t)
+                crate::containers::extract_array_type(&arr_ty).map(|(t, _)| t)
             }
             _ => None,
         }
@@ -1193,7 +1196,7 @@ impl ZkirEmitter {
                         );
                     }
                 };
-                let Some((elem_ty, len)) = array_inner_type_and_len(&arr_ty) else {
+                let Some((elem_ty, len)) = crate::containers::extract_array_type(&arr_ty) else {
                     return self.unsupported(format!(
                         "indexed expression has non-array type `{}`",
                         quote::quote!(#arr_ty)
@@ -2828,98 +2831,6 @@ fn is_counter_type(ty: &syn::Type) -> bool {
         return seg.ident == "Counter";
     }
     false
-}
-
-/// Resolve the length `N` of a `[T; N]` type from its AST node.
-/// Only integer-literal lengths are accepted; const-generic
-/// expressions (`[T; N]` where `N` is a const param) need a wider
-/// rewrite and aren't handled here.
-fn array_len_from_type(arr: &syn::TypeArray) -> Option<u32> {
-    let syn::Expr::Lit(lit) = &arr.len else {
-        return None;
-    };
-    let syn::Lit::Int(int) = &lit.lit else {
-        return None;
-    };
-    int.base10_parse::<u32>().ok()
-}
-
-/// If `ty` is `[T; N]`, return `(T, N)`.
-fn array_inner_type_and_len(ty: &syn::Type) -> Option<(syn::Type, u32)> {
-    if let syn::Type::Array(arr) = ty {
-        let n = array_len_from_type(arr)?;
-        return Some(((*arr.elem).clone(), n));
-    }
-    None
-}
-
-/// If `ty` is `Cell<T>`, return `T`. Otherwise `None`.
-fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "Cell"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return Some(inner.clone());
-    }
-    None
-}
-
-/// If `ty` is `MerkleTree<H, T>`, return `T` (the leaf type). The height
-/// `H` is encoded into the storage type's const generic and doesn't
-/// affect the IR emission — checkRoot's on-chain ops are independent of
-/// `H` because the height lives inside the upstream
-/// `BoundedMerkleTree` value itself. Returns `Some(_)` so callers know
-/// the field is a MerkleTree even when they don't need the leaf type.
-fn extract_merkle_tree_type(ty: &syn::Type) -> Option<syn::Type> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "MerkleTree"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-    {
-        // Skip the const-generic height; pick the first type-position arg.
-        for a in &args.args {
-            if let syn::GenericArgument::Type(t) = a {
-                return Some(t.clone());
-            }
-        }
-    }
-    None
-}
-
-/// If `ty` is `Set<T>`, return `T`. Otherwise `None`.
-fn extract_set_inner_type(ty: &syn::Type) -> Option<syn::Type> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "Set"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return Some(inner.clone());
-    }
-    None
-}
-
-/// If `ty` is `Map<K, V>`, return `(K, V)`. Otherwise `None`.
-fn extract_map_kv_types(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "Map"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-    {
-        let mut type_args = args.args.iter().filter_map(|a| {
-            if let syn::GenericArgument::Type(t) = a {
-                Some(t.clone())
-            } else {
-                None
-            }
-        });
-        let k = type_args.next()?;
-        let v = type_args.next()?;
-        return Some((k, v));
-    }
-    None
 }
 
 /// Drill through `ExprIR::Reference` wrappers to find the `WitnessAccess`

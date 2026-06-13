@@ -8,6 +8,10 @@
 //! - Converts witness values to `Fr` for the private transcript
 
 use crate::aligned::accessor_aligned_value_expr;
+use crate::containers::{
+    extract_array_type, extract_cell_inner_type, extract_map_kv_types, extract_merkle_tree_type,
+    extract_set_inner_type,
+};
 use crate::private_events::{FirstTouchTracker, PrivateEvent, walk_expr_events};
 use crate::typing::{is_transparent_wrapper, parse_uint_type, uint_max_value};
 use nocturne_ir::{CircuitIR, ContractIR, ExprIR, UserEnumVariant, UserStructField, WitnessIR};
@@ -2209,33 +2213,6 @@ fn is_counter_type(ty: &syn::Type) -> bool {
     false
 }
 
-/// If `ty` is `[T; N]`, return `(T, N)`. Used by array-aware emitters
-/// to walk fixed-size array payloads as N-tuples of T (which is the
-/// wire shape upstream's `Aligned for (T1, …, Tn)` produces).
-fn extract_array_type(ty: &syn::Type) -> Option<(syn::Type, u32)> {
-    if let syn::Type::Array(arr) = ty
-        && let syn::Expr::Lit(lit) = &arr.len
-        && let syn::Lit::Int(int) = &lit.lit
-        && let Ok(n) = int.base10_parse::<u32>()
-    {
-        return Some(((*arr.elem).clone(), n));
-    }
-    None
-}
-
-/// If `ty` is `Cell<T>`, return `T`. Mirrors `zkir_emitter::extract_cell_inner_type`.
-fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "Cell"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return Some(inner.clone());
-    }
-    None
-}
-
 /// Emit the runtime ops for `Set<T>::insert(k)`. Same shape as
 /// `Map::insert` except the value Push pushes `StateValue::Null` instead
 /// of `StateValue::Cell(value)` — see the IR-side `emit_set_insert` for
@@ -2419,37 +2396,6 @@ fn generate_merkle_tree_insert(field_idx: u8, args: &[ExprIR]) -> TokenStream {
     }
 }
 
-/// If `ty` is `MerkleTree<H, T>`, return `T`. Mirrors
-/// `zkir_emitter::extract_merkle_tree_type` — used to detect MerkleTree
-/// fields in the dispatcher.
-fn extract_merkle_tree_type(ty: &syn::Type) -> Option<syn::Type> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "MerkleTree"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-    {
-        for a in &args.args {
-            if let syn::GenericArgument::Type(t) = a {
-                return Some(t.clone());
-            }
-        }
-    }
-    None
-}
-
-/// If `ty` is `Set<T>`, return `T`. Mirrors `zkir_emitter::extract_set_inner_type`.
-fn extract_set_inner_type(ty: &syn::Type) -> Option<syn::Type> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "Set"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return Some(inner.clone());
-    }
-    None
-}
-
 /// Return the K type for any keyed ledger field (Map<K, V> → K, Set<T> → T).
 /// Used by the shared contains/member emission helper to choose the right
 /// AlignedValue alignment for the key Push.
@@ -2469,27 +2415,6 @@ fn extract_map_key_type(ty: &syn::Type) -> Option<syn::Type> {
                 return Some(t.clone());
             }
         }
-    }
-    None
-}
-
-/// If `ty` is `Map<K, V>`, return `(K, V)`.
-fn extract_map_kv_types(ty: &syn::Type) -> Option<(syn::Type, syn::Type)> {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last()
-        && seg.ident == "Map"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-    {
-        let mut type_args = args.args.iter().filter_map(|a| {
-            if let syn::GenericArgument::Type(t) = a {
-                Some(t.clone())
-            } else {
-                None
-            }
-        });
-        let k = type_args.next()?;
-        let v = type_args.next()?;
-        return Some((k, v));
     }
     None
 }
