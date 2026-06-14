@@ -13,6 +13,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::aligned::accessor_aligned_value_expr;
+use crate::containers::extract_cell_inner_type;
 
 /// Generate the deployment module for a contract.
 pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
@@ -165,25 +166,6 @@ pub fn generate_deploy_module(contract: &ContractIR) -> TokenStream {
                 StateValue::Array(fields.into_iter().collect())
             }
         }
-    }
-}
-
-/// Pull the `T` out of a `Cell<T>` field declaration. Returns None if
-/// the type isn't `Cell<...>`.
-fn extract_cell_inner_type(ty: &syn::Type) -> Option<syn::Type> {
-    let syn::Type::Path(tp) = ty else {
-        return None;
-    };
-    let seg = tp.path.segments.last()?;
-    if seg.ident != "Cell" {
-        return None;
-    }
-    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return None;
-    };
-    match args.args.first()? {
-        syn::GenericArgument::Type(t) => Some(t.clone()),
-        _ => None,
     }
 }
 
